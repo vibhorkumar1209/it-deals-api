@@ -106,7 +106,11 @@ async def fetch_type1_static(url: str) -> tuple[str, str] | None:
             return text, r.text
     except Exception as e:
         logger.warning(f"TYPE1 fetch failed {url}: {e}")
-        return None
+        # scrape.do fallback for static pages that block httpx
+        result = await fetch_via_scrapedo(url)
+        if result:
+            logger.info(f"TYPE1 scrape.do fallback success: {url}")
+        return result
 
 
 async def fetch_type2_js(url: str) -> tuple[str, str] | None:
@@ -167,6 +171,12 @@ async def fetch_type3_soft_paywall(url: str) -> tuple[str, str] | None:
                 return text, r.text
     except Exception:
         pass
+
+    # 4. scrape.do — JS render + paywall bypass last resort
+    result = await fetch_via_scrapedo(url)
+    if result:
+        logger.info(f"TYPE3 scrape.do success: {url}")
+        return result
 
     logger.warning(f"soft_paywall_blocked: {url}")
     return None
@@ -235,6 +245,14 @@ async def fetch_type6_bot_protected(url: str, proxy_pool: list[str] | None = Non
                 return soup.get_text(separator=" ", strip=True), r.text
         except Exception as e:
             logger.warning(f"TYPE6 browserless failed: {e}")
+
+    # scrape.do fallback — handles JS rendering + Cloudflare bypass
+    sd_key = os.getenv("SCRAPEDO_KEY")
+    if sd_key:
+        result = await fetch_via_scrapedo(url, sd_key)
+        if result:
+            logger.info(f"TYPE6 scrape.do success: {url}")
+            return result
 
     logger.warning(f"bot_protected_blocked: {url}")
     return None
@@ -360,6 +378,38 @@ def _extract_pdf_text(path: str) -> str:
     except Exception as e:
         logger.warning(f"PDF OCR failed: {e}")
         return ""
+
+
+async def fetch_via_scrapedo(url: str, token: str | None = None) -> tuple[str, str] | None:
+    """Fetch any URL via scrape.do — JS rendering + Cloudflare bypass."""
+    from urllib.parse import quote
+    key = token or os.getenv("SCRAPEDO_KEY", "")
+    if not key:
+        return None
+    scrape_url = f"https://api.scrape.do?token={key}&url={quote(url, safe='')}&render=true"
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            r = await client.get(scrape_url)
+            if r.status_code != 200:
+                logger.warning(f"scrape.do fetch {r.status_code} for {url}")
+                return None
+            soup = BeautifulSoup(r.text, "lxml")
+            body = (
+                soup.select_one("article")
+                or soup.select_one(".body-content")
+                or soup.select_one(".release-body")
+                or soup.select_one(".bw-release-story")
+                or soup.select_one(".article-body")
+                or soup.find("main")
+                or soup.find("body")
+            )
+            text = body.get_text(separator=" ", strip=True) if body else r.text
+            if len(text.split()) < 50:
+                return None
+            return text, r.text
+    except Exception as e:
+        logger.warning(f"scrape.do fetch failed for {url}: {e}")
+        return None
 
 
 async def _fetch_wayback(url: str) -> tuple[str, str] | None:

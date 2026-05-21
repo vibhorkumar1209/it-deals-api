@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
 SERPER_KEY = os.getenv("SERPER_KEY", "")
+SCRAPEDO_KEY = os.getenv("SCRAPEDO_KEY", "")
 
 QUERY_TEMPLATES = [
     '"{company}" IT deal signed {year}',
@@ -100,6 +101,36 @@ async def _google_search_fallback(query: str) -> list[str]:
         return []
 
 
+async def _scrapedo_search(query: str) -> list[str]:
+    """Fetch Google SERP via scrape.do — fires when SerpAPI + DDG both fail."""
+    if not SCRAPEDO_KEY:
+        return []
+    from urllib.parse import quote_plus, urlencode, quote
+    from bs4 import BeautifulSoup
+    google_url = f"https://www.google.com/search?q={quote_plus(query)}&num=20&hl=en&gl=us"
+    scrape_url = f"https://api.scrape.do?token={SCRAPEDO_KEY}&url={quote(google_url, safe='')}&render=true"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(scrape_url)
+            if r.status_code != 200:
+                logger.warning(f"scrape.do {r.status_code} for query '{query[:50]}'")
+                return []
+            soup = BeautifulSoup(r.text, "lxml")
+            urls = []
+            # Google organic results are in <a> tags with href=/url?q=...
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if href.startswith("/url?q="):
+                    actual = href[7:].split("&")[0]
+                    if actual.startswith("http") and "google.com" not in actual:
+                        urls.append(actual)
+            logger.info(f"scrape.do returned {len(urls)} URLs for '{query[:50]}'")
+            return urls
+    except Exception as e:
+        logger.warning(f"scrape.do search failed: {e}")
+        return []
+
+
 async def _run_query(query: str) -> list[str]:
     async with SEM:
         urls = await _serpapi_search(query)
@@ -107,6 +138,8 @@ async def _run_query(query: str) -> list[str]:
             urls = await _ddg_search(query)
         if not urls:
             urls = await _google_search_fallback(query)
+        if not urls:
+            urls = await _scrapedo_search(query)
         return urls
 
 
