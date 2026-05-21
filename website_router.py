@@ -86,7 +86,7 @@ async def fetch_type1_static(url: str) -> tuple[str, str] | None:
     headers = identity_pool.next_headers()
 
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
             r = await client.get(url, headers=headers)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "lxml")
@@ -159,7 +159,7 @@ async def fetch_type3_soft_paywall(url: str) -> tuple[str, str] | None:
     # 3. Google Cache
     cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{url}"
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
             r = await client.get(cache_url, headers=identity_pool.next_headers())
             soup = BeautifulSoup(r.text, "lxml")
             # Strip Google header
@@ -335,7 +335,7 @@ async def fetch_type8_pdf(url: str) -> str | None:
         sha = hashlib.sha256(url.encode()).hexdigest()[:16]
         tmp_path = os.path.join(tempfile.gettempdir(), f"{sha}.pdf")
 
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             r = await client.get(url, headers=identity_pool.next_headers())
             with open(tmp_path, "wb") as f:
                 f.write(r.content)
@@ -413,7 +413,7 @@ async def fetch_via_scrapedo(url: str, token: str | None = None) -> tuple[str, s
 
 
 async def _fetch_wayback(url: str) -> tuple[str, str] | None:
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=8) as client:
         avail = await client.get(
             "https://archive.org/wayback/available",
             params={"url": url}

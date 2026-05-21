@@ -1,6 +1,7 @@
 """Streaming pipeline — yields deal batches of N as they are found."""
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Any
@@ -9,12 +10,13 @@ from config_loader import ScraperConfig
 from search_engine import discover_all_urls
 from website_router import fetch_url, classify_url
 from nlp_extractor import build_deal_record
-from deduplicator import deduplicate, sort_by_recency_confidence
 
 logger = logging.getLogger(__name__)
 
-SEM = asyncio.Semaphore(5)
-MAX_URLS = 300
+SEM = asyncio.Semaphore(8)       # more concurrency on Render
+MAX_URLS = 100                   # hard cap — keeps runs under 5 min
+URL_TIMEOUT = 12                 # seconds per URL before giving up
+HEARTBEAT_INTERVAL = 15          # send a ping every N seconds so UI stays alive
 
 SOURCE_TYPE_MAP = {
     "TYPE_1_STATIC_HTML": "news_article",
@@ -46,7 +48,19 @@ async def _process_url(
     async with SEM:
         url_type = classify_url(url)
         try:
-            text, html, final_type = await fetch_url(url, config.proxy_pool or None, config)
+            # Hard per-URL timeout — never blocks a slot for more than URL_TIMEOUT seconds
+            text, html, final_type = await asyncio.wait_for(
+                fetch_url(url, config.proxy_pool or None, config),
+                timeout=URL_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"TIMEOUT ({URL_TIMEOUT}s): {url[:70]}")
+            failures.append({
+                "url": url,
+                "failure_type": "timeout",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            return []
         except Exception as e:
             failures.append({
                 "url": url,
@@ -95,63 +109,88 @@ async def stream_pipeline(
     batch_size: int = 5,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """
-    Async generator. Yields dicts:
-      { "type": "progress", "message": str }
-      { "type": "batch",    "deals": [...], "total_so_far": int }
-      { "type": "complete", "total": int, "failures": int, "summary": {...} }
+    Async generator. Yields:
+      { "type": "progress",   "message": str }
+      { "type": "heartbeat",  "done": int, "total": int }
+      { "type": "batch",      "deals": [...], "total_so_far": int }
+      { "type": "complete",   "total": int, "failures": int, "summary": {...} }
     """
     yield {"type": "progress", "message": "Discovering URLs across search engines and sources..."}
 
     all_urls = await discover_all_urls(config)
     all_urls = all_urls[:MAX_URLS]
 
-    yield {"type": "progress", "message": f"Found {len(all_urls)} URLs to analyse. Extracting deals..."}
+    yield {"type": "progress", "message": f"Found {len(all_urls)} URLs — extracting deals (batch of {batch_size})..."}
 
     failures: list[dict] = []
     seen_hashes: set[str] = set()
     buffer: list[dict] = []
     total_emitted = 0
+    done_count = 0
+    last_heartbeat = asyncio.get_event_loop().time()
 
-    tasks = [_process_url(url, config, failures) for url in all_urls]
+    tasks = {asyncio.ensure_future(_process_url(url, config, failures)): url
+             for url in all_urls}
 
-    for coro in asyncio.as_completed(tasks):
-        deals = await coro
-        for deal in deals:
-            # Light dedup on the fly
-            import hashlib
-            scope = (deal.get("scope_of_service") or "")[:50]
-            key = "|".join([
-                deal.get("company_name", "").lower(),
-                deal.get("vendor", "").lower(),
-                deal.get("announcement_date", "")[:7],
-                scope.lower(),
-            ])
-            h = hashlib.sha256(key.encode()).hexdigest()
-            if h in seen_hashes:
-                continue
-            seen_hashes.add(h)
-            buffer.append(deal)
+    pending = set(tasks.keys())
 
-        while len(buffer) >= batch_size:
-            batch = buffer[:batch_size]
-            buffer = buffer[batch_size:]
-            total_emitted += len(batch)
+    while pending:
+        # Wait for whichever finishes first, but re-check every HEARTBEAT_INTERVAL
+        done, pending = await asyncio.wait(
+            pending,
+            timeout=HEARTBEAT_INTERVAL,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # Process completed tasks
+        for fut in done:
+            done_count += 1
+            try:
+                deals = fut.result()
+            except Exception as e:
+                logger.error(f"Task error: {e}")
+                deals = []
+
+            for deal in deals:
+                scope = (deal.get("scope_of_service") or "")[:50]
+                key = "|".join([
+                    deal.get("company_name", "").lower(),
+                    deal.get("vendor", "").lower(),
+                    deal.get("announcement_date", "")[:7],
+                    scope.lower(),
+                ])
+                h = hashlib.sha256(key.encode()).hexdigest()
+                if h in seen_hashes:
+                    continue
+                seen_hashes.add(h)
+                buffer.append(deal)
+
+            while len(buffer) >= batch_size:
+                batch = buffer[:batch_size]
+                buffer = buffer[batch_size:]
+                total_emitted += len(batch)
+                yield {
+                    "type": "batch",
+                    "deals": batch,
+                    "total_so_far": total_emitted,
+                }
+
+        # Heartbeat — fires every HEARTBEAT_INTERVAL even if no tasks finished
+        now = asyncio.get_event_loop().time()
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+            last_heartbeat = now
             yield {
-                "type": "batch",
-                "deals": batch,
-                "total_so_far": total_emitted,
+                "type": "heartbeat",
+                "done": done_count,
+                "total": len(all_urls),
+                "message": f"Analysed {done_count}/{len(all_urls)} URLs — {total_emitted} deals found so far...",
             }
 
     # Flush remainder
     if buffer:
         total_emitted += len(buffer)
-        yield {
-            "type": "batch",
-            "deals": buffer,
-            "total_so_far": total_emitted,
-        }
+        yield {"type": "batch", "deals": buffer, "total_so_far": total_emitted}
 
-    # Build summary
     yield {
         "type": "complete",
         "total": total_emitted,
