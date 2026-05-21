@@ -295,17 +295,17 @@ async def strategy_c_linkedin(config: ScraperConfig) -> list[str]:
 
 
 async def strategy_d_news_aggregators(config: ScraperConfig) -> list[str]:
-    """Search all news aggregator domains for company mentions."""
+    """Search top news aggregator domains — capped to 15 to limit wall time."""
+    TOP_DOMAINS = NEWS_AGGREGATOR_DOMAINS[:15]
     tasks = []
-    # Search each company name variant against every domain
-    for company in config.all_company_names[:3]:   # cap at 3 aliases to avoid quota burn
-        for domain in NEWS_AGGREGATOR_DOMAINS:
-            query = (
-                f'site:{domain} "{company}" '
-                f'deal OR contract OR ERP OR CRM OR SAP OR Oracle OR '
-                f'outsourc OR digitalisation OR cloud OR cybersecurity OR transformation'
-            )
-            tasks.append(_run_query(query))
+    company = config.company_name  # primary name only — aliases handled in Strategy A
+    for domain in TOP_DOMAINS:
+        query = (
+            f'site:{domain} "{company}" '
+            f'deal OR contract OR ERP OR CRM OR SAP OR Oracle OR '
+            f'outsourc OR cloud OR cybersecurity OR transformation'
+        )
+        tasks.append(_run_query(query))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     urls = []

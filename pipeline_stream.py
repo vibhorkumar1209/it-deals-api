@@ -117,7 +117,11 @@ async def stream_pipeline(
     """
     yield {"type": "progress", "message": "Discovering URLs across search engines and sources..."}
 
-    all_urls = await discover_all_urls(config)
+    try:
+        all_urls = await asyncio.wait_for(discover_all_urls(config), timeout=90)
+    except asyncio.TimeoutError:
+        all_urls = []
+        yield {"type": "progress", "message": "URL discovery timed out — fetching known sources only."}
     all_urls = all_urls[:MAX_URLS]
 
     yield {"type": "progress", "message": f"Found {len(all_urls)} URLs — extracting deals (batch of {batch_size})..."}

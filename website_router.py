@@ -106,21 +106,12 @@ async def fetch_type1_static(url: str) -> tuple[str, str] | None:
             return text, r.text
     except Exception as e:
         logger.warning(f"TYPE1 fetch failed {url}: {e}")
-        # scrape.do fallback for static pages that block httpx
-        result = await fetch_via_scrapedo(url)
-        if result:
-            logger.info(f"TYPE1 scrape.do fallback success: {url}")
-        return result
+        return None   # no fallback on TYPE1 — per-URL timeout handles it
 
 
 async def fetch_type2_js(url: str) -> tuple[str, str] | None:
-    """JS-rendered SPA fetch via Playwright."""
-    await identity_pool.wait_for_domain(url, "js")
-    result = await _get_playwright_page(url, wait_for="networkidle", timeout=30000)
-    if result is None:
-        # retry once
-        await asyncio.sleep(60)
-        result = await _get_playwright_page(url, wait_for="networkidle", timeout=60000)
+    """JS-rendered SPA — try scrape.do (handles JS); Playwright not available on Render."""
+    result = await fetch_via_scrapedo(url)
     return result
 
 
@@ -453,12 +444,7 @@ async def fetch_url(url: str, proxy_pool: list[str] | None = None, config=None) 
     else:
         result = await fetch_type1_static(url)
 
-    if result is None:
-        # Fallback: Wayback Machine
-        result = await _fetch_wayback(url)
-        if result:
-            url_type = "TYPE_10_ARCHIVE"
-
+    # No wayback fallback in API mode — too slow, per-URL timeout handles failures
     if result:
         return result[0], result[1], url_type
     return None, None, url_type
