@@ -28,9 +28,91 @@ QUERY_TEMPLATES = [
 ]
 
 NEWS_AGGREGATOR_DOMAINS = [
+    # Core newswires
     "businesswire.com", "prnewswire.com", "globenewswire.com",
     "reuters.com", "ft.com", "techcrunch.com", "zdnet.com", "ciodive.com",
     "computerweekly.com", "theregister.com", "channelweb.co.uk",
+    # Extended source list
+    "analyticsindiamag.com",
+    "appsruntheworld.com",
+    "tenders.gov.au",
+    "biovoicenews.com",
+    "bloombergquint.com",
+    "business-standard.com",
+    "businesstoday.in",
+    "businesswireindia.com",
+    "cioinsight.com",
+    "cio.economictimes.indiatimes.com",
+    "ciol.com",
+    "computer.financialexpress.com",
+    "crn.in",
+    "cxotoday.com",
+    "cyantechnology.com",
+    "datacentres.com",
+    "data4experts.com",
+    "dqindia.com",
+    "deccanherald.com",
+    "articles.economictimes.indiatimes.com",
+    "efytimes.com",
+    "enterprisetimes.co.uk",
+    "equitybulls.com",
+    "etnews.com",
+    "ted.europa.eu",
+    "exchange4media.com",
+    "expresscomputer.in",
+    "finalaya.com",
+    "finextra.com",
+    "fintechfutures.com",
+    "globaltelecomsbusiness.com",
+    "indiainfoline.com",
+    "informationweek.in",
+    "mmb.moneycontrol.com",
+    "outsourcingdigest.com",
+    "psuconnect.in",
+    "in.reuters.com",
+    "articles.timesofindia.indiatimes.com",
+    "contractsfinder.service.gov.uk",
+    "automotivelogistics.media",
+    "biztech2.in.com",
+    "wsj.com",
+    "manufacturing.economictimes.indiatimes.com",
+]
+
+# Full base URLs for direct scraping (Strategy B style for these sources)
+EXTENDED_SOURCE_BASE_URLS = [
+    "https://analyticsindiamag.com/",
+    "https://www.appsruntheworld.com/",
+    "https://www.tenders.gov.au/",
+    "https://www.biovoicenews.com/",
+    "https://www.bloombergquint.com/business/",
+    "https://www.businesswire.com/news",
+    "https://www.business-standard.com/article/news-cm/",
+    "https://www.businesstoday.in/latest/corporate/story",
+    "http://businesswireindia.com/news/",
+    "http://www.cioinsight.com/",
+    "http://cio.economictimes.indiatimes.com/news/",
+    "http://www.ciol.com/ciol/news/",
+    "http://computer.financialexpress.com/news/",
+    "http://www.crn.in/",
+    "http://www.cxotoday.com/story",
+    "https://www.ciol.com/",
+    "http://www.datacentres.com/news/",
+    "http://www.dqindia.com/",
+    "https://www.deccanherald.com/business/business-news/",
+    "http://articles.economictimes.indiatimes.com/",
+    "http://www.efytimes.com/",
+    "https://www.enterprisetimes.co.uk/",
+    "https://www.equitybulls.com/",
+    "https://www.exchange4media.com/marketing-news/",
+    "https://www.expresscomputer.in/news/",
+    "http://www.finextra.com/News/",
+    "https://www.fintechfutures.com/",
+    "http://www.outsourcingdigest.com/",
+    "https://www.psuconnect.in/news/",
+    "https://www.contractsfinder.service.gov.uk/",
+    "https://ted.europa.eu/",
+    "http://automotivelogistics.media/news/",
+    "https://manufacturing.economictimes.indiatimes.com/news/",
 ]
 
 SEM = asyncio.Semaphore(5)
@@ -199,7 +281,9 @@ async def strategy_b_known_sources(config: ScraperConfig) -> list[str]:
         except Exception as e:
             logger.warning(f"Strategy B failed for {source_url}: {e}")
 
-    await asyncio.gather(*[_scrape_source(u) for u in config.known_sources])
+    # Combine user-supplied sources with the built-in extended source list
+    all_sources = list(dict.fromkeys(config.known_sources + EXTENDED_SOURCE_BASE_URLS))
+    await asyncio.gather(*[_scrape_source(u) for u in all_sources])
     return list(dict.fromkeys(u for u in urls if u))
 
 
@@ -211,13 +295,17 @@ async def strategy_c_linkedin(config: ScraperConfig) -> list[str]:
 
 
 async def strategy_d_news_aggregators(config: ScraperConfig) -> list[str]:
-    """Search news aggregators for company mentions."""
+    """Search all news aggregator domains for company mentions."""
     tasks = []
-    company = config.company_name
-
-    for domain in NEWS_AGGREGATOR_DOMAINS:
-        query = f'site:{domain} "{company}" deal OR contract OR ERP OR CRM OR SAP OR Oracle'
-        tasks.append(_run_query(query))
+    # Search each company name variant against every domain
+    for company in config.all_company_names[:3]:   # cap at 3 aliases to avoid quota burn
+        for domain in NEWS_AGGREGATOR_DOMAINS:
+            query = (
+                f'site:{domain} "{company}" '
+                f'deal OR contract OR ERP OR CRM OR SAP OR Oracle OR '
+                f'outsourc OR digitalisation OR cloud OR cybersecurity OR transformation'
+            )
+            tasks.append(_run_query(query))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     urls = []
