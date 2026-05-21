@@ -460,12 +460,24 @@ def extract_scope_of_service(text: str, vendor: str, vendor_category: str) -> st
 def is_deal_relevant(text: str, company_names: list[str], focus_deal_types: list[str]) -> bool:
     text_lower = text.lower()
     has_company = any(cn.lower() in text_lower for cn in company_names)
+    if not has_company:
+        return False
     has_deal_kw = any(kw in text_lower for kw in [
+        # Contract / deal signals
         "deal", "contract", "agreement", "signed", "awarded", "selected",
         "partnership", "implementation", "deployment", "transformation",
-        "outsourc", "migration", "erp", "crm", "hcm", "scm",
+        "outsourc", "migration",
+        # Technology platform signals
+        "erp", "crm", "hcm", "scm", "sap", "oracle", "salesforce",
+        "servicenow", "workday", "microsoft azure", "aws", "google cloud",
+        "cloud platform", "digital platform", "technology platform",
+        "managed service", "cybersecurity", "data platform", "analytics",
+        # Action signals common in press releases
+        "goes live", "go-live", "rollout", "deployed", "launched",
+        "chooses", "selects", "adopts", "upgrades", "modernises", "modernizes",
+        "partners with", "teams with", "works with",
     ])
-    return has_company and has_deal_kw
+    return has_deal_kw
 
 
 def build_deal_record(
