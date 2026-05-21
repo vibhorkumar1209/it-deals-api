@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from config_loader import ScraperConfig
-from pipeline_stream import stream_pipeline
+from pipeline_stream import stream_pipeline, extract_from_cached_urls, load_url_cache, save_url_cache
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -105,6 +105,85 @@ async def scrape(req: ScrapeRequest):
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as e:
             logger.error(f"Pipeline error: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+class ReExtractRequest(BaseModel):
+    company_name: str
+    urls: list[str] = Field(default_factory=list)
+    batch_size: int = Field(default=5, ge=1, le=20)
+    # Full company config needed for extraction context
+    company_aliases: list[str] = Field(default_factory=list)
+    domain: str = ""
+    focus_deal_types: list[str] = Field(default_factory=list)
+    min_deal_value_usd_million: float | None = None
+
+
+@app.get("/api/cached-urls/{company_name}")
+async def get_cached_urls(company_name: str):
+    """Return cached URLs for a company (discovered in last 48h)."""
+    urls = load_url_cache(company_name)
+    if urls is None:
+        raise HTTPException(status_code=404, detail=f"No cached URLs for '{company_name}' (or cache expired)")
+    return {"company_name": company_name, "url_count": len(urls), "urls": urls}
+
+
+@app.post("/api/extract")
+async def extract(req: ReExtractRequest):
+    """Re-run extraction on a provided list of URLs — skips search phase."""
+    # Build minimal config for extraction context
+    config = ScraperConfig(
+        company_name=req.company_name,
+        company_aliases=req.company_aliases,
+        domain=req.domain or f"{req.company_name.lower().replace(' ', '')}.com",
+        secondary_domains=[],
+        linkedin_url="",
+        stock_ticker=None,
+        exchange=None,
+        industry_sector="",
+        hq_country="",
+        hq_city="",
+        search_year_range={"start": 2020, "end": 2025},
+        known_sources=[],
+        known_deals_to_skip=[],
+        focus_deal_types=req.focus_deal_types or [
+            "ERP","CRM","HCM","SCM","cloud_migration","managed_services",
+            "cybersecurity","digital_transformation","infrastructure",
+            "analytics","AI_ML","outsourcing","SaaS","SI_contract"
+        ],
+        min_deal_value_usd_million=req.min_deal_value_usd_million,
+        output_dir="/tmp/deals/",
+        run_linkedin=False,
+        run_pdf_extraction=True,
+        use_proxies=False,
+        proxy_pool=[],
+        notify_email=None,
+    )
+
+    # Use provided URLs or fall back to cache
+    urls = req.urls
+    if not urls:
+        cached = load_url_cache(req.company_name)
+        if not cached:
+            raise HTTPException(status_code=404, detail="No URLs provided and no cache found for this company.")
+        urls = cached
+
+    async def event_stream():
+        try:
+            async for event in extract_from_cached_urls(config, urls, batch_size=req.batch_size):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            logger.error(f"Extract error: {e}", exc_info=True)
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
     return StreamingResponse(

@@ -2,7 +2,10 @@
 
 import asyncio
 import hashlib
+import json
 import logging
+import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Any
@@ -18,6 +21,40 @@ SEM = asyncio.Semaphore(8)
 MAX_URLS = 100
 URL_TIMEOUT = 12          # seconds hard kill per URL
 HEARTBEAT_EVERY = 10      # emit progress every N URLs processed
+
+URL_CACHE_DIR = "/tmp/url_cache"
+os.makedirs(URL_CACHE_DIR, exist_ok=True)
+
+
+def _cache_key(company_name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]", "_", company_name.lower())
+    return os.path.join(URL_CACHE_DIR, f"{slug}_urls.json")
+
+
+def save_url_cache(company_name: str, urls: list[str]) -> None:
+    try:
+        with open(_cache_key(company_name), "w") as f:
+            json.dump({"company": company_name, "urls": urls, "ts": time.time()}, f)
+        logger.info(f"Cached {len(urls)} URLs for '{company_name}'")
+    except Exception as e:
+        logger.warning(f"Failed to save URL cache: {e}")
+
+
+def load_url_cache(company_name: str) -> list[str] | None:
+    path = _cache_key(company_name)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        age_h = (time.time() - data.get("ts", 0)) / 3600
+        if age_h > 48:
+            logger.info(f"URL cache for '{company_name}' is {age_h:.1f}h old — ignoring")
+            return None
+        return data.get("urls", [])
+    except Exception as e:
+        logger.warning(f"Failed to load URL cache: {e}")
+        return None
 
 SOURCE_TYPE_MAP = {
     "TYPE_1_STATIC_HTML": "news_article",
@@ -100,6 +137,11 @@ async def stream_pipeline(
         yield {"type": "progress", "message": "⚠️ Discovery timed out — using known sources only."}
 
     all_urls = all_urls[:MAX_URLS]
+
+    # Cache for reuse
+    if all_urls:
+        save_url_cache(config.company_name, all_urls)
+
     total_urls = len(all_urls)
 
     if total_urls == 0:
@@ -166,6 +208,86 @@ async def stream_pipeline(
             }
 
     # ── Phase 3: Flush remainder + complete ───────────────────────────────────
+    if buffer:
+        total_emitted += len(buffer)
+        yield {"type": "batch", "deals": buffer, "total_so_far": total_emitted}
+
+    yield {
+        "type": "complete",
+        "total": total_emitted,
+        "failures": len(failures),
+        "urls_attempted": total_urls,
+        "summary": {
+            "total_deals": total_emitted,
+            "failures": len(failures),
+            "sources_attempted": total_urls,
+        },
+    }
+
+
+async def extract_from_cached_urls(
+    config: ScraperConfig,
+    urls: list[str],
+    batch_size: int = 5,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Run extraction only on a provided list of URLs — no search phase."""
+    total_urls = len(urls)
+
+    if total_urls == 0:
+        yield {"type": "error", "message": "No URLs provided."}
+        return
+
+    yield {"type": "progress", "message": f"📋 Re-extracting from {total_urls} cached URLs — scanning for IT deals..."}
+
+    failures: list[dict] = []
+    seen_hashes: set[str] = set()
+    buffer: list[dict] = []
+    total_emitted = 0
+    done_count = 0
+
+    async def _safe(url: str) -> list[dict]:
+        try:
+            return await _process_url(url, config, failures)
+        except Exception:
+            return []
+
+    tasks = [_safe(url) for url in urls]
+
+    for coro in asyncio.as_completed(tasks):
+        deals = await coro
+        done_count += 1
+
+        for deal in deals:
+            scope = (deal.get("scope_of_service") or "")[:50]
+            key = "|".join([
+                deal.get("company_name", "").lower(),
+                deal.get("vendor", "").lower(),
+                deal.get("announcement_date", "")[:7],
+                scope.lower(),
+            ])
+            h = hashlib.sha256(key.encode()).hexdigest()
+            if h in seen_hashes:
+                continue
+            seen_hashes.add(h)
+            buffer.append(deal)
+
+        while len(buffer) >= batch_size:
+            batch = buffer[:batch_size]
+            buffer = buffer[batch_size:]
+            total_emitted += len(batch)
+            yield {"type": "batch", "deals": batch, "total_so_far": total_emitted}
+
+        if done_count % HEARTBEAT_EVERY == 0:
+            yield {
+                "type": "heartbeat",
+                "done": done_count,
+                "total": total_urls,
+                "message": (
+                    f"⚡ Scanned {done_count}/{total_urls} sources"
+                    + (f" — {total_emitted} deals found so far" if total_emitted else " — scanning...")
+                ),
+            }
+
     if buffer:
         total_emitted += len(buffer)
         yield {"type": "batch", "deals": buffer, "total_so_far": total_emitted}
