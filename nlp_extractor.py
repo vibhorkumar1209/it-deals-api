@@ -458,26 +458,52 @@ def extract_scope_of_service(text: str, vendor: str, vendor_category: str) -> st
 
 
 def is_deal_relevant(text: str, company_names: list[str], focus_deal_types: list[str]) -> bool:
+    """
+    Returns True if the text mentions the company AND any technology/partnership signal.
+    Intentionally broad — captures formal deals, vendor selections, implementations,
+    partnerships, digital initiatives, and platform announcements.
+    """
     text_lower = text.lower()
-    has_company = any(cn.lower() in text_lower for cn in company_names)
-    if not has_company:
+
+    # Must mention the company (or one of its aliases)
+    if not any(cn.lower() in text_lower for cn in company_names):
         return False
-    has_deal_kw = any(kw in text_lower for kw in [
-        # Contract / deal signals
-        "deal", "contract", "agreement", "signed", "awarded", "selected",
-        "partnership", "implementation", "deployment", "transformation",
-        "outsourc", "migration",
-        # Technology platform signals
-        "erp", "crm", "hcm", "scm", "sap", "oracle", "salesforce",
-        "servicenow", "workday", "microsoft azure", "aws", "google cloud",
-        "cloud platform", "digital platform", "technology platform",
-        "managed service", "cybersecurity", "data platform", "analytics",
-        # Action signals common in press releases
-        "goes live", "go-live", "rollout", "deployed", "launched",
-        "chooses", "selects", "adopts", "upgrades", "modernises", "modernizes",
-        "partners with", "teams with", "works with",
-    ])
-    return has_deal_kw
+
+    # Must have at least one technology/partnership/initiative signal
+    signals = [
+        # Formal deal language
+        "deal", "contract", "agreement", "signed", "awarded", "tender",
+        "procurement", "rfp", "rfq", "bid",
+        # Vendor selection
+        "selected", "selects", "chooses", "chosen", "adopts", "adopted",
+        "partners with", "partnership", "alliance", "collaboration",
+        "teams with", "works with", "joined forces",
+        # Implementation / deployment
+        "implements", "implementation", "deployed", "deployment", "rollout",
+        "roll out", "goes live", "go-live", "went live", "launched",
+        "upgrade", "migration", "migrates", "migrating",
+        # Transformation / initiative
+        "transformation", "modernisation", "modernization", "digitisation",
+        "digitization", "digitalisation", "digitalization", "initiative",
+        "programme", "program", "project", "platform",
+        # Managed / outsourced services
+        "managed service", "outsourc", "managed by", "operated by",
+        "systems integrator", "si partner",
+        # Named vendors (any mention is relevant)
+        "sap", "oracle", "salesforce", "servicenow", "workday",
+        "microsoft azure", "azure", " aws ", "amazon web services",
+        "google cloud", "ibm", "infosys", "tcs", "wipro", "accenture",
+        "capgemini", "cognizant", "deloitte", "pwc", "ey ", "kpmg",
+        "palo alto", "crowdstrike", "fortinet", "zscaler", "splunk",
+        "snowflake", "databricks", "tableau", "power bi", "servicenow",
+        "dynamics 365", "workday", "successfactors", "ariba",
+        # General tech category words
+        "erp", "crm", "hcm", "scm", "itsm", "cloud", "cybersecurity",
+        "data analytics", "artificial intelligence", " ai ", "machine learning",
+        "blockchain", "iot ", "automation", "robotic process",
+        "infrastructure", "data centre", "data center",
+    ]
+    return any(s in text_lower for s in signals)
 
 
 def build_deal_record(
@@ -498,11 +524,34 @@ def build_deal_record(
     date = extract_announcement_date(text, url, soup)
     scope = extract_scope_of_service(text, vendor_info.get("vendor", ""), vendor_info.get("vendor_category", ""))
 
-    # Build title
     vendor = vendor_info.get("vendor", "")
     cat = vendor_info.get("vendor_category", "")
-    title = f"{company_name} selects {vendor} for {cat.lower()} initiative" if vendor else f"{company_name} IT deal"
-    title = title[:120]
+
+    # Classify record type from text signals
+    tl = text.lower()
+    if any(w in tl for w in ["partners with", "partnership", "alliance", "collaboration", "teams with"]):
+        record_type = "partnership"
+    elif any(w in tl for w in ["goes live", "go-live", "went live", "rolled out", "deployed", "launched"]):
+        record_type = "implementation"
+    elif any(w in tl for w in ["contract", "deal", "agreement", "awarded", "tender", "outsourc"]):
+        record_type = "contract"
+    elif any(w in tl for w in ["selects", "chooses", "chosen", "adopts", "selected"]):
+        record_type = "vendor_selection"
+    elif any(w in tl for w in ["transformation", "modernisation", "modernization", "initiative", "programme", "program"]):
+        record_type = "initiative"
+    else:
+        record_type = "technology_announcement"
+
+    # Build contextual title
+    action_map = {
+        "partnership":            f"{company_name} — {vendor} technology partnership" if vendor else f"{company_name} technology partnership",
+        "implementation":         f"{company_name} implements {vendor}" if vendor else f"{company_name} technology implementation",
+        "contract":               f"{company_name} — {vendor} contract" if vendor else f"{company_name} IT contract",
+        "vendor_selection":       f"{company_name} selects {vendor}" if vendor else f"{company_name} vendor selection",
+        "initiative":             f"{company_name} — {cat} digital initiative" if cat else f"{company_name} digital initiative",
+        "technology_announcement": f"{company_name} — {vendor} {cat} announcement" if vendor else f"{company_name} technology announcement",
+    }
+    title = action_map.get(record_type, f"{company_name} technology announcement")[:120]
 
     # Confidence
     is_list_matched = vendor_info.get("_confidence_override") != "Low" and bool(vendor)
@@ -515,20 +564,24 @@ def build_deal_record(
         confidence = "Low"
 
     # Summary
+    type_label = record_type.replace("_", " ").title()
     summary_parts = []
     if vendor and date:
-        summary_parts.append(f"{company_name} announced a deal with {vendor} ({date}).")
+        summary_parts.append(f"{company_name} announced a {type_label.lower()} with {vendor} ({date}).")
+    elif date:
+        summary_parts.append(f"{company_name} announced a technology {type_label.lower()} ({date}).")
     if scope:
         summary_parts.append(scope)
     if value is not None:
-        summary_parts.append(f"Estimated deal value: ${value}M USD.")
+        summary_parts.append(f"Estimated value: ${value}M USD.")
     if duration:
         summary_parts.append(f"Duration: {duration}.")
-    summary = " ".join(summary_parts)[:500] or "Deal details extracted from source."
+    summary = " ".join(summary_parts)[:500] or f"{type_label} details extracted from source."
 
     return {
         "company_name": company_name,
         "deal_title": title,
+        "record_type": record_type,          # contract | partnership | implementation | vendor_selection | initiative | technology_announcement
         "vendor": vendor,
         "vendor_category": cat,
         "si_partner": si,

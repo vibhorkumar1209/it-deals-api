@@ -18,13 +18,38 @@ SERPER_KEY = os.getenv("SERPER_KEY", "")
 SCRAPEDO_KEY = os.getenv("SCRAPEDO_KEY", "")
 
 QUERY_TEMPLATES = [
+    # Formal deal / contract
     '"{company}" IT deal signed {year}',
-    '"{company}" selects ERP OR CRM OR SAP OR Oracle OR Salesforce OR ServiceNow {year}',
-    '"{company}" digital transformation contract awarded {year}',
+    '"{company}" technology contract awarded {year}',
     '"{company}" outsourcing agreement signed {year}',
-    '"{company}" technology partnership announcement {year}',
+
+    # Vendor selection / platform adoption
+    '"{company}" selects OR chooses OR adopts SAP OR Oracle OR Salesforce OR ServiceNow OR Workday OR Microsoft OR AWS OR Google Cloud {year}',
+    '"{company}" implements OR deploys OR rolls out ERP OR CRM OR HCM OR cloud OR platform {year}',
+    '"{company}" goes live OR go-live SAP OR Oracle OR Workday OR Salesforce {year}',
+
+    # Partnership / alliance
+    '"{company}" technology partnership OR strategic alliance OR collaboration {year}',
+    '"{company}" partners with OR teams with OR works with technology {year}',
+
+    # Digital / transformation programmes
+    '"{company}" digital transformation program OR initiative {year}',
+    '"{company}" modernisation OR modernization technology {year}',
+    '"{company}" cloud migration OR cloud adoption {year}',
+
+    # Vendor-specific implementations
+    '"{company}" SAP implementation OR Oracle implementation OR Salesforce implementation {year}',
+    '"{company}" Microsoft Azure OR AWS OR Google Cloud deployment {year}',
+    '"{company}" ServiceNow OR Workday OR Dynamics 365 implementation {year}',
+
+    # Managed services / outsourcing
+    '"{company}" managed services OR IT outsourcing {year}',
+    '"{company}" systems integrator OR SI partner OR Accenture OR Infosys OR TCS OR Wipro {year}',
+
+    # Annual reports / investor disclosures
     '"{company}" {year} annual report technology investment',
     'site:{domain} press release technology {year}',
+    '"{company}" vendor OR platform OR solution announcement {year}',
 ]
 
 NEWS_AGGREGATOR_DOMAINS = [
