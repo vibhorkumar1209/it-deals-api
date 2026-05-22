@@ -17,10 +17,10 @@ from nlp_extractor import build_deal_record
 
 logger = logging.getLogger(__name__)
 
-SEM = asyncio.Semaphore(5)
-MAX_URLS = 20
-URL_TIMEOUT = 25          # seconds hard kill per URL (Jina Reader needs up to 20s)
-HEARTBEAT_EVERY = 10      # emit progress every N URLs processed
+SEM = asyncio.Semaphore(4)
+MAX_URLS = 15
+URL_TIMEOUT = 20          # seconds hard kill per URL
+HEARTBEAT_EVERY = 3       # emit SSE heartbeat every N URLs (keeps Render connection alive)
 
 URL_CACHE_DIR = "/tmp/url_cache"
 os.makedirs(URL_CACHE_DIR, exist_ok=True)
@@ -163,9 +163,9 @@ async def stream_pipeline(
     try:
         # Each strategy already has its own timeout (60/45/30s) — outer is a safety net
         discover_task = asyncio.create_task(discover_all_urls(config))
-        heartbeat_interval = 15  # seconds between heartbeat yields
+        heartbeat_interval = 10  # seconds between heartbeat yields
         elapsed = 0
-        max_wait = 120
+        max_wait = 60   # abort discovery after 60s — proceed with whatever we have
         while not discover_task.done() and elapsed < max_wait:
             try:
                 all_urls = await asyncio.wait_for(asyncio.shield(discover_task), timeout=heartbeat_interval)

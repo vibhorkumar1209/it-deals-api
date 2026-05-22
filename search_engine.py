@@ -671,9 +671,9 @@ async def discover_all_urls(config: ScraperConfig) -> list[str]:
     block the whole pipeline.
     """
     results = await asyncio.gather(
-        _timed(strategy_a_search(config),          40, "Strategy A"),
+        _timed(strategy_a_search(config),          35, "Strategy A"),
         # Strategy B (scrape 34 homepages) disabled — too slow, low signal
-        _timed(strategy_rss(config),               25, "Strategy E/RSS"),
+        _timed(strategy_rss(config),               20, "Strategy E/RSS"),
         return_exceptions=True,
     )
 
