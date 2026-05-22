@@ -17,9 +17,9 @@ from nlp_extractor import build_deal_record
 
 logger = logging.getLogger(__name__)
 
-SEM = asyncio.Semaphore(10)
-MAX_URLS = 30
-URL_TIMEOUT = 18          # seconds hard kill per URL (Jina Reader needs up to 15s)
+SEM = asyncio.Semaphore(5)
+MAX_URLS = 20
+URL_TIMEOUT = 25          # seconds hard kill per URL (Jina Reader needs up to 20s)
 HEARTBEAT_EVERY = 10      # emit progress every N URLs processed
 
 URL_CACHE_DIR = "/tmp/url_cache"

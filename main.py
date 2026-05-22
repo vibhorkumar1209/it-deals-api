@@ -197,6 +197,31 @@ async def extract(req: ReExtractRequest):
     )
 
 
+@app.get("/api/fetch-test")
+async def fetch_test(url: str = "https://m.economictimes.com/industry/banking/finance/banking/hdfc-bank-signs-multi-year-data-and-technology-deal-with-refinitiv/articleshow/94349454.cms"):
+    """Quick test: fetch one URL via Jina Reader and show result."""
+    from website_router import fetch_via_jina_reader
+    from nlp_extractor import is_deal_relevant
+    import asyncio
+    try:
+        result = await asyncio.wait_for(fetch_via_jina_reader(url), timeout=25)
+        if result is None:
+            return {"status": "failed", "url": url, "reason": "Jina returned None"}
+        text, _ = result
+        return {
+            "status": "ok",
+            "url": url,
+            "chars": len(text),
+            "words": len(text.split()),
+            "preview": text[:500],
+            "is_deal_relevant": is_deal_relevant(text, ["HDFC Bank"], []),
+        }
+    except asyncio.TimeoutError:
+        return {"status": "timeout", "url": url}
+    except Exception as e:
+        return {"status": "error", "url": url, "error": str(e)}
+
+
 @app.get("/api/debug")
 async def debug(company: str = "HDFC Bank"):
     """

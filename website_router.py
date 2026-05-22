@@ -403,37 +403,20 @@ async def fetch_via_jina_reader(url: str) -> tuple[str, str] | None:
         return None
     try:
         reader_url = f"https://r.jina.ai/{url}"
-        # Domain-specific content selectors to skip nav/footer boilerplate
-        d = _domain(url)
-        content_selector = None
-        if "businesswire.com" in d:
-            content_selector = ".bw-release-story"
-        elif "prnewswire.com" in d:
-            content_selector = ".release-body"
-        elif "globenewswire.com" in d:
-            content_selector = ".article-body"
-
         headers: dict = {
             "Authorization": f"Bearer {key}",
             "Accept": "text/plain",
             "X-Return-Format": "text",
-            "X-Remove-Selector": "nav, header, footer, .sidebar, .related-news, script, style",
         }
-        if content_selector:
-            headers["X-Target-Selector"] = content_selector
 
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             r = await client.get(reader_url, headers=headers)
             if r.status_code != 200:
                 logger.warning(f"Jina Reader {r.status_code} for {url}")
-                # On 4xx/5xx try without target selector (broader extraction)
-                if content_selector:
-                    headers.pop("X-Target-Selector", None)
-                    r = await client.get(reader_url, headers=headers)
-                if r.status_code != 200:
-                    return None
+                return None
             text = r.text.strip()
             if len(text.split()) < 50:
+                logger.warning(f"Jina Reader returned too-short text ({len(text.split())} words) for {url}")
                 return None
             logger.info(f"Jina Reader success: {url[:80]} ({len(text)} chars)")
             return text, text   # no raw HTML in reader mode
