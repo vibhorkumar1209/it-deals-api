@@ -197,6 +197,65 @@ async def extract(req: ReExtractRequest):
     )
 
 
+@app.get("/api/debug")
+async def debug(company: str = "HDFC Bank"):
+    """Diagnostic — runs each pipeline stage and reports exactly what fails."""
+    import traceback
+    from search_engine import _jina_search, JINA_KEY
+    from website_router import fetch_via_jina_reader, fetch_type1_static
+    from nlp_extractor import is_deal_relevant, build_deal_record
+
+    out: dict = {"company": company, "env": {}, "search": {}, "fetch": {}, "extract": {}}
+
+    out["env"] = {
+        "JINA_KEY_set": bool(JINA_KEY),
+        "JINA_KEY_prefix": JINA_KEY[:12] + "..." if JINA_KEY else None,
+    }
+
+    try:
+        q = f'"{company}" SAP OR Oracle contract selected 2025'
+        urls = await _jina_search(q)
+        out["search"] = {"query": q, "url_count": len(urls), "urls": urls[:5]}
+    except Exception as e:
+        out["search"] = {"error": str(e), "trace": traceback.format_exc()[-500:]}
+
+    if out["search"].get("urls"):
+        url = out["search"]["urls"][0]
+        try:
+            result = await fetch_via_jina_reader(url)
+            if result:
+                text, _ = result
+                out["fetch"] = {"url": url, "chars": len(text), "preview": text[:400], "method": "jina_reader"}
+            else:
+                result2 = await fetch_type1_static(url)
+                if result2:
+                    text, _ = result2
+                    out["fetch"] = {"url": url, "chars": len(text), "preview": text[:400], "method": "static"}
+                else:
+                    out["fetch"] = {"url": url, "error": "both fetch methods failed"}
+        except Exception as e:
+            out["fetch"] = {"url": url, "error": str(e)}
+
+    if out["fetch"].get("chars"):
+        try:
+            result = await fetch_via_jina_reader(out["fetch"]["url"])
+            full_text = result[0] if result else ""
+        except Exception:
+            full_text = ""
+        names = [company]
+        rel = is_deal_relevant(full_text, names, [])
+        out["extract"] = {"is_deal_relevant": rel}
+        if rel:
+            deal = build_deal_record(text=full_text, url=out["fetch"]["url"],
+                                     source_type="news_article", company_name=company,
+                                     company_names=names)
+            out["extract"]["deal"] = deal
+        else:
+            out["extract"]["text_preview"] = full_text[:600]
+
+    return out
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=4001, reload=True)
