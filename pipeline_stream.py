@@ -130,11 +130,39 @@ async def stream_pipeline(
     # ── Phase 1: URL discovery ────────────────────────────────────────────────
     yield {"type": "progress", "message": "🔍 Searching across press releases, filings, and news sources..."}
 
+    # Send periodic heartbeats so the SSE connection stays alive during discovery
+    async def _discover_with_heartbeat():
+        task = asyncio.create_task(discover_all_urls(config))
+        while not task.done():
+            try:
+                return await asyncio.wait_for(asyncio.shield(task), timeout=15)
+            except asyncio.TimeoutError:
+                pass  # heartbeat tick — task still running
+        return task.result()
+
     try:
-        all_urls = await asyncio.wait_for(discover_all_urls(config), timeout=90)
-    except asyncio.TimeoutError:
+        # Each strategy already has its own timeout (60/45/30s) — outer is a safety net
+        discover_task = asyncio.create_task(discover_all_urls(config))
+        heartbeat_interval = 15  # seconds between heartbeat yields
+        elapsed = 0
+        max_wait = 120
+        while not discover_task.done() and elapsed < max_wait:
+            try:
+                all_urls = await asyncio.wait_for(asyncio.shield(discover_task), timeout=heartbeat_interval)
+                break
+            except asyncio.TimeoutError:
+                elapsed += heartbeat_interval
+                yield {"type": "heartbeat", "message": f"⏳ Still searching… ({elapsed}s)"}
+        else:
+            if not discover_task.done():
+                discover_task.cancel()
+                all_urls = []
+                yield {"type": "progress", "message": "⚠️ Discovery timed out — using known sources only."}
+            else:
+                all_urls = discover_task.result()
+    except Exception:
         all_urls = []
-        yield {"type": "progress", "message": "⚠️ Discovery timed out — using known sources only."}
+        yield {"type": "progress", "message": "⚠️ Discovery error — using known sources only."}
 
     all_urls = all_urls[:MAX_URLS]
 

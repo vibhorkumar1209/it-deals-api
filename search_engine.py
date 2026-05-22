@@ -388,11 +388,17 @@ async def _ddg_search(query: str) -> list[str]:
     try:
         from duckduckgo_search import DDGS
         loop = asyncio.get_event_loop()
-        results = await loop.run_in_executor(
-            None,
-            lambda: list(DDGS().news(query, max_results=20))
+        results = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: list(DDGS().news(query, max_results=20))
+            ),
+            timeout=15,  # hard kill — executor can't be cancelled but wait_for raises here
         )
         return [r.get("url", "") for r in results if r.get("url")]
+    except asyncio.TimeoutError:
+        logger.warning(f"DDG search timed out for '{query[:50]}'")
+        return []
     except Exception as e:
         logger.warning(f"DDG search failed for '{query}': {e}")
         return []
@@ -659,17 +665,29 @@ async def strategy_d_news_aggregators(config: ScraperConfig) -> list[str]:
     return list(dict.fromkeys(u for u in urls if u))
 
 
+async def _timed(coro, timeout: float, label: str):
+    """Run coro with a hard timeout; return [] on timeout/error."""
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(f"{label} timed out after {timeout}s")
+        return []
+    except Exception as e:
+        logger.warning(f"{label} failed: {e}")
+        return []
+
+
 async def discover_all_urls(config: ScraperConfig) -> list[str]:
     """Run all strategies in parallel, deduplicate, filter skip list.
-    Strategy E (RSS) is free and always runs — gives immediate results even
-    when all search API quotas are exhausted.
+    Each strategy has its own hard timeout so one hung strategy can't
+    block the whole pipeline.
     """
     results = await asyncio.gather(
-        strategy_a_search(config),
-        strategy_b_known_sources(config),
-        strategy_c_linkedin(config),
-        strategy_d_news_aggregators(config),
-        strategy_rss(config),             # free, no API key required
+        _timed(strategy_a_search(config),          60, "Strategy A"),
+        _timed(strategy_b_known_sources(config),   45, "Strategy B"),
+        _timed(strategy_c_linkedin(config),        20, "Strategy C"),
+        _timed(strategy_d_news_aggregators(config),30, "Strategy D"),
+        _timed(strategy_rss(config),               30, "Strategy E/RSS"),
         return_exceptions=True,
     )
 
