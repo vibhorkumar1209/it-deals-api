@@ -249,59 +249,50 @@ async def debug(company: str = "HDFC Bank"):
         "JINA_KEY_prefix": JINA_KEY[:12] + "..." if JINA_KEY else None,
     }
 
-    # ── Run 3 sample queries and collect URLs ─────────────────────────────────
-    sample_templates = QUERY_TEMPLATES_CUSTOMER[:3]
-    all_urls: list[str] = []
-    for tmpl in sample_templates:
-        q = tmpl.format(company=company, year=year)
-        out["queries"].append(q)
-        try:
-            urls = await _jina_search(q)
-            all_urls.extend(urls)
-            out["urls_discovered"].extend([{"query": q, "url": u} for u in urls[:5]])
-        except Exception as e:
-            out["urls_discovered"].append({"query": q, "error": str(e)})
+    # ── Run 1 query only (keep under 30s Render timeout) ─────────────────────
+    q = QUERY_TEMPLATES_CUSTOMER[0].format(company=company, year=year)
+    out["queries"].append(q)
+    try:
+        urls = await asyncio.wait_for(_jina_search(q), timeout=10)
+        out["urls_discovered"] = [{"url": u} for u in urls[:8]]
+    except Exception as e:
+        out["urls_discovered"] = [{"error": str(e)}]
+        urls = []
 
-    # Deduplicate
-    seen: set = set()
-    unique_urls = [u for u in all_urls if not (u in seen or seen.add(u))][:10]  # type: ignore
+    # Skip social, take first 3 real URLs
+    _SKIP = {"linkedin.com","facebook.com","instagram.com","twitter.com","x.com","youtube.com","danelfin.com"}
+    from urllib.parse import urlparse as _up
+    unique_urls = [u for u in urls if not any(_up(u).netloc.lstrip("www.").endswith(s) for s in _SKIP)][:3]
 
-    # ── Fetch + extract each URL ───────────────────────────────────────────────
-    for url in unique_urls:
-        entry: dict = {"url": url, "classify": classify_url(url)}
+    # ── Fetch + extract each URL (parallel) ───────────────────────────────────
+    async def _probe(url: str) -> dict:
+        entry: dict = {"url": url}
         try:
-            result = await asyncio.wait_for(fetch_via_jina_reader(url), timeout=12)
+            result = await asyncio.wait_for(fetch_via_jina_reader(url), timeout=10)
             if result is None:
                 entry["fetch"] = "empty"
             else:
                 text, _ = result
                 entry["fetch"] = "ok"
-                entry["fetch_chars"] = len(text)
-                entry["text_preview"] = text[:300]
-                relevant = is_deal_relevant(text, [company], [])
-                entry["is_deal_relevant"] = relevant
-                if relevant:
-                    deal = build_deal_record(
-                        text=text, url=url, source_type="news_article",
-                        company_name=company, company_names=[company], soup=None,
-                    )
+                entry["chars"] = len(text)
+                entry["preview"] = text[:200]
+                entry["relevant"] = is_deal_relevant(text, [company], [])
+                if entry["relevant"]:
+                    deal = build_deal_record(text=text, url=url, source_type="news_article",
+                                            company_name=company, company_names=[company], soup=None)
                     entry["deal"] = deal
                 else:
                     tl = text.lower()
-                    disq = [d for d in NON_DEAL_DISQUALIFIERS if d in tl]
-                    found_phrases = [p for p in DEAL_ACTION_PHRASES if p in tl]
-                    entry["rejected_because"] = {
-                        "disqualifiers_hit": disq,
-                        "deal_phrases_found": found_phrases[:10],
-                        "company_in_text": company.lower() in tl,
-                    }
+                    entry["disq"] = [d for d in NON_DEAL_DISQUALIFIERS if d in tl]
+                    entry["phrases"] = [p for p in DEAL_ACTION_PHRASES if p in tl][:5]
+                    entry["company_found"] = company.lower() in tl
         except asyncio.TimeoutError:
             entry["fetch"] = "timeout"
         except Exception as e:
             entry["fetch"] = f"error: {e}"
+        return entry
 
-        out["url_results"].append(entry)
-
+    out["url_results"] = await asyncio.gather(*[_probe(u) for u in unique_urls])
     return out
 
 
