@@ -19,6 +19,7 @@ SCRAPEDO_KEY   = os.getenv("SCRAPEDO_KEY", "")
 GOOGLE_PSE_KEY = os.getenv("GOOGLE_PSE_KEY", "")   # Google Custom Search API key
 GOOGLE_PSE_CX  = os.getenv("GOOGLE_PSE_CX", "")    # Programmable Search Engine ID
 BRAVE_KEY      = os.getenv("BRAVE_KEY", "")         # Brave Search API — 2000 free/month
+JINA_KEY       = os.getenv("JINA_KEY", "")          # Jina AI Search — s.jina.ai
 
 QUERY_TEMPLATES = [
     # Formal deal / contract — target news wires
@@ -142,6 +143,38 @@ EXTENDED_SOURCE_BASE_URLS = [
 ]
 
 SEM = asyncio.Semaphore(5)
+
+
+async def _jina_search(query: str) -> list[str]:
+    """Jina AI Search (s.jina.ai) — returns top 10 URLs per query.
+    X-Respond-With: no-content means only metadata returned (fast, no scraping).
+    """
+    if not JINA_KEY:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(
+                "https://s.jina.ai/",
+                params={"q": query},
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {JINA_KEY}",
+                    "X-Respond-With": "no-content",
+                },
+            )
+            if r.status_code == 429:
+                logger.warning("Jina AI search rate limited")
+                return []
+            if r.status_code != 200:
+                logger.warning(f"Jina {r.status_code} for '{query[:50]}': {r.text[:120]}")
+                return []
+            urls = [item.get("url", "") for item in r.json().get("data", []) if item.get("url")]
+            if urls:
+                logger.info(f"Jina returned {len(urls)} URLs for '{query[:50]}'")
+            return urls
+    except Exception as e:
+        logger.warning(f"Jina search failed for '{query[:50]}': {e}")
+        return []
 
 
 async def _resolve_gnews_urls(gnews_urls: list[str]) -> list[str]:
@@ -379,25 +412,28 @@ async def _scrapedo_search(query: str) -> list[str]:
 
 async def _run_query(query: str) -> list[str]:
     async with SEM:
-        # 1. Google News RSS — free, no key, searches Google's full news index
-        urls = await _google_news_rss(query)
+        # 1. Jina AI Search — reliable, returns real URLs
+        urls = await _jina_search(query)
         if not urls:
-            # 2. Brave Search (paid — skip if no key)
+            # 2. Google News RSS — free, no key, Google's full news index
+            urls = await _google_news_rss(query)
+        if not urls:
+            # 3. Brave Search
             urls = await _brave_search(query)
         if not urls:
-            # 3. Google PSE (site-restricted engine)
+            # 4. Google PSE (site-restricted engine)
             urls = await _google_pse_search(query)
         if not urls:
-            # 4. Serper.dev / SerpAPI
+            # 5. Serper.dev / SerpAPI
             urls = await _serpapi_search(query)
         if not urls:
-            # 5. DuckDuckGo
+            # 6. DuckDuckGo
             urls = await _ddg_search(query)
         if not urls:
-            # 6. googlesearch-python
+            # 7. googlesearch-python
             urls = await _google_search_fallback(query)
         if not urls:
-            # 7. scrape.do Google SERP parse
+            # 8. scrape.do Google SERP parse
             urls = await _scrapedo_search(query)
         return urls
 
@@ -410,7 +446,7 @@ async def strategy_a_search(config: ScraperConfig) -> list[str]:
     When PSE is the only active backend we cap to the 10 highest-value templates
     and the most recent 3 years to stay within ~90 queries for a single company.
     """
-    pse_only = (bool(GOOGLE_PSE_KEY) or bool(BRAVE_KEY)) and not SERPAPI_KEY and not SERPER_KEY
+    pse_only = (bool(JINA_KEY) or bool(GOOGLE_PSE_KEY) or bool(BRAVE_KEY)) and not SERPAPI_KEY and not SERPER_KEY
 
     companies = config.all_company_names
     years_full = list(range(config.search_year_range["start"], config.search_year_range["end"] + 1))
