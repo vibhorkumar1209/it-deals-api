@@ -493,36 +493,27 @@ async def _run_query(query: str) -> list[str]:
 
 
 async def strategy_a_search(config: ScraperConfig) -> list[str]:
-    """Generate all search queries and collect URLs.
+    """Generate search queries enriched with vendor keywords from the framework list.
 
-    Auto-detects vendor-centric vs customer-centric mode:
-    - If the searched company is a known vendor (AWS, SAP, Salesforce…) it uses
-      QUERY_TEMPLATES_VENDOR which find "Company X selects AWS" style articles.
-    - Otherwise uses QUERY_TEMPLATES_CUSTOMER (the company is the buyer).
-
-    Jina/PSE quota cap: when only free backends are active, caps to 10 templates
-    × last 3 years to stay within daily limits.
+    Auto-detects vendor-centric vs customer-centric mode.
+    Adds up to 2 keyword-enriched queries per vendor keyword cluster (process/technology).
     """
-    pse_only = (bool(JINA_KEY) or bool(GOOGLE_PSE_KEY) or bool(BRAVE_KEY)) and not SERPAPI_KEY and not SERPER_KEY
+    try:
+        from vendor_keywords import get_search_terms
+    except ImportError:
+        get_search_terms = lambda v: []
 
     # Detect if the primary company name is itself a known vendor
     is_vendor_search = config.company_name.lower() in KNOWN_VENDOR_NAMES
-    if is_vendor_search:
-        logger.info(f"Vendor-centric mode for '{config.company_name}' — using vendor templates")
-        base_templates = QUERY_TEMPLATES_VENDOR
-    else:
-        base_templates = QUERY_TEMPLATES_CUSTOMER
+    base_templates = QUERY_TEMPLATES_VENDOR if is_vendor_search else QUERY_TEMPLATES_CUSTOMER
 
-    companies = config.all_company_names
-    years_full = list(range(config.search_year_range["start"], config.search_year_range["end"] + 1))
-
-    # Always cap to 5 best templates × last 2 years = 10 queries max
-    # Keeps discovery under 30s even on slow networks
     companies = [config.company_name]
+    years_full = list(range(config.search_year_range["start"], config.search_year_range["end"] + 1))
     years_full = sorted(years_full)[-2:]
     templates = base_templates[:5]
+
     logger.info(f"Search: {len(templates)} templates × {len(years_full)} years = "
-                f"{len(templates)*len(years_full)} queries")
+                f"{len(templates)*len(years_full)} base queries")
 
     tasks = []
     for company in companies:
@@ -530,6 +521,21 @@ async def strategy_a_search(config: ScraperConfig) -> list[str]:
             for tmpl in templates:
                 query = tmpl.format(company=company, year=year, domain=config.domain)
                 tasks.append(_run_query(query))
+
+    # Keyword-enriched queries: look up the company in vendor_keywords
+    # and fire 1 extra query per keyword cluster that has meaningful terms
+    kw_terms = get_search_terms(config.company_name)
+    if kw_terms:
+        # Pick the most specific terms (avoid generic ones like "SaaS", "Cloud")
+        generic = {"saas", "cloud (public)", "cloud (hybrid)", "transformation",
+                   "digital transformation", "iaaS", "paas"}
+        specific = [t for t in kw_terms if t.lower() not in generic][:6]
+        if specific:
+            year = sorted(years_full)[-1]
+            for term in specific[:3]:  # max 3 extra keyword queries
+                q = f'"{config.company_name}" "{term}" contract OR implementation OR selected {year}'
+                tasks.append(_run_query(q))
+                logger.info(f"Keyword query: {q}")
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     all_urls: list[str] = []
