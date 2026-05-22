@@ -221,30 +221,8 @@ async def _jina_search(query: str) -> list[str]:
 
 
 async def _resolve_gnews_urls(gnews_urls: list[str]) -> list[str]:
-    """Follow Google News redirect URLs to get the real article URLs.
-    Runs concurrently with a small semaphore to avoid hammering Google.
-    """
-    sem = asyncio.Semaphore(5)
-
-    async def _resolve(url: str) -> str:
-        if "news.google.com" not in url:
-            return url
-        async with sem:
-            try:
-                async with httpx.AsyncClient(
-                    timeout=10, follow_redirects=True,
-                    headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-                ) as client:
-                    r = await client.get(url)
-                    final = str(r.url)
-                    return final if "news.google.com" not in final else url
-            except Exception:
-                return url  # keep original on failure
-
-    resolved = await asyncio.gather(*[_resolve(u) for u in gnews_urls])
-    # Keep resolved URLs; for any still pointing to Google News, keep original
-    # so the pipeline's fetch_url can follow the redirect with full headers
-    return [u for u in resolved if u]
+    """No-op: gnews URLs are already extracted from description <a href> in _google_news_rss."""
+    return [u for u in gnews_urls if u]
 
 
 async def _google_news_rss(query: str) -> list[str]:
@@ -264,19 +242,28 @@ async def _google_news_rss(query: str) -> list[str]:
                 logger.warning(f"Google News RSS {r.status_code} for '{query[:50]}'")
                 return []
             soup = BeautifulSoup(r.text, "lxml-xml")
-            raw_urls = []
+            real_urls = []
             for item in soup.find_all("item"):
+                # Description contains HTML: <a href="REAL_URL">title</a>&nbsp;&nbsp;<font>source</font>
+                desc = item.find("description")
+                if desc:
+                    desc_text = desc.get_text()
+                    # Parse embedded HTML in description
+                    desc_soup = BeautifulSoup(desc_text, "html.parser")
+                    a = desc_soup.find("a", href=True)
+                    if a and a["href"].startswith("http") and "news.google.com" not in a["href"]:
+                        real_urls.append(a["href"])
+                        continue
+                # Fallback: try <link> sibling text (some feeds put URL as text node after <link>)
                 link = item.find("link")
-                if link:
-                    href = link.get_text(strip=True) or (link.next_sibling or "")
-                    if isinstance(href, str) and href.startswith("http"):
-                        raw_urls.append(href.strip())
+                if link and link.next_sibling:
+                    href = str(link.next_sibling).strip()
+                    if href.startswith("http") and "news.google.com" not in href:
+                        real_urls.append(href)
 
-            # Resolve Google News redirect URLs to real article URLs
-            urls = await _resolve_gnews_urls(raw_urls)
-            if urls:
-                logger.info(f"Google News RSS: {len(urls)} real URLs for '{query[:50]}'")
-            return urls
+            if real_urls:
+                logger.info(f"Google News RSS: {len(real_urls)} real URLs for '{query[:50]}'")
+            return real_urls
     except Exception as e:
         logger.warning(f"Google News RSS failed for '{query[:50]}': {e}")
         return []
@@ -453,13 +440,24 @@ async def _scrapedo_search(query: str) -> list[str]:
         return []
 
 
+def _simplify_query(query: str) -> str:
+    """Strip site:, OR, quotes-within-quotes — keeps Google News RSS happy."""
+    import re as _re
+    q = _re.sub(r'site:\S+', '', query)       # remove site: operators
+    q = _re.sub(r'\bOR\b', '', q)              # remove OR
+    q = _re.sub(r'["\']', '', q)               # remove quotes
+    return ' '.join(q.split())
+
+
 async def _run_query(query: str) -> list[str]:
     async with SEM:
         # 1. Jina AI Search — reliable, returns real URLs
         urls = await _jina_search(query)
         if not urls:
-            # 2. Google News RSS — free, no key, Google's full news index
-            urls = await _google_news_rss(query)
+            # 2. Google News RSS with simplified query (RSS chokes on OR / site: operators,
+            #    and returns gnews redirect URLs that can't be resolved without JS —
+            #    so we skip it for query-based search and rely on strategy_rss() feeds)
+            pass
         if not urls:
             # 3. Brave Search
             urls = await _brave_search(query)
