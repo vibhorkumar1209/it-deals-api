@@ -78,7 +78,28 @@ def _infer_source_type(url: str, url_type: str) -> str:
     return SOURCE_TYPE_MAP.get(url_type, "news_article")
 
 
+SKIP_DOMAINS = {
+    "linkedin.com", "facebook.com", "instagram.com", "twitter.com", "x.com",
+    "youtube.com", "tiktok.com", "reddit.com", "quora.com",
+    "danelfin.com", "macrotrends.net", "stockanalysis.com", "wisesheets.io",
+    "ambitionbox.com", "glassdoor.com", "indeed.com", "naukri.com",
+    "scribd.com", "slideshare.net", "academia.edu",
+    "amazon.com", "flipkart.com", "ebay.com",
+}
+
+def _should_skip(url: str) -> bool:
+    try:
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc.lstrip("www.")
+        return any(domain == d or domain.endswith("." + d) for d in SKIP_DOMAINS)
+    except Exception:
+        return False
+
+
 async def _process_url(url: str, config: ScraperConfig, failures: list) -> list[dict]:
+    if _should_skip(url):
+        failures.append({"url": url, "failure_type": "skipped_domain"})
+        return []
     async with SEM:
         try:
             text, html, final_type = await asyncio.wait_for(

@@ -22,14 +22,21 @@ BRAVE_KEY      = os.getenv("BRAVE_KEY", "")         # Brave Search API — 2000 
 JINA_KEY       = os.getenv("JINA_KEY", "")          # Jina AI Search — s.jina.ai
 
 # Templates for customer-centric search (company is the buyer / enterprise)
+# Top 5 are news-wire focused — returns press releases not social/stock pages
 QUERY_TEMPLATES_CUSTOMER = [
+    # Press release wires — highest signal, always returns real articles
+    '"{company}" selects OR selected OR signs OR signed site:businesswire.com {year}',
+    '"{company}" selects OR selected OR signs OR signed site:prnewswire.com {year}',
+    '"{company}" technology contract OR implementation site:globenewswire.com OR site:businesswire.com {year}',
+    '"{company}" SAP OR Oracle OR Salesforce OR ServiceNow selects contract {year}',
+    '"{company}" Accenture OR Infosys OR TCS OR Wipro OR IBM outsourcing deal {year}',
+
     # Formal deal / contract
     '"{company}" IT contract awarded signed {year}',
     '"{company}" outsourcing agreement managed services {year}',
     '"{company}" technology deal announcement {year}',
 
     # Vendor selection
-    '"{company}" selects SAP OR Oracle OR Salesforce OR ServiceNow OR Workday {year}',
     '"{company}" selects Microsoft OR AWS OR "Google Cloud" OR IBM OR Accenture {year}',
     '"{company}" chooses OR adopts ERP OR CRM OR HCM {year}',
 
