@@ -526,20 +526,55 @@ def build_deal_record(
     vendor_info = extract_vendor(text, company_names)
     vendor = vendor_info.get("vendor", "")
 
-    # Reject if vendor found but not co-located with company (prevents false associations)
-    if vendor and not _vendor_near_company(text, company_names, vendor):
-        vendor_info = {"vendor": "", "vendor_category": "OTHER"}
-        vendor = ""
+    # Detect vendor-centric mode: company being searched IS itself a vendor
+    # e.g. searching for "AWS" → articles say "Company X selects AWS"
+    company_is_vendor = any(
+        cn.lower() in {
+            "aws", "amazon web services", "microsoft azure", "azure", "google cloud",
+            "sap", "oracle", "salesforce", "servicenow", "workday", "ibm",
+            "accenture", "infosys", "tcs", "wipro", "capgemini", "cognizant",
+            "deloitte", "pwc", "kpmg", "ey", "hcltech", "dxc", "palo alto networks",
+            "crowdstrike", "fortinet", "zscaler", "splunk", "snowflake", "databricks",
+        }
+        for cn in company_names
+    )
+
+    if company_is_vendor:
+        # In vendor-centric mode, the company IS the vendor — find the customer
+        # Look for org names near the company mention that aren't the company itself
+        vendor = company_name   # company is the vendor/product
+        cat = vendor_info.get("vendor_category", "CLOUD")  # use detected cat or default
+
+        # Try to find the customer company via NER or context
+        customer = ""
+        try:
+            import spacy
+            nlp = spacy.load("en_core_web_sm")
+            doc = nlp(text[:3000])
+            orgs = [e.text for e in doc.ents if e.label_ == "ORG"
+                    and e.text.lower() not in {cn.lower() for cn in company_names}]
+            if orgs:
+                customer = orgs[0]
+        except Exception:
+            pass
+
+        # Rewrite company_name to the customer if found, keep vendor as searched company
+        if customer:
+            company_name = customer
+    else:
+        # Reject if vendor found but not co-located with company
+        if vendor and not _vendor_near_company(text, company_names, vendor):
+            vendor_info = {"vendor": "", "vendor_category": "OTHER"}
+            vendor = ""
+        cat = vendor_info.get("vendor_category", "")
 
     si = extract_si_partner(text)
     value = extract_deal_value(text)
     duration = extract_deal_duration(text)
     date = extract_announcement_date(text, url, soup)
-    cat = vendor_info.get("vendor_category", "")
     scope = extract_scope_of_service(text, vendor, cat)
 
-    # Drop record if nothing concrete was found (prevents phantom records)
-    # Must have at least a vendor OR an explicit deal value OR a duration
+    # Drop record if nothing concrete was found
     has_evidence = bool(vendor) or value is not None or bool(duration)
     if not has_evidence:
         return None

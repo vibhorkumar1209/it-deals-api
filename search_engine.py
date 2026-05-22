@@ -21,13 +21,14 @@ GOOGLE_PSE_CX  = os.getenv("GOOGLE_PSE_CX", "")    # Programmable Search Engine 
 BRAVE_KEY      = os.getenv("BRAVE_KEY", "")         # Brave Search API — 2000 free/month
 JINA_KEY       = os.getenv("JINA_KEY", "")          # Jina AI Search — s.jina.ai
 
-QUERY_TEMPLATES = [
-    # Formal deal / contract — target news wires
+# Templates for customer-centric search (company is the buyer / enterprise)
+QUERY_TEMPLATES_CUSTOMER = [
+    # Formal deal / contract
     '"{company}" IT contract awarded signed {year}',
     '"{company}" outsourcing agreement managed services {year}',
     '"{company}" technology deal announcement {year}',
 
-    # Vendor selection — split across vendor groups to stay under query length limits
+    # Vendor selection
     '"{company}" selects SAP OR Oracle OR Salesforce OR ServiceNow OR Workday {year}',
     '"{company}" selects Microsoft OR AWS OR "Google Cloud" OR IBM OR Accenture {year}',
     '"{company}" chooses OR adopts ERP OR CRM OR HCM {year}',
@@ -41,18 +42,60 @@ QUERY_TEMPLATES = [
     '"{company}" technology partnership "strategic alliance" {year}',
     '"{company}" partners Accenture OR Infosys OR TCS OR Wipro OR Capgemini {year}',
 
-    # Outsourcing / managed services with named SIs
+    # Outsourcing / managed services
     '"{company}" outsourcing IBM OR DXC OR Infosys OR HCLTech OR Unisys {year}',
     '"{company}" "systems integrator" OR "SI partner" contract {year}',
 
     # Cybersecurity deals
     '"{company}" cybersecurity contract CrowdStrike OR "Palo Alto" OR Fortinet OR Zscaler {year}',
 
-    # Explicitly target press release newswires
+    # News wire targeting
     '"{company}" "signed" OR "selected" site:businesswire.com {year}',
     '"{company}" "signed" OR "selected" site:prnewswire.com {year}',
     '"{company}" technology site:reuters.com OR site:zdnet.com OR site:ciodive.com {year}',
 ]
+
+# Templates for vendor-centric search (company is the technology provider / vendor)
+QUERY_TEMPLATES_VENDOR = [
+    # Who is selecting / adopting this vendor's product
+    'selects "{company}" contract deal {year}',
+    'adopts "{company}" implementation {year}',
+    'chooses "{company}" deployment {year}',
+    'signs "{company}" agreement {year}',
+
+    # Named customer segments
+    'bank OR insurance OR retail selects "{company}" {year}',
+    'government OR healthcare selects "{company}" {year}',
+    'enterprise selects OR implements "{company}" {year}',
+
+    # Go-live / deployment
+    '"{company}" go-live OR deployment OR rollout customer {year}',
+    '"{company}" customer win deal signed {year}',
+    '"{company}" contract awarded customer {year}',
+
+    # Partnership with SIs
+    '"{company}" Accenture OR Infosys OR Deloitte OR IBM implementation {year}',
+    '"{company}" partner ecosystem deal {year}',
+
+    # News wire
+    '"{company}" selected site:businesswire.com {year}',
+    '"{company}" customer deal site:prnewswire.com OR site:globenewswire.com {year}',
+    '"{company}" wins contract site:reuters.com OR site:zdnet.com {year}',
+]
+
+# Unified default (backward-compatible)
+QUERY_TEMPLATES = QUERY_TEMPLATES_CUSTOMER
+
+# Known vendor names (lowercased) — triggers vendor-centric mode
+KNOWN_VENDOR_NAMES = {
+    "aws", "amazon web services", "microsoft azure", "azure", "google cloud",
+    "sap", "oracle", "salesforce", "servicenow", "workday", "ibm",
+    "accenture", "infosys", "tcs", "wipro", "capgemini", "cognizant",
+    "deloitte", "pwc", "kpmg", "ey", "hcltech", "dxc", "atos",
+    "palo alto networks", "crowdstrike", "fortinet", "zscaler", "splunk",
+    "snowflake", "databricks", "tableau", "power bi", "successfactors",
+    "ariba", "dynamics 365", "netsuite", "infor", "epicor",
+}
 
 NEWS_AGGREGATOR_DOMAINS = [
     # Core newswires
@@ -441,25 +484,35 @@ async def _run_query(query: str) -> list[str]:
 async def strategy_a_search(config: ScraperConfig) -> list[str]:
     """Generate all search queries and collect URLs.
 
-    PSE quota awareness: Google PSE allows 100 queries/day free.
-    With N templates × M years × K company names that can exceed the limit fast.
-    When PSE is the only active backend we cap to the 10 highest-value templates
-    and the most recent 3 years to stay within ~90 queries for a single company.
+    Auto-detects vendor-centric vs customer-centric mode:
+    - If the searched company is a known vendor (AWS, SAP, Salesforce…) it uses
+      QUERY_TEMPLATES_VENDOR which find "Company X selects AWS" style articles.
+    - Otherwise uses QUERY_TEMPLATES_CUSTOMER (the company is the buyer).
+
+    Jina/PSE quota cap: when only free backends are active, caps to 10 templates
+    × last 3 years to stay within daily limits.
     """
     pse_only = (bool(JINA_KEY) or bool(GOOGLE_PSE_KEY) or bool(BRAVE_KEY)) and not SERPAPI_KEY and not SERPER_KEY
+
+    # Detect if the primary company name is itself a known vendor
+    is_vendor_search = config.company_name.lower() in KNOWN_VENDOR_NAMES
+    if is_vendor_search:
+        logger.info(f"Vendor-centric mode for '{config.company_name}' — using vendor templates")
+        base_templates = QUERY_TEMPLATES_VENDOR
+    else:
+        base_templates = QUERY_TEMPLATES_CUSTOMER
 
     companies = config.all_company_names
     years_full = list(range(config.search_year_range["start"], config.search_year_range["end"] + 1))
 
     if pse_only:
-        # Use primary company name only + last 3 years + first 10 templates
         companies = [config.company_name]
         years_full = sorted(years_full)[-3:]
-        templates = QUERY_TEMPLATES[:10]
-        logger.info(f"PSE-only mode: {len(templates)} templates × {len(years_full)} years = "
+        templates = base_templates[:10]
+        logger.info(f"Quota-cap mode: {len(templates)} templates × {len(years_full)} years = "
                     f"{len(templates)*len(years_full)} queries")
     else:
-        templates = QUERY_TEMPLATES
+        templates = base_templates
 
     tasks = []
     for company in companies:
