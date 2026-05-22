@@ -517,30 +517,21 @@ async def strategy_a_search(config: ScraperConfig) -> list[str]:
                 query = tmpl.format(company=company, year=year, domain=config.domain)
                 tasks.append(_run_query(query))
 
-    # Keyword-enriched queries: use process/technology keywords from the deal domain list
-    # These are NOT vendor-specific — they improve recall for any company scan
+    # Keyword-enriched queries using the independent Process + Technology keyword lists
+    # from the Vendor List sheet. These are domain terms that signal IT deals —
+    # NOT tied to any specific vendor.
     try:
-        from deal_keywords import PROCESS_KEYWORDS, TECHNOLOGY_KEYWORDS
-        # Pick industry-relevant process keywords based on config sector
-        sector = (config.industry_sector or "").lower()
-        if "bank" in sector or "financ" in sector or "insur" in sector:
-            priority_kw = ["Core Banking", "Payment Processing", "ATM Management",
-                           "Loans (Banking)", "Online banking", "Card Processing",
-                           "Anti-Money Laundering", "Fraud Detection", "Managed Security"]
-        elif "health" in sector or "pharma" in sector:
-            priority_kw = ["Electronic Health Record", "Claims", "Clinical Data Management",
-                           "Health Information Management System"]
-        elif "retail" in sector or "commerce" in sector:
-            priority_kw = ["Point of Sale", "Order Management", "e-commerce",
-                           "Inventory Management", "Supply Chain Planning"]
-        elif "manufactur" in sector or "logistic" in sector:
-            priority_kw = ["Manufacturing", "Supply Chain Planning", "Enterprise Asset Management",
-                           "Transportation Management Solution", "Fleet Scheduling/Planning"]
-        else:
-            priority_kw = PROCESS_KEYWORDS[:6]  # generic top process terms
-
+        from deal_keywords import PROCESS_KEYWORDS, TECHNOLOGY_KEYWORDS, PRODUCT_KEYWORDS
+        import random as _random
         year = sorted(years_full)[-1]
-        for kw in priority_kw[:3]:   # max 3 keyword queries to stay within quota
+        # Sample 3 process + 2 technology + 1 product keyword per scan (random selection
+        # ensures variety across repeated scans of the same company)
+        sampled = (
+            _random.sample(PROCESS_KEYWORDS, min(3, len(PROCESS_KEYWORDS))) +
+            _random.sample(TECHNOLOGY_KEYWORDS, min(2, len(TECHNOLOGY_KEYWORDS))) +
+            _random.sample(PRODUCT_KEYWORDS, min(1, len(PRODUCT_KEYWORDS)))
+        )
+        for kw in sampled:
             q = f'"{config.company_name}" "{kw}" contract OR implementation OR selected {year}'
             tasks.append(_run_query(q))
             logger.info(f"Keyword-enriched query: {q}")
