@@ -498,11 +498,6 @@ async def strategy_a_search(config: ScraperConfig) -> list[str]:
     Auto-detects vendor-centric vs customer-centric mode.
     Adds up to 2 keyword-enriched queries per vendor keyword cluster (process/technology).
     """
-    try:
-        from vendor_keywords import get_search_terms
-    except ImportError:
-        get_search_terms = lambda v: []
-
     # Detect if the primary company name is itself a known vendor
     is_vendor_search = config.company_name.lower() in KNOWN_VENDOR_NAMES
     base_templates = QUERY_TEMPLATES_VENDOR if is_vendor_search else QUERY_TEMPLATES_CUSTOMER
@@ -522,20 +517,35 @@ async def strategy_a_search(config: ScraperConfig) -> list[str]:
                 query = tmpl.format(company=company, year=year, domain=config.domain)
                 tasks.append(_run_query(query))
 
-    # Keyword-enriched queries: look up the company in vendor_keywords
-    # and fire 1 extra query per keyword cluster that has meaningful terms
-    kw_terms = get_search_terms(config.company_name)
-    if kw_terms:
-        # Pick the most specific terms (avoid generic ones like "SaaS", "Cloud")
-        generic = {"saas", "cloud (public)", "cloud (hybrid)", "transformation",
-                   "digital transformation", "iaaS", "paas"}
-        specific = [t for t in kw_terms if t.lower() not in generic][:6]
-        if specific:
-            year = sorted(years_full)[-1]
-            for term in specific[:3]:  # max 3 extra keyword queries
-                q = f'"{config.company_name}" "{term}" contract OR implementation OR selected {year}'
-                tasks.append(_run_query(q))
-                logger.info(f"Keyword query: {q}")
+    # Keyword-enriched queries: use process/technology keywords from the deal domain list
+    # These are NOT vendor-specific — they improve recall for any company scan
+    try:
+        from deal_keywords import PROCESS_KEYWORDS, TECHNOLOGY_KEYWORDS
+        # Pick industry-relevant process keywords based on config sector
+        sector = (config.industry_sector or "").lower()
+        if "bank" in sector or "financ" in sector or "insur" in sector:
+            priority_kw = ["Core Banking", "Payment Processing", "ATM Management",
+                           "Loans (Banking)", "Online banking", "Card Processing",
+                           "Anti-Money Laundering", "Fraud Detection", "Managed Security"]
+        elif "health" in sector or "pharma" in sector:
+            priority_kw = ["Electronic Health Record", "Claims", "Clinical Data Management",
+                           "Health Information Management System"]
+        elif "retail" in sector or "commerce" in sector:
+            priority_kw = ["Point of Sale", "Order Management", "e-commerce",
+                           "Inventory Management", "Supply Chain Planning"]
+        elif "manufactur" in sector or "logistic" in sector:
+            priority_kw = ["Manufacturing", "Supply Chain Planning", "Enterprise Asset Management",
+                           "Transportation Management Solution", "Fleet Scheduling/Planning"]
+        else:
+            priority_kw = PROCESS_KEYWORDS[:6]  # generic top process terms
+
+        year = sorted(years_full)[-1]
+        for kw in priority_kw[:3]:   # max 3 keyword queries to stay within quota
+            q = f'"{config.company_name}" "{kw}" contract OR implementation OR selected {year}'
+            tasks.append(_run_query(q))
+            logger.info(f"Keyword-enriched query: {q}")
+    except ImportError:
+        pass
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     all_urls: list[str] = []
