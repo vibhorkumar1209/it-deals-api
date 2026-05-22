@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
 SERPER_KEY = os.getenv("SERPER_KEY", "")
 SCRAPEDO_KEY = os.getenv("SCRAPEDO_KEY", "")
+GOOGLE_PSE_KEY = os.getenv("GOOGLE_PSE_KEY", "")   # Google Custom Search API key
+GOOGLE_PSE_CX  = os.getenv("GOOGLE_PSE_CX", "")    # Programmable Search Engine ID
 
 QUERY_TEMPLATES = [
     # Formal deal / contract — target news wires
@@ -141,6 +143,47 @@ EXTENDED_SOURCE_BASE_URLS = [
 SEM = asyncio.Semaphore(5)
 
 
+async def _google_pse_search(query: str) -> list[str]:
+    """Google Programmable Search Engine — 100 free queries/day, 10 results per call.
+    Batches two calls (start=1, start=11) to get up to 20 results per query.
+    Docs: https://developers.google.com/custom-search/v1/reference/rest/v1/cse/list
+    """
+    if not GOOGLE_PSE_KEY or not GOOGLE_PSE_CX:
+        return []
+    urls: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            for start in (1, 11):          # page 1 and page 2
+                r = await client.get(
+                    "https://www.googleapis.com/customsearch/v1",
+                    params={
+                        "key": GOOGLE_PSE_KEY,
+                        "cx":  GOOGLE_PSE_CX,
+                        "q":   query,
+                        "num": 10,         # max per request
+                        "start": start,
+                        "gl":  "us",
+                        "hl":  "en",
+                    },
+                )
+                if r.status_code == 429:
+                    logger.warning("Google PSE daily quota reached")
+                    break
+                if r.status_code != 200:
+                    logger.warning(f"Google PSE {r.status_code} for '{query[:50]}': {r.text[:120]}")
+                    break
+                data = r.json()
+                for item in data.get("items", []):
+                    link = item.get("link", "")
+                    if link:
+                        urls.append(link)
+        if urls:
+            logger.info(f"Google PSE returned {len(urls)} URLs for '{query[:50]}'")
+    except Exception as e:
+        logger.warning(f"Google PSE failed for '{query[:50]}': {e}")
+    return urls
+
+
 async def _serpapi_search(query: str) -> list[str]:
     # Try Serper.dev first (serper.dev API)
     if SERPER_KEY:
@@ -238,36 +281,59 @@ async def _scrapedo_search(query: str) -> list[str]:
 
 async def _run_query(query: str) -> list[str]:
     async with SEM:
-        urls = await _serpapi_search(query)
+        # 1. Google PSE (100 free/day — preferred when credits available)
+        urls = await _google_pse_search(query)
         if not urls:
+            # 2. Serper.dev / SerpAPI
+            urls = await _serpapi_search(query)
+        if not urls:
+            # 3. DuckDuckGo (no key needed, rate-limited)
             urls = await _ddg_search(query)
         if not urls:
+            # 4. googlesearch-python (slow, scrapy fallback)
             urls = await _google_search_fallback(query)
         if not urls:
+            # 5. scrape.do Google SERP parse
             urls = await _scrapedo_search(query)
         return urls
 
 
 async def strategy_a_search(config: ScraperConfig) -> list[str]:
-    """Generate all search queries and collect URLs."""
-    all_urls: list[str] = []
-    tasks = []
+    """Generate all search queries and collect URLs.
+
+    PSE quota awareness: Google PSE allows 100 queries/day free.
+    With N templates × M years × K company names that can exceed the limit fast.
+    When PSE is the only active backend we cap to the 10 highest-value templates
+    and the most recent 3 years to stay within ~90 queries for a single company.
+    """
+    pse_only = bool(GOOGLE_PSE_KEY) and not SERPAPI_KEY and not SERPER_KEY
 
     companies = config.all_company_names
-    years = range(config.search_year_range["start"], config.search_year_range["end"] + 1)
+    years_full = list(range(config.search_year_range["start"], config.search_year_range["end"] + 1))
 
+    if pse_only:
+        # Use primary company name only + last 3 years + first 10 templates
+        companies = [config.company_name]
+        years_full = sorted(years_full)[-3:]
+        templates = QUERY_TEMPLATES[:10]
+        logger.info(f"PSE-only mode: {len(templates)} templates × {len(years_full)} years = "
+                    f"{len(templates)*len(years_full)} queries")
+    else:
+        templates = QUERY_TEMPLATES
+
+    tasks = []
     for company in companies:
-        for year in years:
-            for tmpl in QUERY_TEMPLATES:
+        for year in years_full:
+            for tmpl in templates:
                 query = tmpl.format(company=company, year=year, domain=config.domain)
                 tasks.append(_run_query(query))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
+    all_urls: list[str] = []
     for r in results:
         if isinstance(r, list):
             all_urls.extend(r)
 
-    # Deduplicate
     return list(dict.fromkeys(u for u in all_urls if u))
 
 
