@@ -435,75 +435,81 @@ def extract_scope_of_service(text: str, vendor: str, vendor_category: str) -> st
         end = min(len(sentences), vendor_sent_idx + 3)
         window = " ".join(sentences[start:end])
 
-    if len(window.split()) > 200:
-        # Try Claude API for summarization
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if api_key:
-            try:
-                import anthropic
-                client = anthropic.Anthropic(api_key=api_key)
-                msg = client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=100,
-                    messages=[{
-                        "role": "user",
-                        "content": f"Summarize in one sentence the IT service scope: {window[:1500]}"
-                    }]
-                )
-                return msg.content[0].text.strip()
-            except Exception as e:
-                logger.warning(f"Claude scope summary failed: {e}")
-
+    # Return the most relevant sentence window — no LLM call (avoids hallucination)
     return window[:300].strip()
 
 
 def is_deal_relevant(text: str, company_names: list[str], focus_deal_types: list[str]) -> bool:
     """
-    Returns True if the text mentions the company AND any technology/partnership signal.
-    Intentionally broad — captures formal deals, vendor selections, implementations,
-    partnerships, digital initiatives, and platform announcements.
+    Returns True only when the text both mentions the company AND contains strong,
+    explicit IT deal/partnership/implementation language within 1500 chars of
+    that company mention.  Generic words (cloud, platform, program, AI) alone
+    no longer qualify — they must appear alongside an action verb or named vendor.
     """
     text_lower = text.lower()
 
-    # Must mention the company (or one of its aliases)
-    if not any(cn.lower() in text_lower for cn in company_names):
+    # Find the first occurrence of any company name
+    company_pos = -1
+    for cn in company_names:
+        idx = text_lower.find(cn.lower())
+        if idx != -1 and (company_pos == -1 or idx < company_pos):
+            company_pos = idx
+    if company_pos == -1:
         return False
 
-    # Must have at least one technology/partnership/initiative signal
-    signals = [
-        # Formal deal language
-        "deal", "contract", "agreement", "signed", "awarded", "tender",
-        "procurement", "rfp", "rfq", "bid",
-        # Vendor selection
-        "selected", "selects", "chooses", "chosen", "adopts", "adopted",
-        "partners with", "partnership", "alliance", "collaboration",
-        "teams with", "works with", "joined forces",
-        # Implementation / deployment
-        "implements", "implementation", "deployed", "deployment", "rollout",
-        "roll out", "goes live", "go-live", "went live", "launched",
-        "upgrade", "migration", "migrates", "migrating",
-        # Transformation / initiative
-        "transformation", "modernisation", "modernization", "digitisation",
-        "digitization", "digitalisation", "digitalization", "initiative",
-        "programme", "program", "project", "platform",
-        # Managed / outsourced services
-        "managed service", "outsourc", "managed by", "operated by",
-        "systems integrator", "si partner",
-        # Named vendors (any mention is relevant)
-        "sap", "oracle", "salesforce", "servicenow", "workday",
-        "microsoft azure", "azure", " aws ", "amazon web services",
-        "google cloud", "ibm", "infosys", "tcs", "wipro", "accenture",
-        "capgemini", "cognizant", "deloitte", "pwc", "ey ", "kpmg",
-        "palo alto", "crowdstrike", "fortinet", "zscaler", "splunk",
-        "snowflake", "databricks", "tableau", "power bi", "servicenow",
-        "dynamics 365", "workday", "successfactors", "ariba",
-        # General tech category words
-        "erp", "crm", "hcm", "scm", "itsm", "cloud", "cybersecurity",
-        "data analytics", "artificial intelligence", " ai ", "machine learning",
-        "blockchain", "iot ", "automation", "robotic process",
-        "infrastructure", "data centre", "data center",
+    # Search window: 1500 chars either side of company mention
+    window = text_lower[max(0, company_pos - 1500): company_pos + 1500]
+
+    # Tier-1: explicit deal / action language — any single hit qualifies
+    tier1 = [
+        "signed a contract", "awarded a contract", "contract awarded",
+        "outsourcing agreement", "outsourcing deal", "managed services agreement",
+        "technology agreement", "it agreement", "service agreement",
+        "selects ", "selected ", "chooses ", "chosen ", "adopts ", "adopted ",
+        "implements ", "implementation of", "go-live", "goes live", "went live",
+        "rolled out", "deploying ", "deployment of",
+        "partners with", "partnership with", "strategic alliance",
+        "teams with", "joined forces with",
+        "rfp ", "rfq ", " bid ", "tender ",
+        "digital transformation", "cloud migration", "cloud adoption",
+        "managed service", "outsourc", "systems integrator", "si partner",
     ]
-    return any(s in text_lower for s in signals)
+    if any(s in window for s in tier1):
+        return True
+
+    # Tier-2: named vendor/SI must appear alongside an action word
+    vendors = [
+        "sap", "oracle", "salesforce", "servicenow", "workday", "microsoft dynamics",
+        "azure", "amazon web services", " aws ", "google cloud", "snowflake",
+        "databricks", "palo alto networks", "crowdstrike", "fortinet", "zscaler",
+        "splunk", "power bi", "successfactors", "ariba", "dynamics 365",
+        "infosys", "tcs", "wipro", "accenture", "capgemini", "cognizant",
+        "deloitte", "ibm consulting", "hcltech", "dxc", "atos",
+    ]
+    actions = [
+        "implement", "deploy", "select", "choose", "adopt", "partner",
+        "contract", "agreement", "outsourc", "migrat", "rollout",
+        "go-live", "integrat", "award",
+    ]
+    vendor_in_window = any(v in window for v in vendors)
+    action_in_window = any(a in window for a in actions)
+    return vendor_in_window and action_in_window
+
+
+def _vendor_near_company(text: str, company_names: list[str], vendor: str, window: int = 800) -> bool:
+    """Return True if vendor appears within `window` chars of a company mention."""
+    if not vendor:
+        return False
+    tl = text.lower()
+    vl = vendor.lower()
+    for cn in company_names:
+        ci = tl.find(cn.lower())
+        if ci == -1:
+            continue
+        region = tl[max(0, ci - window): ci + window]
+        if vl in region:
+            return True
+    return False
 
 
 def build_deal_record(
@@ -518,14 +524,25 @@ def build_deal_record(
         return None
 
     vendor_info = extract_vendor(text, company_names)
+    vendor = vendor_info.get("vendor", "")
+
+    # Reject if vendor found but not co-located with company (prevents false associations)
+    if vendor and not _vendor_near_company(text, company_names, vendor):
+        vendor_info = {"vendor": "", "vendor_category": "OTHER"}
+        vendor = ""
+
     si = extract_si_partner(text)
     value = extract_deal_value(text)
     duration = extract_deal_duration(text)
     date = extract_announcement_date(text, url, soup)
-    scope = extract_scope_of_service(text, vendor_info.get("vendor", ""), vendor_info.get("vendor_category", ""))
-
-    vendor = vendor_info.get("vendor", "")
     cat = vendor_info.get("vendor_category", "")
+    scope = extract_scope_of_service(text, vendor, cat)
+
+    # Drop record if nothing concrete was found (prevents phantom records)
+    # Must have at least a vendor OR an explicit deal value OR a duration
+    has_evidence = bool(vendor) or value is not None or bool(duration)
+    if not has_evidence:
+        return None
 
     # Classify record type from text signals
     tl = text.lower()
@@ -563,20 +580,25 @@ def build_deal_record(
     else:
         confidence = "Low"
 
-    # Summary
+    # Summary — only include facts actually extracted from the source
     type_label = record_type.replace("_", " ").title()
     summary_parts = []
-    if vendor and date:
-        summary_parts.append(f"{company_name} announced a {type_label.lower()} with {vendor} ({date}).")
-    elif date:
-        summary_parts.append(f"{company_name} announced a technology {type_label.lower()} ({date}).")
     if scope:
-        summary_parts.append(scope)
+        # scope is a direct text window — use it as the primary summary
+        summary_parts.append(scope[:300])
+    if vendor and date:
+        summary_parts.append(f"[{company_name} / {vendor} — {date}]")
+    elif vendor:
+        summary_parts.append(f"[{company_name} / {vendor}]")
+    elif date:
+        summary_parts.append(f"[{company_name} — {date}]")
     if value is not None:
-        summary_parts.append(f"Estimated value: ${value}M USD.")
+        summary_parts.append(f"Value: ${value}M.")
     if duration:
         summary_parts.append(f"Duration: {duration}.")
-    summary = " ".join(summary_parts)[:500] or f"{type_label} details extracted from source."
+    summary = " ".join(summary_parts)[:500]
+    if not summary:
+        summary = scope[:300] if scope else ""
 
     return {
         "company_name": company_name,

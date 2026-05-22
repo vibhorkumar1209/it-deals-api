@@ -18,38 +18,36 @@ SERPER_KEY = os.getenv("SERPER_KEY", "")
 SCRAPEDO_KEY = os.getenv("SCRAPEDO_KEY", "")
 
 QUERY_TEMPLATES = [
-    # Formal deal / contract
-    '"{company}" IT deal signed {year}',
-    '"{company}" technology contract awarded {year}',
-    '"{company}" outsourcing agreement signed {year}',
+    # Formal deal / contract — target news wires
+    '"{company}" IT contract awarded signed {year}',
+    '"{company}" outsourcing agreement managed services {year}',
+    '"{company}" technology deal announcement {year}',
 
-    # Vendor selection / platform adoption
-    '"{company}" selects OR chooses OR adopts SAP OR Oracle OR Salesforce OR ServiceNow OR Workday OR Microsoft OR AWS OR Google Cloud {year}',
-    '"{company}" implements OR deploys OR rolls out ERP OR CRM OR HCM OR cloud OR platform {year}',
-    '"{company}" goes live OR go-live SAP OR Oracle OR Workday OR Salesforce {year}',
+    # Vendor selection — split across vendor groups to stay under query length limits
+    '"{company}" selects SAP OR Oracle OR Salesforce OR ServiceNow OR Workday {year}',
+    '"{company}" selects Microsoft OR AWS OR "Google Cloud" OR IBM OR Accenture {year}',
+    '"{company}" chooses OR adopts ERP OR CRM OR HCM {year}',
+
+    # Implementation / go-live
+    '"{company}" SAP implementation go-live {year}',
+    '"{company}" Oracle OR Workday OR Salesforce deployment rollout {year}',
+    '"{company}" "Microsoft Azure" OR AWS migration deployment {year}',
 
     # Partnership / alliance
-    '"{company}" technology partnership OR strategic alliance OR collaboration {year}',
-    '"{company}" partners with OR teams with OR works with technology {year}',
+    '"{company}" technology partnership "strategic alliance" {year}',
+    '"{company}" partners Accenture OR Infosys OR TCS OR Wipro OR Capgemini {year}',
 
-    # Digital / transformation programmes
-    '"{company}" digital transformation program OR initiative {year}',
-    '"{company}" modernisation OR modernization technology {year}',
-    '"{company}" cloud migration OR cloud adoption {year}',
+    # Outsourcing / managed services with named SIs
+    '"{company}" outsourcing IBM OR DXC OR Infosys OR HCLTech OR Unisys {year}',
+    '"{company}" "systems integrator" OR "SI partner" contract {year}',
 
-    # Vendor-specific implementations
-    '"{company}" SAP implementation OR Oracle implementation OR Salesforce implementation {year}',
-    '"{company}" Microsoft Azure OR AWS OR Google Cloud deployment {year}',
-    '"{company}" ServiceNow OR Workday OR Dynamics 365 implementation {year}',
+    # Cybersecurity deals
+    '"{company}" cybersecurity contract CrowdStrike OR "Palo Alto" OR Fortinet OR Zscaler {year}',
 
-    # Managed services / outsourcing
-    '"{company}" managed services OR IT outsourcing {year}',
-    '"{company}" systems integrator OR SI partner OR Accenture OR Infosys OR TCS OR Wipro {year}',
-
-    # Annual reports / investor disclosures
-    '"{company}" {year} annual report technology investment',
-    'site:{domain} press release technology {year}',
-    '"{company}" vendor OR platform OR solution announcement {year}',
+    # Explicitly target press release newswires
+    '"{company}" "signed" OR "selected" site:businesswire.com {year}',
+    '"{company}" "signed" OR "selected" site:prnewswire.com {year}',
+    '"{company}" technology site:reuters.com OR site:zdnet.com OR site:ciodive.com {year}',
 ]
 
 NEWS_AGGREGATOR_DOMAINS = [

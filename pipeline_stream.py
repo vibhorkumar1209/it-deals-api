@@ -179,6 +179,7 @@ async def stream_pipeline(
             key = "|".join([
                 deal.get("company_name", "").lower(),
                 deal.get("vendor", "").lower(),
+                deal.get("record_type", "").lower(),
                 deal.get("announcement_date", "")[:7],
                 scope.lower(),
             ])
@@ -262,6 +263,7 @@ async def extract_from_cached_urls(
             key = "|".join([
                 deal.get("company_name", "").lower(),
                 deal.get("vendor", "").lower(),
+                deal.get("record_type", "").lower(),
                 deal.get("announcement_date", "")[:7],
                 scope.lower(),
             ])
