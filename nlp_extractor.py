@@ -16525,13 +16525,19 @@ def extract_scope_of_service(text: str, vendor: str, vendor_category: str) -> st
 NON_DEAL_DISQUALIFIERS = [
     "magic quadrant", "gartner peer insights", "forrester wave",
     "idc marketscape", "named a leader", "named a visionary",
-    "named a challenger", "positioned in the", "recognition award",
-    "best place to work", "employer of the year", "ranked #", "ranked no.",
-    "analyst report", "market report", "market research", "market size",
-    "press release issued by", "stock price", "share price", "quarterly results",
-    "earnings call", "q1 results", "q2 results", "q3 results", "q4 results",
+    "named a challenger", "recognition award",
+    "best place to work", "employer of the year",
+    "analyst report", "market report", "market research",
     "job opening", "we are hiring", "careers page", "apply now",
-    "ceo interview", "cto interview", "opinion:", "commentary:",
+    "ceo interview", "cto interview",
+    # Only reject earnings articles when these appear as PRIMARY topic in first 500 chars
+]
+
+# Phrases that disqualify ONLY when they appear in the first 500 chars (page is about them)
+NON_DEAL_DISQUALIFIERS_PRIMARY = [
+    "quarterly results", "earnings call", "q1 results", "q2 results",
+    "q3 results", "q4 results", "annual results", "full year results",
+    "stock comparison", "stock analysis", "compare stocks",
 ]
 
 # ── Phrases that MUST appear near company for a true deal ─────────────────────
@@ -16574,29 +16580,43 @@ DEAL_ACTION_PHRASES = [
 
 def is_deal_relevant(text: str, company_names: list[str], focus_deal_types: list[str]) -> bool:
     """
-    Strict two-step check:
-    1. Reject pages that are awards / analyst reports / stock news / job posts.
-    2. Require an explicit deal-action phrase within 800 chars of the company mention.
-       Generic terms (digital transformation, cloud adoption) no longer qualify.
+    Two-step check:
+    1. Reject pages whose PRIMARY topic is awards / analyst reports / jobs.
+    2. Require an explicit deal-action phrase near ANY company mention in text.
     """
     text_lower = text.lower()
+    first_500 = text_lower[:500]
 
-    # Step 1 — hard reject non-deal page types
+    # Step 1a — hard reject (anywhere in text)
     if any(d in text_lower for d in NON_DEAL_DISQUALIFIERS):
         return False
 
-    # Step 2 — company must appear in text
-    company_pos = -1
-    for cn in company_names:
-        idx = text_lower.find(cn.lower())
-        if idx != -1 and (company_pos == -1 or idx < company_pos):
-            company_pos = idx
-    if company_pos == -1:
+    # Step 1b — reject only when the disqualifier is the main topic (first 500 chars)
+    if any(d in first_500 for d in NON_DEAL_DISQUALIFIERS_PRIMARY):
         return False
 
-    # Step 3 — a deal-action phrase must appear within 800 chars of the company
-    window = text_lower[max(0, company_pos - 800): company_pos + 800]
-    return any(phrase in window for phrase in DEAL_ACTION_PHRASES)
+    # Step 2 — collect ALL positions where company appears
+    positions = []
+    for cn in company_names:
+        cn_lower = cn.lower()
+        start = 0
+        while True:
+            idx = text_lower.find(cn_lower, start)
+            if idx == -1:
+                break
+            positions.append(idx)
+            start = idx + 1
+
+    if not positions:
+        return False
+
+    # Step 3 — a deal-action phrase must appear within 1200 chars of ANY company mention
+    for pos in positions:
+        window = text_lower[max(0, pos - 400): pos + 1200]
+        if any(phrase in window for phrase in DEAL_ACTION_PHRASES):
+            return True
+
+    return False
 
 
 def _vendor_near_company(text: str, company_names: list[str], vendor: str, window: int = 800) -> bool:
