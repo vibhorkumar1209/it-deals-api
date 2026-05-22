@@ -1817,6 +1817,50 @@ SCOPE_KEYWORDS: dict[str, list[str]] = {
 }
 
 
+def extract_deal_description(text: str, company_names: list[str], vendor: str) -> str:
+    """Extract 1-3 sentences from the article that best describe the deal.
+    Looks for sentences containing both the company and the vendor/deal keywords,
+    then returns the most informative window — no fabrication, only source text.
+    """
+    sentences = re.split(r'(?<=[.!?])\s+', text.replace('\n', ' '))
+    deal_keywords = [
+        "selects", "selected", "signs", "signed", "contract", "agreement",
+        "implements", "deploys", "partners", "partnership", "outsourc",
+        "go-live", "migration", "awarded", "chooses", "adopts", "deal",
+        "managed service", "transformation",
+    ]
+    company_lower = [c.lower() for c in company_names]
+    vendor_lower = vendor.lower() if vendor else ""
+
+    scored = []
+    for i, sent in enumerate(sentences):
+        sl = sent.lower()
+        score = 0
+        if any(c in sl for c in company_lower):
+            score += 2
+        if vendor_lower and vendor_lower in sl:
+            score += 2
+        if any(k in sl for k in deal_keywords):
+            score += 1
+        if score >= 3:
+            scored.append((score, i, sent))
+
+    if scored:
+        scored.sort(key=lambda x: -x[0])
+        best_idx = scored[0][1]
+        # Return best sentence + next sentence for context
+        window_sents = sentences[best_idx: best_idx + 2]
+        return " ".join(window_sents)[:400].strip()
+
+    # Fallback: first 400 chars around first company mention
+    tl = text.lower()
+    for cn in company_lower:
+        idx = tl.find(cn)
+        if idx != -1:
+            return text[max(0, idx - 50): idx + 350].strip()[:400]
+    return ""
+
+
 def extract_scope_of_service(text: str, vendor: str, vendor_category: str) -> str:
     if not vendor:
         return ""
@@ -1999,9 +2043,10 @@ def build_deal_record(
     duration = extract_deal_duration(text)
     date = extract_announcement_date(text, url, soup)
     scope = extract_scope_of_service(text, vendor, cat)
+    description = extract_deal_description(text, company_names, vendor)
 
-    # Drop record if nothing concrete was found
-    has_evidence = bool(vendor) or value is not None or bool(duration)
+    # Drop record if none of the 4 core fields can be populated
+    has_evidence = bool(vendor) or bool(description) or bool(date)
     if not has_evidence:
         return None
 
@@ -2062,19 +2107,23 @@ def build_deal_record(
         summary = scope[:300] if scope else ""
 
     return {
-        "company_name": company_name,
-        "deal_title": title,
-        "record_type": record_type,          # contract | partnership | implementation | vendor_selection | initiative | technology_announcement
-        "vendor": vendor,
-        "vendor_category": cat,
-        "si_partner": si,
+        # ── Core fields (always populated where possible) ──────────────────────
+        "company_name":     company_name,           # Customer name
+        "vendor":           vendor,                 # Vendor name
+        "deal_description": description,            # Extracted sentences from article
+        "announcement_date": date or "",            # Date of the article / announcement
+
+        # ── Secondary fields (filled when available) ───────────────────────────
+        "deal_title":       title,
+        "record_type":      record_type,            # contract | partnership | implementation | vendor_selection | initiative | technology_announcement
+        "vendor_category":  cat,
+        "si_partner":       si,
         "scope_of_service": scope,
-        "deal_value_usd": value,
-        "deal_duration": duration,
-        "announcement_date": date or "",
-        "source_url": url,
-        "all_source_urls": [url],
-        "source_type": source_type,
+        "deal_value_usd":   value,
+        "deal_duration":    duration,
+        "source_url":       url,
+        "all_source_urls":  [url],
+        "source_type":      source_type,
         "confidence_level": confidence,
-        "summary": summary,
+        "summary":          summary,
     }
