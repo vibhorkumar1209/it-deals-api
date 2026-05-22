@@ -204,12 +204,10 @@ async def debug(company: str = "HDFC Bank"):
     Returns: env vars, discovered URLs, per-URL fetch result, per-URL extraction result.
     Hit: /api/debug?company=HDFC+Bank
     """
-    import traceback
     import asyncio
     from search_engine import _jina_search, JINA_KEY, QUERY_TEMPLATES_CUSTOMER
-    from website_router import fetch_via_jina_reader, fetch_url, classify_url
-    from nlp_extractor import is_deal_relevant, build_deal_record
-    from config_loader import ScraperConfig
+    from website_router import fetch_via_jina_reader, classify_url
+    from nlp_extractor import is_deal_relevant, build_deal_record, NON_DEAL_DISQUALIFIERS, DEAL_ACTION_PHRASES
 
     year = 2025
     out: dict = {
@@ -244,24 +242,16 @@ async def debug(company: str = "HDFC Bank"):
     unique_urls = [u for u in all_urls if not (u in seen or seen.add(u))][:10]  # type: ignore
 
     # ── Fetch + extract each URL ───────────────────────────────────────────────
-    config = ScraperConfig(
-        company_name=company,
-        all_company_names=[company],
-        known_sources=[],
-        deal_types=[],
-        years=[year],
-    )
-
     for url in unique_urls:
         entry: dict = {"url": url, "classify": classify_url(url)}
         try:
-            text, html, ftype = await asyncio.wait_for(
-                fetch_url(url, None, config), timeout=12
-            )
-            entry["fetch"] = "ok" if text else "empty"
-            entry["fetch_chars"] = len(text) if text else 0
-            entry["fetch_type"] = ftype
-            if text:
+            result = await asyncio.wait_for(fetch_via_jina_reader(url), timeout=12)
+            if result is None:
+                entry["fetch"] = "empty"
+            else:
+                text, _ = result
+                entry["fetch"] = "ok"
+                entry["fetch_chars"] = len(text)
                 entry["text_preview"] = text[:300]
                 relevant = is_deal_relevant(text, [company], [])
                 entry["is_deal_relevant"] = relevant
@@ -272,9 +262,7 @@ async def debug(company: str = "HDFC Bank"):
                     )
                     entry["deal"] = deal
                 else:
-                    # Show why it was rejected
                     tl = text.lower()
-                    from nlp_extractor import NON_DEAL_DISQUALIFIERS, DEAL_ACTION_PHRASES
                     disq = [d for d in NON_DEAL_DISQUALIFIERS if d in tl]
                     found_phrases = [p for p in DEAL_ACTION_PHRASES if p in tl]
                     entry["rejected_because"] = {
