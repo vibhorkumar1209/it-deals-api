@@ -100,19 +100,22 @@ async def fetch_type1_static(url: str) -> tuple[str, str] | None:
                 or soup.find("body")
             )
             text = body.get_text(separator=" ", strip=True) if body else r.text
-            # Check if JS-rendered (too little content)
+            # Check if JS-rendered (too little content) — try Jina Reader
             if _is_js_rendered(text):
                 return await fetch_type2_js(url)
             return text, r.text
     except Exception as e:
         logger.warning(f"TYPE1 fetch failed {url}: {e}")
-        return None   # no fallback on TYPE1 — per-URL timeout handles it
+        # Fallback to Jina Reader on fetch error
+        return await fetch_via_jina_reader(url)
 
 
 async def fetch_type2_js(url: str) -> tuple[str, str] | None:
-    """JS-rendered SPA — try scrape.do (handles JS); Playwright not available on Render."""
-    result = await fetch_via_scrapedo(url)
-    return result
+    """JS-rendered SPA — Jina Reader first, scrape.do fallback."""
+    result = await fetch_via_jina_reader(url)
+    if result:
+        return result
+    return await fetch_via_scrapedo(url)
 
 
 async def fetch_type3_soft_paywall(url: str) -> tuple[str, str] | None:
@@ -369,6 +372,38 @@ def _extract_pdf_text(path: str) -> str:
     except Exception as e:
         logger.warning(f"PDF OCR failed: {e}")
         return ""
+
+
+async def fetch_via_jina_reader(url: str) -> tuple[str, str] | None:
+    """Fetch any URL via Jina Reader (r.jina.ai) — renders JS, bypasses many blocks.
+    Returns clean markdown text. Uses the same JINA_KEY as the search API.
+    Free tier available; much more reliable than scrape.do for news sites.
+    """
+    key = os.getenv("JINA_KEY", "")
+    if not key:
+        return None
+    try:
+        reader_url = f"https://r.jina.ai/{url}"
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            r = await client.get(
+                reader_url,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Accept": "text/plain",
+                    "X-Return-Format": "text",
+                },
+            )
+            if r.status_code != 200:
+                logger.warning(f"Jina Reader {r.status_code} for {url}")
+                return None
+            text = r.text.strip()
+            if len(text.split()) < 50:
+                return None
+            logger.info(f"Jina Reader success: {url[:80]} ({len(text)} chars)")
+            return text, text   # no raw HTML in reader mode
+    except Exception as e:
+        logger.warning(f"Jina Reader failed for {url}: {e}")
+        return None
 
 
 async def fetch_via_scrapedo(url: str, token: str | None = None) -> tuple[str, str] | None:

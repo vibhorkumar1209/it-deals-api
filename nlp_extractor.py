@@ -493,7 +493,26 @@ def is_deal_relevant(text: str, company_names: list[str], focus_deal_types: list
     ]
     vendor_in_window = any(v in window for v in vendors)
     action_in_window = any(a in window for a in actions)
-    return vendor_in_window and action_in_window
+    if vendor_in_window and action_in_window:
+        return True
+
+    # Tier-3: IT research/database sites list vendor stacks without action verbs.
+    # If the page comes from a known research domain, a vendor name near company is enough.
+    IT_RESEARCH_DOMAINS = {
+        "appsruntheworld.com", "globaldata.com", "erp.today", "apps4rent.com",
+        "itcentralstation.com", "gartner.com", "idc.com", "forrester.com",
+        "spiceworks.com", "g2.com", "capterra.com", "trustradius.com",
+        "comparecamp.com", "selecthub.com", "softwareadvice.com",
+    }
+    # Jina Reader prepends "Source URL: https://..." — extract domain from there
+    source_domain = ""
+    m = re.search(r"source url:\s*https?://([^/\s]+)", text_lower)
+    if m:
+        source_domain = m.group(1).lstrip("www.")
+    if source_domain and any(source_domain.endswith(d) for d in IT_RESEARCH_DOMAINS):
+        return vendor_in_window  # vendor near company is sufficient on research sites
+
+    return False
 
 
 def _vendor_near_company(text: str, company_names: list[str], vendor: str, window: int = 800) -> bool:
