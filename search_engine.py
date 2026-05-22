@@ -144,6 +144,68 @@ EXTENDED_SOURCE_BASE_URLS = [
 SEM = asyncio.Semaphore(5)
 
 
+async def _resolve_gnews_urls(gnews_urls: list[str]) -> list[str]:
+    """Follow Google News redirect URLs to get the real article URLs.
+    Runs concurrently with a small semaphore to avoid hammering Google.
+    """
+    sem = asyncio.Semaphore(5)
+
+    async def _resolve(url: str) -> str:
+        if "news.google.com" not in url:
+            return url
+        async with sem:
+            try:
+                async with httpx.AsyncClient(
+                    timeout=10, follow_redirects=True,
+                    headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+                ) as client:
+                    r = await client.get(url)
+                    final = str(r.url)
+                    return final if "news.google.com" not in final else url
+            except Exception:
+                return url  # keep original on failure
+
+    resolved = await asyncio.gather(*[_resolve(u) for u in gnews_urls])
+    # Keep resolved URLs; for any still pointing to Google News, keep original
+    # so the pipeline's fetch_url can follow the redirect with full headers
+    return [u for u in resolved if u]
+
+
+async def _google_news_rss(query: str) -> list[str]:
+    """Search Google News RSS — completely free, no API key, no rate limit for
+    reasonable use. Returns news articles from Google's full index.
+    URL format: https://news.google.com/rss/search?q=<query>&hl=en-US&gl=US
+    """
+    from urllib.parse import quote_plus
+    from bs4 import BeautifulSoup
+    try:
+        url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            r = await client.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+            })
+            if r.status_code != 200:
+                logger.warning(f"Google News RSS {r.status_code} for '{query[:50]}'")
+                return []
+            soup = BeautifulSoup(r.text, "lxml-xml")
+            raw_urls = []
+            for item in soup.find_all("item"):
+                link = item.find("link")
+                if link:
+                    href = link.get_text(strip=True) or (link.next_sibling or "")
+                    if isinstance(href, str) and href.startswith("http"):
+                        raw_urls.append(href.strip())
+
+            # Resolve Google News redirect URLs to real article URLs
+            urls = await _resolve_gnews_urls(raw_urls)
+            if urls:
+                logger.info(f"Google News RSS: {len(urls)} real URLs for '{query[:50]}'")
+            return urls
+    except Exception as e:
+        logger.warning(f"Google News RSS failed for '{query[:50]}': {e}")
+        return []
+
+
 async def _brave_search(query: str) -> list[str]:
     """Brave Search API — 2,000 free queries/month, no key restrictions.
     Docs: https://api.search.brave.com/app/documentation/web-search/get-started
@@ -317,22 +379,25 @@ async def _scrapedo_search(query: str) -> list[str]:
 
 async def _run_query(query: str) -> list[str]:
     async with SEM:
-        # 1. Brave Search (2000 free/month, no restrictions)
-        urls = await _brave_search(query)
+        # 1. Google News RSS — free, no key, searches Google's full news index
+        urls = await _google_news_rss(query)
         if not urls:
-            # 2. Google PSE (100 free/day, site-restricted engine)
+            # 2. Brave Search (paid — skip if no key)
+            urls = await _brave_search(query)
+        if not urls:
+            # 3. Google PSE (site-restricted engine)
             urls = await _google_pse_search(query)
         if not urls:
-            # 3. Serper.dev / SerpAPI
+            # 4. Serper.dev / SerpAPI
             urls = await _serpapi_search(query)
         if not urls:
-            # 4. DuckDuckGo (no key needed, rate-limited)
+            # 5. DuckDuckGo
             urls = await _ddg_search(query)
         if not urls:
-            # 5. googlesearch-python (slow fallback)
+            # 6. googlesearch-python
             urls = await _google_search_fallback(query)
         if not urls:
-            # 6. scrape.do Google SERP parse
+            # 7. scrape.do Google SERP parse
             urls = await _scrapedo_search(query)
         return urls
 
@@ -415,6 +480,70 @@ async def strategy_b_known_sources(config: ScraperConfig) -> list[str]:
     return list(dict.fromkeys(u for u in urls if u))
 
 
+# ── RSS feeds from trusted news sources ──────────────────────────────────────
+RSS_FEEDS = [
+    "https://feed.businesswire.com/rss/home/?rss=G22",          # BW technology
+    "https://www.prnewswire.com/rss/news-releases-list.rss",
+    "https://www.globenewswire.com/RssFeed/subjectcode/IT",
+    "https://feeds.reuters.com/reuters/technologyNews",
+    "https://www.zdnet.com/topic/enterprise-software/rss.xml",
+    "https://www.computerweekly.com/rss/IT-industry-news.xml",
+    "https://www.ciodive.com/feeds/news/",
+    "https://www.finextra.com/rss/headlines.aspx",
+    "https://www.theregister.com/enterprise/applications/headlines.atom",
+    "https://techcrunch.com/category/enterprise/feed/",
+    "https://enterprisetimes.co.uk/feed/",
+    "https://www.expresscomputer.in/feed/",
+    "https://www.cxotoday.com/feed/",
+    "https://www.dqindia.com/feed/",
+    "https://www.business-standard.com/rss/technology-10.rss",
+    "https://economictimes.indiatimes.com/tech/rssfeeds/13357270.cms",
+]
+
+
+async def strategy_rss(config: ScraperConfig) -> list[str]:
+    """Fetch RSS feeds from trusted news sources and filter by company mentions.
+    Completely free — no API key required. Covers last ~30 days of news.
+    """
+    from bs4 import BeautifulSoup
+    company_names_lower = [cn.lower() for cn in config.all_company_names]
+    found_urls: list[str] = []
+
+    async def _fetch_feed(feed_url: str):
+        try:
+            async with SEM:
+                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                    r = await client.get(feed_url, headers=identity_pool.next_headers())
+                    if r.status_code != 200:
+                        return
+                    soup = BeautifulSoup(r.text, "lxml-xml")
+
+                    # RSS <item> or Atom <entry>
+                    items = soup.find_all("item") or soup.find_all("entry")
+                    for item in items:
+                        # Get article URL
+                        link_tag = item.find("link")
+                        if link_tag:
+                            url = link_tag.get("href") or link_tag.get_text(strip=True)
+                        else:
+                            url = ""
+
+                        # Check if company mentioned in title or description
+                        title = (item.find("title") or item.find("summary") or "")
+                        desc  = (item.find("description") or item.find("content") or "")
+                        text  = (getattr(title, "get_text", lambda: str(title))() + " " +
+                                 getattr(desc,  "get_text", lambda: str(desc))()).lower()
+
+                        if url and any(cn in text for cn in company_names_lower):
+                            found_urls.append(url)
+                            logger.info(f"RSS hit: {url[:80]}")
+        except Exception as e:
+            logger.debug(f"RSS feed failed {feed_url}: {e}")
+
+    await asyncio.gather(*[_fetch_feed(f) for f in RSS_FEEDS])
+    return list(dict.fromkeys(u for u in found_urls if u))
+
+
 async def strategy_c_linkedin(config: ScraperConfig) -> list[str]:
     """Return LinkedIn URL for later processing by website_router."""
     if not config.run_linkedin:
@@ -444,12 +573,16 @@ async def strategy_d_news_aggregators(config: ScraperConfig) -> list[str]:
 
 
 async def discover_all_urls(config: ScraperConfig) -> list[str]:
-    """Run all four strategies in parallel, deduplicate, filter skip list."""
+    """Run all strategies in parallel, deduplicate, filter skip list.
+    Strategy E (RSS) is free and always runs — gives immediate results even
+    when all search API quotas are exhausted.
+    """
     results = await asyncio.gather(
         strategy_a_search(config),
         strategy_b_known_sources(config),
         strategy_c_linkedin(config),
         strategy_d_news_aggregators(config),
+        strategy_rss(config),             # free, no API key required
         return_exceptions=True,
     )
 
