@@ -499,7 +499,7 @@ async def strategy_a_search(config: ScraperConfig) -> list[str]:
             _random.sample(PRODUCT_KEYWORDS, min(1, len(PRODUCT_KEYWORDS)))
         )
         for kw in sampled:
-            q = f'"{config.company_name}" "{kw}" contract OR implementation OR selected {year}'
+            q = f'{config.company_name} {kw} contract implementation {year}'
             tasks.append(_run_query(q))
             logger.info(f"Keyword-enriched query: {q}")
     except ImportError:
@@ -511,7 +511,11 @@ async def strategy_a_search(config: ScraperConfig) -> list[str]:
         if isinstance(r, list):
             all_urls.extend(r)
 
-    return list(dict.fromkeys(u for u in all_urls if u))
+    # Filter out social media / stock comparison sites before returning
+    from pipeline_stream import _should_skip
+    filtered = [u for u in all_urls if u and not _should_skip(u)]
+    logger.info(f"Strategy A: {len(all_urls)} raw URLs → {len(filtered)} after skip-domain filter")
+    return list(dict.fromkeys(filtered))
 
 
 async def strategy_b_known_sources(config: ScraperConfig) -> list[str]:

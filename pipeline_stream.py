@@ -17,9 +17,9 @@ from nlp_extractor import build_deal_record
 
 logger = logging.getLogger(__name__)
 
-SEM = asyncio.Semaphore(20)
+SEM = asyncio.Semaphore(10)
 MAX_URLS = 30
-URL_TIMEOUT = 8           # seconds hard kill per URL
+URL_TIMEOUT = 18          # seconds hard kill per URL (Jina Reader needs up to 15s)
 HEARTBEAT_EVERY = 10      # emit progress every N URLs processed
 
 URL_CACHE_DIR = "/tmp/url_cache"
@@ -98,8 +98,7 @@ def _should_skip(url: str) -> bool:
 
 async def _process_url(url: str, config: ScraperConfig, failures: list) -> list[dict]:
     if _should_skip(url):
-        failures.append({"url": url, "failure_type": "skipped_domain"})
-        return []
+        return []  # Silently skip — not a failure, expected behaviour
     async with SEM:
         try:
             text, html, final_type = await asyncio.wait_for(
@@ -221,7 +220,7 @@ async def stream_pipeline(
     # can never block the entire batch beyond URL_TIMEOUT + 2s
     async def _guarded(url: str) -> list[dict]:
         try:
-            return await asyncio.wait_for(_safe(url), timeout=URL_TIMEOUT + 2)
+            return await asyncio.wait_for(_safe(url), timeout=URL_TIMEOUT + 5)
         except asyncio.TimeoutError:
             failures.append({"url": url, "failure_type": "hard_timeout"})
             return []
