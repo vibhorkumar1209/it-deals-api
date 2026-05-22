@@ -74,10 +74,29 @@ async def _get_playwright_page(url: str, wait_for: str = "networkidle", timeout:
             return None
 
 
+JINA_PREFERRED_DOMAINS = {
+    "businesswire.com", "prnewswire.com", "globenewswire.com",
+    "sec.gov", "bseindia.com", "nseindia.com",
+    "moneycontrol.com", "economictimes.com", "financialexpress.com",
+    "livemint.com", "thehindu.com", "hindustantimes.com",
+    "finextra.com", "bankingtech.com", "paymentssource.com",
+    "cio.com", "cioinsight.com", "computerweekly.com",
+    "zdnet.com", "techrepublic.com", "theregister.com",
+}
+
+
 async def fetch_type1_static(url: str) -> tuple[str, str] | None:
-    """Static HTML fetch."""
+    """Static HTML fetch. For known bot-blocking domains, use Jina Reader directly."""
     d = _domain(url)
     path = urlparse(url).path or "/"
+
+    # Skip direct fetch for domains that always block bots — go straight to Jina
+    if any(d == jd or d.endswith("." + jd) for jd in JINA_PREFERRED_DOMAINS):
+        result = await fetch_via_jina_reader(url)
+        if result:
+            return result
+        # Fall through to direct fetch as last resort
+
     if not can_fetch(d, path):
         logger.info(f"ROBOTS_BLOCKED: {url}")
         return None

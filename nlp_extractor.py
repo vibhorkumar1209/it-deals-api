@@ -16542,23 +16542,33 @@ DEAL_ACTION_PHRASES = [
     "outsourcing contract", "managed services contract",
     "outsourcing agreement", "outsourcing deal",
     "managed services agreement", "service level agreement",
+    "inked a deal", "inked a contract", "inks a deal", "inks a contract",
+    "signed an agreement", "signs an agreement", "announced a deal",
+    "announced a contract", "announced an agreement",
+    "deal worth", "contract worth", "deal valued", "contract valued",
+    "awarded to", "contract to ", "deal to ",
     # Selection / adoption
     "selects ", "selected ", "has selected", "chooses ", "chosen ",
     "adopts ", "adopted ", "has adopted", "standardises on", "standardizes on",
+    "will deploy", "will implement", "will use ", "has chosen",
+    "has deployed", "has implemented",
     # Implementation / go-live
     "goes live", "go-live", "went live", "has gone live",
     "rolled out", "successfully deployed", "implementation complete",
     "deployment of", "migrated to", "migration to",
+    "successfully implemented", "implemented by",
     # Partnership (only specific/bilateral)
     "partners with", "has partnered with", "entered into a partnership",
     "strategic partnership with", "strategic alliance with",
     "signed a memorandum", "signed an mou",
+    "technology partner", "official partner",
     # Outsourcing
     "outsourced to", "outsourcing to", "handed over to",
     "managed by ", "managed services provided by",
     # Procurement
     "rfp awarded", "tender awarded", "bid awarded", "bid won",
     "purchase order", "framework agreement signed",
+    "l1 bidder", "lowest bidder", "won the bid", "won the tender",
 ]
 
 
@@ -16668,9 +16678,15 @@ def build_deal_record(
     scope = extract_scope_of_service(text, vendor, cat)
     description = extract_deal_description(text, company_names, vendor)
 
-    # Require a known vendor from master list — no vendor = no deal record
-    # (description + date alone are insufficient; they appear in news without a deal)
-    has_evidence = bool(vendor)
+    # Require a known vendor from master list OR strong deal signal with date
+    # (description + date alone are insufficient — require deal action phrase too)
+    tl_check = text.lower()
+    strong_deal_signal = any(phrase in tl_check for phrase in [
+        "signed a contract", "contract awarded", "outsourcing deal", "managed services agreement",
+        "inked a deal", "awarded to", "deal worth", "contract worth", "selects ", "selected ",
+        "goes live", "go-live", "outsourced to", "rfp awarded", "tender awarded",
+    ])
+    has_evidence = bool(vendor) or (strong_deal_signal and bool(date))
     if not has_evidence:
         return None
 
