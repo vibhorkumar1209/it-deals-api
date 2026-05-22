@@ -21,73 +21,40 @@ GOOGLE_PSE_CX  = os.getenv("GOOGLE_PSE_CX", "")    # Programmable Search Engine 
 BRAVE_KEY      = os.getenv("BRAVE_KEY", "")         # Brave Search API — 2000 free/month
 JINA_KEY       = os.getenv("JINA_KEY", "")          # Jina AI Search — s.jina.ai
 
-# Templates for customer-centric search (company is the buyer / enterprise)
-# Top 5 are news-wire focused — returns press releases not social/stock pages
+# NOTE: Jina AI is a semantic search engine — boolean OR / site: operators are ignored.
+# All templates must be natural-language phrases for best results.
+
 QUERY_TEMPLATES_CUSTOMER = [
-    # Press release wires — highest signal, always returns real articles
-    '"{company}" selects OR selected OR signs OR signed site:businesswire.com {year}',
-    '"{company}" selects OR selected OR signs OR signed site:prnewswire.com {year}',
-    '"{company}" technology contract OR implementation site:globenewswire.com OR site:businesswire.com {year}',
-    '"{company}" SAP OR Oracle OR Salesforce OR ServiceNow selects contract {year}',
-    '"{company}" Accenture OR Infosys OR TCS OR Wipro OR IBM outsourcing deal {year}',
-
-    # Formal deal / contract
-    '"{company}" IT contract awarded signed {year}',
-    '"{company}" outsourcing agreement managed services {year}',
-    '"{company}" technology deal announcement {year}',
-
-    # Vendor selection
-    '"{company}" selects Microsoft OR AWS OR "Google Cloud" OR IBM OR Accenture {year}',
-    '"{company}" chooses OR adopts ERP OR CRM OR HCM {year}',
-
-    # Implementation / go-live
-    '"{company}" SAP implementation go-live {year}',
-    '"{company}" Oracle OR Workday OR Salesforce deployment rollout {year}',
-    '"{company}" "Microsoft Azure" OR AWS migration deployment {year}',
-
-    # Partnership / alliance
-    '"{company}" technology partnership "strategic alliance" {year}',
-    '"{company}" partners Accenture OR Infosys OR TCS OR Wipro OR Capgemini {year}',
-
-    # Outsourcing / managed services
-    '"{company}" outsourcing IBM OR DXC OR Infosys OR HCLTech OR Unisys {year}',
-    '"{company}" "systems integrator" OR "SI partner" contract {year}',
-
-    # Cybersecurity deals
-    '"{company}" cybersecurity contract CrowdStrike OR "Palo Alto" OR Fortinet OR Zscaler {year}',
-
-    # News wire targeting
-    '"{company}" "signed" OR "selected" site:businesswire.com {year}',
-    '"{company}" "signed" OR "selected" site:prnewswire.com {year}',
-    '"{company}" technology site:reuters.com OR site:zdnet.com OR site:ciodive.com {year}',
+    # Natural-language deal phrases — work well with Jina semantic search
+    "{company} signs technology contract {year}",
+    "{company} IT outsourcing deal {year}",
+    "{company} selects technology vendor {year}",
+    "{company} digital transformation contract signed {year}",
+    "{company} managed services agreement {year}",
+    "{company} technology implementation announced {year}",
+    "{company} signs partnership agreement Infosys TCS Wipro Accenture {year}",
+    "{company} SAP Oracle Salesforce ServiceNow implementation {year}",
+    "{company} cloud migration AWS Azure Google Cloud {year}",
+    "{company} cybersecurity contract deal {year}",
+    "{company} ERP CRM HCM system selected {year}",
+    "{company} outsourcing contract awarded {year}",
+    "{company} technology deal businesswire prnewswire {year}",
+    "{company} strategic alliance technology partner {year}",
+    "{company} go-live deployment rollout {year}",
 ]
 
-# Templates for vendor-centric search (company is the technology provider / vendor)
 QUERY_TEMPLATES_VENDOR = [
-    # Who is selecting / adopting this vendor's product
-    'selects "{company}" contract deal {year}',
-    'adopts "{company}" implementation {year}',
-    'chooses "{company}" deployment {year}',
-    'signs "{company}" agreement {year}',
-
-    # Named customer segments
-    'bank OR insurance OR retail selects "{company}" {year}',
-    'government OR healthcare selects "{company}" {year}',
-    'enterprise selects OR implements "{company}" {year}',
-
-    # Go-live / deployment
-    '"{company}" go-live OR deployment OR rollout customer {year}',
-    '"{company}" customer win deal signed {year}',
-    '"{company}" contract awarded customer {year}',
-
-    # Partnership with SIs
-    '"{company}" Accenture OR Infosys OR Deloitte OR IBM implementation {year}',
-    '"{company}" partner ecosystem deal {year}',
-
-    # News wire
-    '"{company}" selected site:businesswire.com {year}',
-    '"{company}" customer deal site:prnewswire.com OR site:globenewswire.com {year}',
-    '"{company}" wins contract site:reuters.com OR site:zdnet.com {year}',
+    # Vendor-centric: find who is adopting this vendor
+    "company selects {company} contract {year}",
+    "bank selects {company} implementation {year}",
+    "enterprise adopts {company} deployment {year}",
+    "{company} customer win deal signed {year}",
+    "{company} go-live deployment customer {year}",
+    "{company} contract awarded enterprise {year}",
+    "{company} selected Accenture Infosys Deloitte IBM implementation {year}",
+    "{company} wins outsourcing contract {year}",
+    "{company} strategic partnership enterprise {year}",
+    "{company} customer announcement businesswire prnewswire {year}",
 ]
 
 # Unified default (backward-compatible)
