@@ -1639,25 +1639,11 @@ def _find_matches_in_text(text: str, master: dict[str, list[str]]) -> list[tuple
 
 
 def extract_vendor(text: str, company_names: list[str] | None = None) -> dict[str, str]:
+    """Match against VENDOR_MASTER only — no NER fallback (NER invents phantom vendors)."""
     matches = _find_matches_in_text(text, VENDOR_MASTER)
     if matches:
         name, category, _ = matches[0]
         return {"vendor": normalize_name(name), "vendor_category": category}
-
-    # spaCy NER fallback
-    try:
-        import spacy
-        nlp = spacy.load("en_core_web_sm")
-        doc = nlp(text[:5000])
-        orgs = [e.text for e in doc.ents if e.label_ == "ORG"]
-        if company_names:
-            orgs = [o for o in orgs if o not in company_names]
-        if orgs:
-            return {"vendor": normalize_name(orgs[0]), "vendor_category": "OTHER",
-                    "_confidence_override": "Low"}
-    except Exception:
-        pass
-
     return {"vendor": "", "vendor_category": "OTHER"}
 
 
@@ -1890,16 +1876,62 @@ def extract_scope_of_service(text: str, vendor: str, vendor_category: str) -> st
     return window[:300].strip()
 
 
+# ── Phrases that disqualify a page as a deal article ─────────────────────────
+# These indicate analyst reports, award lists, job posts, stock news — not deals.
+NON_DEAL_DISQUALIFIERS = [
+    "magic quadrant", "gartner peer insights", "forrester wave",
+    "idc marketscape", "named a leader", "named a visionary",
+    "named a challenger", "positioned in the", "recognition award",
+    "best place to work", "employer of the year", "ranked #", "ranked no.",
+    "analyst report", "market report", "market research", "market size",
+    "press release issued by", "stock price", "share price", "quarterly results",
+    "earnings call", "q1 results", "q2 results", "q3 results", "q4 results",
+    "job opening", "we are hiring", "careers page", "apply now",
+    "ceo interview", "cto interview", "opinion:", "commentary:",
+]
+
+# ── Phrases that MUST appear near company for a true deal ─────────────────────
+DEAL_ACTION_PHRASES = [
+    # Contracts / awards
+    "signed a contract", "signs a contract", "awarded a contract",
+    "contract awarded", "contract signed", "multi-year contract",
+    "outsourcing contract", "managed services contract",
+    "outsourcing agreement", "outsourcing deal",
+    "managed services agreement", "service level agreement",
+    # Selection / adoption
+    "selects ", "selected ", "has selected", "chooses ", "chosen ",
+    "adopts ", "adopted ", "has adopted", "standardises on", "standardizes on",
+    # Implementation / go-live
+    "goes live", "go-live", "went live", "has gone live",
+    "rolled out", "successfully deployed", "implementation complete",
+    "deployment of", "migrated to", "migration to",
+    # Partnership (only specific/bilateral)
+    "partners with", "has partnered with", "entered into a partnership",
+    "strategic partnership with", "strategic alliance with",
+    "signed a memorandum", "signed an mou",
+    # Outsourcing
+    "outsourced to", "outsourcing to", "handed over to",
+    "managed by ", "managed services provided by",
+    # Procurement
+    "rfp awarded", "tender awarded", "bid awarded", "bid won",
+    "purchase order", "framework agreement signed",
+]
+
+
 def is_deal_relevant(text: str, company_names: list[str], focus_deal_types: list[str]) -> bool:
     """
-    Returns True only when the text both mentions the company AND contains strong,
-    explicit IT deal/partnership/implementation language within 1500 chars of
-    that company mention.  Generic words (cloud, platform, program, AI) alone
-    no longer qualify — they must appear alongside an action verb or named vendor.
+    Strict two-step check:
+    1. Reject pages that are awards / analyst reports / stock news / job posts.
+    2. Require an explicit deal-action phrase within 800 chars of the company mention.
+       Generic terms (digital transformation, cloud adoption) no longer qualify.
     """
     text_lower = text.lower()
 
-    # Find the first occurrence of any company name
+    # Step 1 — hard reject non-deal page types
+    if any(d in text_lower for d in NON_DEAL_DISQUALIFIERS):
+        return False
+
+    # Step 2 — company must appear in text
     company_pos = -1
     for cn in company_names:
         idx = text_lower.find(cn.lower())
@@ -1908,62 +1940,9 @@ def is_deal_relevant(text: str, company_names: list[str], focus_deal_types: list
     if company_pos == -1:
         return False
 
-    # Search window: 1500 chars either side of company mention
-    window = text_lower[max(0, company_pos - 1500): company_pos + 1500]
-
-    # Tier-1: explicit deal / action language — any single hit qualifies
-    tier1 = [
-        "signed a contract", "awarded a contract", "contract awarded",
-        "outsourcing agreement", "outsourcing deal", "managed services agreement",
-        "technology agreement", "it agreement", "service agreement",
-        "selects ", "selected ", "chooses ", "chosen ", "adopts ", "adopted ",
-        "implements ", "implementation of", "go-live", "goes live", "went live",
-        "rolled out", "deploying ", "deployment of",
-        "partners with", "partnership with", "strategic alliance",
-        "teams with", "joined forces with",
-        "rfp ", "rfq ", " bid ", "tender ",
-        "digital transformation", "cloud migration", "cloud adoption",
-        "managed service", "outsourc", "systems integrator", "si partner",
-    ]
-    if any(s in window for s in tier1):
-        return True
-
-    # Tier-2: named vendor/SI must appear alongside an action word
-    vendors = [
-        "sap", "oracle", "salesforce", "servicenow", "workday", "microsoft dynamics",
-        "azure", "amazon web services", " aws ", "google cloud", "snowflake",
-        "databricks", "palo alto networks", "crowdstrike", "fortinet", "zscaler",
-        "splunk", "power bi", "successfactors", "ariba", "dynamics 365",
-        "infosys", "tcs", "wipro", "accenture", "capgemini", "cognizant",
-        "deloitte", "ibm consulting", "hcltech", "dxc", "atos",
-    ]
-    actions = [
-        "implement", "deploy", "select", "choose", "adopt", "partner",
-        "contract", "agreement", "outsourc", "migrat", "rollout",
-        "go-live", "integrat", "award",
-    ]
-    vendor_in_window = any(v in window for v in vendors)
-    action_in_window = any(a in window for a in actions)
-    if vendor_in_window and action_in_window:
-        return True
-
-    # Tier-3: IT research/database sites list vendor stacks without action verbs.
-    # If the page comes from a known research domain, a vendor name near company is enough.
-    IT_RESEARCH_DOMAINS = {
-        "appsruntheworld.com", "globaldata.com", "erp.today", "apps4rent.com",
-        "itcentralstation.com", "gartner.com", "idc.com", "forrester.com",
-        "spiceworks.com", "g2.com", "capterra.com", "trustradius.com",
-        "comparecamp.com", "selecthub.com", "softwareadvice.com",
-    }
-    # Jina Reader prepends "Source URL: https://..." — extract domain from there
-    source_domain = ""
-    m = re.search(r"source url:\s*https?://([^/\s]+)", text_lower)
-    if m:
-        source_domain = m.group(1).lstrip("www.")
-    if source_domain and any(source_domain.endswith(d) for d in IT_RESEARCH_DOMAINS):
-        return vendor_in_window  # vendor near company is sufficient on research sites
-
-    return False
+    # Step 3 — a deal-action phrase must appear within 800 chars of the company
+    window = text_lower[max(0, company_pos - 800): company_pos + 800]
+    return any(phrase in window for phrase in DEAL_ACTION_PHRASES)
 
 
 def _vendor_near_company(text: str, company_names: list[str], vendor: str, window: int = 800) -> bool:
@@ -2045,8 +2024,9 @@ def build_deal_record(
     scope = extract_scope_of_service(text, vendor, cat)
     description = extract_deal_description(text, company_names, vendor)
 
-    # Drop record if none of the 4 core fields can be populated
-    has_evidence = bool(vendor) or bool(description) or bool(date)
+    # Require a known vendor from master list — no vendor = no deal record
+    # (description + date alone are insufficient; they appear in news without a deal)
+    has_evidence = bool(vendor)
     if not has_evidence:
         return None
 

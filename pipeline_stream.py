@@ -217,7 +217,16 @@ async def stream_pipeline(
         except Exception:
             return []
 
-    tasks = [_safe(url) for url in all_urls]
+    # Wrap every task with a hard outer deadline so one stuck URL
+    # can never block the entire batch beyond URL_TIMEOUT + 2s
+    async def _guarded(url: str) -> list[dict]:
+        try:
+            return await asyncio.wait_for(_safe(url), timeout=URL_TIMEOUT + 2)
+        except asyncio.TimeoutError:
+            failures.append({"url": url, "failure_type": "hard_timeout"})
+            return []
+
+    tasks = [_guarded(url) for url in all_urls]
 
     for coro in asyncio.as_completed(tasks):
         deals = await coro
