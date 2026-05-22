@@ -199,59 +199,95 @@ async def extract(req: ReExtractRequest):
 
 @app.get("/api/debug")
 async def debug(company: str = "HDFC Bank"):
-    """Diagnostic — runs each pipeline stage and reports exactly what fails."""
+    """
+    Full pipeline diagnostic.
+    Returns: env vars, discovered URLs, per-URL fetch result, per-URL extraction result.
+    Hit: /api/debug?company=HDFC+Bank
+    """
     import traceback
-    from search_engine import _jina_search, JINA_KEY
-    from website_router import fetch_via_jina_reader, fetch_type1_static
+    import asyncio
+    from search_engine import _jina_search, JINA_KEY, QUERY_TEMPLATES_CUSTOMER
+    from website_router import fetch_via_jina_reader, fetch_url, classify_url
     from nlp_extractor import is_deal_relevant, build_deal_record
+    from config_loader import ScraperConfig
 
-    out: dict = {"company": company, "env": {}, "search": {}, "fetch": {}, "extract": {}}
+    year = 2025
+    out: dict = {
+        "company": company,
+        "env": {},
+        "queries": [],
+        "urls_discovered": [],
+        "url_results": [],
+    }
 
+    # ── Env check ─────────────────────────────────────────────────────────────
     out["env"] = {
         "JINA_KEY_set": bool(JINA_KEY),
         "JINA_KEY_prefix": JINA_KEY[:12] + "..." if JINA_KEY else None,
     }
 
-    try:
-        q = f'"{company}" SAP OR Oracle contract selected 2025'
-        urls = await _jina_search(q)
-        out["search"] = {"query": q, "url_count": len(urls), "urls": urls[:5]}
-    except Exception as e:
-        out["search"] = {"error": str(e), "trace": traceback.format_exc()[-500:]}
-
-    if out["search"].get("urls"):
-        url = out["search"]["urls"][0]
+    # ── Run 3 sample queries and collect URLs ─────────────────────────────────
+    sample_templates = QUERY_TEMPLATES_CUSTOMER[:3]
+    all_urls: list[str] = []
+    for tmpl in sample_templates:
+        q = tmpl.format(company=company, year=year)
+        out["queries"].append(q)
         try:
-            result = await fetch_via_jina_reader(url)
-            if result:
-                text, _ = result
-                out["fetch"] = {"url": url, "chars": len(text), "preview": text[:400], "method": "jina_reader"}
-            else:
-                result2 = await fetch_type1_static(url)
-                if result2:
-                    text, _ = result2
-                    out["fetch"] = {"url": url, "chars": len(text), "preview": text[:400], "method": "static"}
-                else:
-                    out["fetch"] = {"url": url, "error": "both fetch methods failed"}
+            urls = await _jina_search(q)
+            all_urls.extend(urls)
+            out["urls_discovered"].extend([{"query": q, "url": u} for u in urls[:5]])
         except Exception as e:
-            out["fetch"] = {"url": url, "error": str(e)}
+            out["urls_discovered"].append({"query": q, "error": str(e)})
 
-    if out["fetch"].get("chars"):
+    # Deduplicate
+    seen: set = set()
+    unique_urls = [u for u in all_urls if not (u in seen or seen.add(u))][:10]  # type: ignore
+
+    # ── Fetch + extract each URL ───────────────────────────────────────────────
+    config = ScraperConfig(
+        company_name=company,
+        all_company_names=[company],
+        known_sources=[],
+        deal_types=[],
+        years=[year],
+    )
+
+    for url in unique_urls:
+        entry: dict = {"url": url, "classify": classify_url(url)}
         try:
-            result = await fetch_via_jina_reader(out["fetch"]["url"])
-            full_text = result[0] if result else ""
-        except Exception:
-            full_text = ""
-        names = [company]
-        rel = is_deal_relevant(full_text, names, [])
-        out["extract"] = {"is_deal_relevant": rel}
-        if rel:
-            deal = build_deal_record(text=full_text, url=out["fetch"]["url"],
-                                     source_type="news_article", company_name=company,
-                                     company_names=names)
-            out["extract"]["deal"] = deal
-        else:
-            out["extract"]["text_preview"] = full_text[:600]
+            text, html, ftype = await asyncio.wait_for(
+                fetch_url(url, None, config), timeout=12
+            )
+            entry["fetch"] = "ok" if text else "empty"
+            entry["fetch_chars"] = len(text) if text else 0
+            entry["fetch_type"] = ftype
+            if text:
+                entry["text_preview"] = text[:300]
+                relevant = is_deal_relevant(text, [company], [])
+                entry["is_deal_relevant"] = relevant
+                if relevant:
+                    deal = build_deal_record(
+                        text=text, url=url, source_type="news_article",
+                        company_name=company, company_names=[company], soup=None,
+                    )
+                    entry["deal"] = deal
+                else:
+                    # Show why it was rejected
+                    tl = text.lower()
+                    from nlp_extractor import NON_DEAL_DISQUALIFIERS, DEAL_ACTION_PHRASES
+                    disq = [d for d in NON_DEAL_DISQUALIFIERS if d in tl]
+                    found_phrases = [p for p in DEAL_ACTION_PHRASES if p in tl]
+                    entry["rejected_because"] = {
+                        "disqualifiers_hit": disq,
+                        "deal_phrases_found": found_phrases[:10],
+                        "company_in_text": company.lower() in tl,
+                    }
+        except asyncio.TimeoutError:
+            entry["fetch"] = "timeout"
+        except Exception as e:
+            entry["fetch"] = f"error: {e}"
+
+        out["url_results"].append(entry)
 
     return out
 
