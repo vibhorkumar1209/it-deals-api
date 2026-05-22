@@ -682,9 +682,28 @@ async def discover_all_urls(config: ScraperConfig) -> list[str]:
         if isinstance(r, list):
             all_urls.extend(r)
 
-    # Remove already-processed deals
+    # Filter social/junk domains from ALL strategies
+    _SKIP_GLOBAL = {
+        "linkedin.com", "facebook.com", "instagram.com", "twitter.com", "x.com",
+        "youtube.com", "tiktok.com", "reddit.com", "quora.com",
+        "danelfin.com", "macrotrends.net", "stockanalysis.com", "wisesheets.io",
+        "ambitionbox.com", "glassdoor.com", "indeed.com", "naukri.com",
+        "scribd.com", "slideshare.net", "academia.edu",
+        "amazon.com", "flipkart.com", "ebay.com",
+    }
+    def _skip_global(u: str) -> bool:
+        try:
+            from urllib.parse import urlparse
+            d = urlparse(u).netloc.lstrip("www.")
+            return any(d == s or d.endswith("." + s) for s in _SKIP_GLOBAL)
+        except Exception:
+            return False
+
+    # Remove already-processed deals + social/junk domains
     skip = set(config.known_deals_to_skip)
-    unique = list(dict.fromkeys(u for u in all_urls if u and u not in skip))
+    unique = list(dict.fromkeys(
+        u for u in all_urls if u and u not in skip and not _skip_global(u)
+    ))
 
     logger.info(f"Discovered {len(unique)} unique URLs across all strategies")
     return unique

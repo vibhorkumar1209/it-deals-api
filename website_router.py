@@ -125,8 +125,10 @@ async def fetch_type1_static(url: str) -> tuple[str, str] | None:
             return text, r.text
     except Exception as e:
         logger.warning(f"TYPE1 fetch failed {url}: {e}")
-        # Fallback to Jina Reader on fetch error
-        return await fetch_via_jina_reader(url)
+        # Fallback to Jina Reader only for real news/press release domains
+        if any(d == jd or d.endswith("." + jd) for jd in JINA_PREFERRED_DOMAINS):
+            return await fetch_via_jina_reader(url)
+        return None
 
 
 async def fetch_type2_js(url: str) -> tuple[str, str] | None:
