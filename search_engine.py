@@ -185,7 +185,7 @@ EXTENDED_SOURCE_BASE_URLS = [
     "https://manufacturing.economictimes.indiatimes.com/news/",
 ]
 
-SEM = asyncio.Semaphore(5)
+SEM = asyncio.Semaphore(10)
 
 
 async def _jina_search(query: str) -> list[str]:
@@ -195,7 +195,7 @@ async def _jina_search(query: str) -> list[str]:
     if not JINA_KEY:
         return []
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=8) as client:
             r = await client.get(
                 "https://s.jina.ai/",
                 params={"q": query},
@@ -509,14 +509,13 @@ async def strategy_a_search(config: ScraperConfig) -> list[str]:
     companies = config.all_company_names
     years_full = list(range(config.search_year_range["start"], config.search_year_range["end"] + 1))
 
-    if pse_only:
-        companies = [config.company_name]
-        years_full = sorted(years_full)[-3:]
-        templates = base_templates[:10]
-        logger.info(f"Quota-cap mode: {len(templates)} templates × {len(years_full)} years = "
-                    f"{len(templates)*len(years_full)} queries")
-    else:
-        templates = base_templates
+    # Always cap to 5 best templates × last 2 years = 10 queries max
+    # Keeps discovery under 30s even on slow networks
+    companies = [config.company_name]
+    years_full = sorted(years_full)[-2:]
+    templates = base_templates[:5]
+    logger.info(f"Search: {len(templates)} templates × {len(years_full)} years = "
+                f"{len(templates)*len(years_full)} queries")
 
     tasks = []
     for company in companies:
@@ -575,22 +574,11 @@ async def strategy_b_known_sources(config: ScraperConfig) -> list[str]:
 
 # ── RSS feeds from trusted news sources ──────────────────────────────────────
 RSS_FEEDS = [
-    "https://feed.businesswire.com/rss/home/?rss=G22",          # BW technology
+    "https://feed.businesswire.com/rss/home/?rss=G22",
     "https://www.prnewswire.com/rss/news-releases-list.rss",
     "https://www.globenewswire.com/RssFeed/subjectcode/IT",
-    "https://feeds.reuters.com/reuters/technologyNews",
-    "https://www.zdnet.com/topic/enterprise-software/rss.xml",
-    "https://www.computerweekly.com/rss/IT-industry-news.xml",
     "https://www.ciodive.com/feeds/news/",
-    "https://www.finextra.com/rss/headlines.aspx",
-    "https://www.theregister.com/enterprise/applications/headlines.atom",
-    "https://techcrunch.com/category/enterprise/feed/",
-    "https://enterprisetimes.co.uk/feed/",
     "https://www.expresscomputer.in/feed/",
-    "https://www.cxotoday.com/feed/",
-    "https://www.dqindia.com/feed/",
-    "https://www.business-standard.com/rss/technology-10.rss",
-    "https://economictimes.indiatimes.com/tech/rssfeeds/13357270.cms",
 ]
 
 
@@ -683,11 +671,9 @@ async def discover_all_urls(config: ScraperConfig) -> list[str]:
     block the whole pipeline.
     """
     results = await asyncio.gather(
-        _timed(strategy_a_search(config),          60, "Strategy A"),
-        _timed(strategy_b_known_sources(config),   45, "Strategy B"),
-        _timed(strategy_c_linkedin(config),        20, "Strategy C"),
-        _timed(strategy_d_news_aggregators(config),30, "Strategy D"),
-        _timed(strategy_rss(config),               30, "Strategy E/RSS"),
+        _timed(strategy_a_search(config),          40, "Strategy A"),
+        # Strategy B (scrape 34 homepages) disabled — too slow, low signal
+        _timed(strategy_rss(config),               25, "Strategy E/RSS"),
         return_exceptions=True,
     )
 

@@ -17,9 +17,9 @@ from nlp_extractor import build_deal_record
 
 logger = logging.getLogger(__name__)
 
-SEM = asyncio.Semaphore(8)
-MAX_URLS = 100
-URL_TIMEOUT = 12          # seconds hard kill per URL
+SEM = asyncio.Semaphore(20)
+MAX_URLS = 30
+URL_TIMEOUT = 8           # seconds hard kill per URL
 HEARTBEAT_EVERY = 10      # emit progress every N URLs processed
 
 URL_CACHE_DIR = "/tmp/url_cache"

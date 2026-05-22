@@ -384,7 +384,7 @@ async def fetch_via_jina_reader(url: str) -> tuple[str, str] | None:
         return None
     try:
         reader_url = f"https://r.jina.ai/{url}"
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
             r = await client.get(
                 reader_url,
                 headers={
