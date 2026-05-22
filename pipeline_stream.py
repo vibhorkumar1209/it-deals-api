@@ -225,11 +225,13 @@ async def stream_pipeline(
 
         for deal in deals:
             scope = (deal.get("scope_of_service") or "")[:50]
+            vendor_raw = (deal.get("vendor") or "").lower()
+            vendor_norm = re.sub(r'\b(ltd|limited|inc|corp|pvt|llc|plc|gmbh|ag|sa)\.?\b', '', vendor_raw).strip()
             key = "|".join([
                 deal.get("company_name", "").lower(),
-                deal.get("vendor", "").lower(),
+                vendor_norm,
                 deal.get("record_type", "").lower(),
-                deal.get("announcement_date", "")[:7],
+                (deal.get("announcement_date") or "")[:7],
                 scope.lower(),
             ])
             h = hashlib.sha256(key.encode()).hexdigest()

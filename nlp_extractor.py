@@ -163,7 +163,7 @@ SI_PARTNER_MASTER: dict[str, list[str]] = {
     "VENDOR_OWN_CONSULTING": [
         "SAP Premium Engagement", "SAP Services", "SAP Consulting",
         "Oracle Advanced Customer Services", "Oracle Consulting",
-        "Microsoft Consulting Services", "MCS",
+        "Microsoft Consulting Services",
         "Salesforce Professional Services",
         "AWS Professional Services",
         "Google Cloud Professional Services",
@@ -175,6 +175,25 @@ SI_PARTNER_MASTER: dict[str, list[str]] = {
         "Rimini Street", "Amdocs", "Netcracker",
         "Unison", "Clarkston Consulting",
         "Sunrise Technologies", "Arbela Technologies",
+    ],
+    "MANAGED_SERVICES_INDIA": [
+        "CMS Info Systems", "CMS Infosystems",
+        "Newgen Software", "Nucleus Software",
+        "Intellect Design Arena", "Intellect",
+        "FSS Technologies", "Financial Software and Systems",
+        "AGS Transact Technologies", "AGS Transact",
+        "Hitachi Payment Services",
+        "NCR Corporation", "NCR Atleos",
+        "Diebold Nixdorf",
+        "FIS Global", "FIS",
+        "Fiserv",
+        "Temenos",
+        "Finastra",
+        "Mambu",
+        "i-exceed Technology",
+        "Subex",
+        "Aurionpro Solutions",
+        "SBI Cards", "In-Solutions Global",
     ],
 }
 
@@ -210,14 +229,17 @@ def normalize_name(raw: str) -> str:
 
 
 def _find_matches_in_text(text: str, master: dict[str, list[str]]) -> list[tuple[str, str, int]]:
-    """Returns list of (name, category, char_position) sorted by match length desc."""
-    text_lower = text.lower()
+    """Returns list of (name, category, char_position) sorted by match length desc.
+    Uses word-boundary matching to avoid substrings (e.g. 'MCS' inside 'CMS').
+    """
     matches = []
     for category, names in master.items():
         for name in names:
-            idx = text_lower.find(name.lower())
-            if idx != -1:
-                matches.append((name, category, idx))
+            # Word-boundary regex: \b on both sides if name starts/ends with word char
+            pat = r'(?<![A-Za-z0-9])' + re.escape(name) + r'(?![A-Za-z0-9])'
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                matches.append((name, category, m.start()))
     # Longest match wins
     matches.sort(key=lambda x: len(x[0]), reverse=True)
     # Deduplicate: remove shorter matches subsumed by longer ones
