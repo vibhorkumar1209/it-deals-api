@@ -1514,7 +1514,7 @@ VENDOR_MASTER: dict[str, list[str]] = {
         "servicePath",
         "tts GmbH",
         "vFairs",
-        "watercooler",,
+        "watercooler",
         "+2X Tecnologia em Dobro",
         ".CO Internet",
         "01 CONSEILS SERVICES INFORMATIQUES",
