@@ -15,5 +15,13 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
+      - key: JINA_KEY
+        sync: false
+      - key: GOOGLE_PSE_KEY
+        sync: false
+      - key: GOOGLE_PSE_CX
+        sync: false
+      - key: SCRAPEDO_KEY
+        sync: false
       - key: PYTHON_VERSION
         value: 3.11.0
