@@ -13,11 +13,12 @@ from identity_pool import identity_pool
 
 logger = logging.getLogger(__name__)
 
-SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
-SERPER_KEY = os.getenv("SERPER_KEY", "")
-SCRAPEDO_KEY = os.getenv("SCRAPEDO_KEY", "")
+SERPAPI_KEY    = os.getenv("SERPAPI_KEY", "")
+SERPER_KEY     = os.getenv("SERPER_KEY", "")
+SCRAPEDO_KEY   = os.getenv("SCRAPEDO_KEY", "")
 GOOGLE_PSE_KEY = os.getenv("GOOGLE_PSE_KEY", "")   # Google Custom Search API key
 GOOGLE_PSE_CX  = os.getenv("GOOGLE_PSE_CX", "")    # Programmable Search Engine ID
+BRAVE_KEY      = os.getenv("BRAVE_KEY", "")         # Brave Search API — 2000 free/month
 
 QUERY_TEMPLATES = [
     # Formal deal / contract — target news wires
@@ -143,27 +144,62 @@ EXTENDED_SOURCE_BASE_URLS = [
 SEM = asyncio.Semaphore(5)
 
 
+async def _brave_search(query: str) -> list[str]:
+    """Brave Search API — 2,000 free queries/month, no key restrictions.
+    Docs: https://api.search.brave.com/app/documentation/web-search/get-started
+    """
+    if not BRAVE_KEY:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Encoding": "gzip",
+                    "X-Subscription-Token": BRAVE_KEY,
+                },
+                params={"q": query, "count": 20, "country": "us", "search_lang": "en"},
+            )
+            if r.status_code == 429:
+                logger.warning("Brave Search monthly quota reached")
+                return []
+            if r.status_code != 200:
+                logger.warning(f"Brave {r.status_code} for '{query[:50]}': {r.text[:120]}")
+                return []
+            data = r.json()
+            urls = [item.get("url", "") for item in data.get("web", {}).get("results", []) if item.get("url")]
+            if urls:
+                logger.info(f"Brave returned {len(urls)} URLs for '{query[:50]}'")
+            return urls
+    except Exception as e:
+        logger.warning(f"Brave search failed for '{query[:50]}': {e}")
+        return []
+
+
 async def _google_pse_search(query: str) -> list[str]:
-    """Google Programmable Search Engine — 100 free queries/day, 10 results per call.
-    Batches two calls (start=1, start=11) to get up to 20 results per query.
-    Docs: https://developers.google.com/custom-search/v1/reference/rest/v1/cse/list
+    """Google Programmable Search Engine (site-restricted mode).
+    Uses the /siterestrict endpoint which works for engines configured
+    with specific domains. Returns up to 20 results per query (2 pages × 10).
+    Free tier: 100 queries/day.
+    Docs: https://developers.google.com/custom-search/v1/reference/rest/v1/cse.siterestrict/list
     """
     if not GOOGLE_PSE_KEY or not GOOGLE_PSE_CX:
         return []
     urls: list[str] = []
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            for start in (1, 11):          # page 1 and page 2
+            for start in (1, 11):
                 r = await client.get(
-                    "https://www.googleapis.com/customsearch/v1",
+                    "https://www.googleapis.com/customsearch/v1/siterestrict",
                     params={
-                        "key": GOOGLE_PSE_KEY,
-                        "cx":  GOOGLE_PSE_CX,
-                        "q":   query,
-                        "num": 10,         # max per request
+                        "key":   GOOGLE_PSE_KEY,
+                        "cx":    GOOGLE_PSE_CX,
+                        "q":     query,
+                        "num":   10,
                         "start": start,
-                        "gl":  "us",
-                        "hl":  "en",
+                        "gl":    "us",
+                        "hl":    "en",
                     },
                 )
                 if r.status_code == 429:
@@ -281,19 +317,22 @@ async def _scrapedo_search(query: str) -> list[str]:
 
 async def _run_query(query: str) -> list[str]:
     async with SEM:
-        # 1. Google PSE (100 free/day — preferred when credits available)
-        urls = await _google_pse_search(query)
+        # 1. Brave Search (2000 free/month, no restrictions)
+        urls = await _brave_search(query)
         if not urls:
-            # 2. Serper.dev / SerpAPI
+            # 2. Google PSE (100 free/day, site-restricted engine)
+            urls = await _google_pse_search(query)
+        if not urls:
+            # 3. Serper.dev / SerpAPI
             urls = await _serpapi_search(query)
         if not urls:
-            # 3. DuckDuckGo (no key needed, rate-limited)
+            # 4. DuckDuckGo (no key needed, rate-limited)
             urls = await _ddg_search(query)
         if not urls:
-            # 4. googlesearch-python (slow, scrapy fallback)
+            # 5. googlesearch-python (slow fallback)
             urls = await _google_search_fallback(query)
         if not urls:
-            # 5. scrape.do Google SERP parse
+            # 6. scrape.do Google SERP parse
             urls = await _scrapedo_search(query)
         return urls
 
@@ -306,7 +345,7 @@ async def strategy_a_search(config: ScraperConfig) -> list[str]:
     When PSE is the only active backend we cap to the 10 highest-value templates
     and the most recent 3 years to stay within ~90 queries for a single company.
     """
-    pse_only = bool(GOOGLE_PSE_KEY) and not SERPAPI_KEY and not SERPER_KEY
+    pse_only = (bool(GOOGLE_PSE_KEY) or bool(BRAVE_KEY)) and not SERPAPI_KEY and not SERPER_KEY
 
     companies = config.all_company_names
     years_full = list(range(config.search_year_range["start"], config.search_year_range["end"] + 1))
