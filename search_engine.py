@@ -512,8 +512,23 @@ async def strategy_a_search(config: ScraperConfig) -> list[str]:
             all_urls.extend(r)
 
     # Filter out social media / stock comparison sites before returning
-    from pipeline_stream import _should_skip
-    filtered = [u for u in all_urls if u and not _should_skip(u)]
+    _SKIP = {
+        "linkedin.com", "facebook.com", "instagram.com", "twitter.com", "x.com",
+        "youtube.com", "tiktok.com", "reddit.com", "quora.com",
+        "danelfin.com", "macrotrends.net", "stockanalysis.com", "wisesheets.io",
+        "ambitionbox.com", "glassdoor.com", "indeed.com", "naukri.com",
+        "scribd.com", "slideshare.net", "academia.edu",
+        "amazon.com", "flipkart.com", "ebay.com",
+    }
+    def _skip(u: str) -> bool:
+        try:
+            from urllib.parse import urlparse
+            d = urlparse(u).netloc.lstrip("www.")
+            return any(d == s or d.endswith("." + s) for s in _SKIP)
+        except Exception:
+            return False
+
+    filtered = [u for u in all_urls if u and not _skip(u)]
     logger.info(f"Strategy A: {len(all_urls)} raw URLs → {len(filtered)} after skip-domain filter")
     return list(dict.fromkeys(filtered))
 
