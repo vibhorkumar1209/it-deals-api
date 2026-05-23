@@ -187,15 +187,27 @@ KNOWN_IT_DEAL_SOURCES = [
 
 # Domains where Jina Reader reliably returns article text
 FETCHABLE_DOMAINS = {
+    # Press wires (very reliable)
     "businesswire.com", "prnewswire.com", "globenewswire.com",
-    "economictimes.com", "financialexpress.com", "livemint.com",
-    "moneycontrol.com", "thehindu.com", "hindustantimes.com",
+    "businesswireindia.com",
+    # Indian financial / IT news
+    "economictimes.indiatimes.com", "economictimes.com",
+    "financialexpress.com", "livemint.com", "moneycontrol.com",
+    "business-standard.com", "thehindu.com", "hindustantimes.com",
+    "ndtv.com", "deccanherald.com",
     "bfsi.eletsonline.com", "expresscomputer.in", "cxotoday.com",
-    "finextra.com", "bankingtech.com", "ciodive.com",
+    "dqindia.com", "ciol.com", "crn.in", "etcio.com",
+    "inc42.com", "entrackr.com", "yourstory.com",
+    "bankingfrontiers.com",
+    # Global IT / fintech news
+    "finextra.com", "bankingtech.com", "ciodive.com", "paymentssource.com",
     "theregister.com", "computerweekly.com", "zdnet.com",
-    "cio.com", "techrepublic.com", "inc42.com",
-    "entrackr.com", "yourstory.com", "etcio.com",
-    "sec.gov", "bseindia.com",
+    "cio.com", "techrepublic.com", "channelweb.co.uk",
+    # Vendor newsrooms / IR
+    "newsroom.accenture.com", "infosys.com", "wipro.com",
+    "news.sap.com", "oracle.com", "news.microsoft.com",
+    # Regulatory
+    "sec.gov", "bseindia.com", "nseindia.com",
 }
 
 

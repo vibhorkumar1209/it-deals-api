@@ -16299,16 +16299,35 @@ def extract_vendor(text: str, company_names: list[str] | None = None) -> dict[st
         "has partnered", "agreement with", "contract with", "deploy", "implement",
         "go-live", "went live", "outsourc", "awarded to",
     ]
+    # Phrases that indicate the vendor is only mentioned as a parent/owner, not the deal party
+    SUBSIDIARY_CONTEXT = [
+        "part of ", "a subsidiary", "owned by", "now part of", "group company",
+        "a division of", "acquired by", "formerly known as", "rebranded as",
+        "unit of ", "arm of ",
+    ]
 
-    # Prefer vendor mentioned in deal-action context
+    def _is_subsidiary_mention(name: str, pos: int) -> bool:
+        window = tl[max(0, pos - 80): pos + len(name) + 80]
+        return any(sc in window for sc in SUBSIDIARY_CONTEXT)
+
+    # Prefer vendor in deal-action context AND not a subsidiary/parent clarification
+    deal_context_matches = []
     for name, category, pos in matches:
         window = tl[max(0, pos - 200): pos + 200]
-        if any(dc in window for dc in DEAL_CONTEXT):
+        if any(dc in window for dc in DEAL_CONTEXT) and not _is_subsidiary_mention(name, pos):
+            deal_context_matches.append((name, category, pos))
+
+    if deal_context_matches:
+        best = min(deal_context_matches, key=lambda x: x[2])
+        return {"vendor": normalize_name(best[0]), "vendor_category": best[1]}
+
+    # Fallback: earliest non-subsidiary mention
+    by_pos = sorted(matches, key=lambda x: x[2])
+    for name, category, pos in by_pos:
+        if not _is_subsidiary_mention(name, pos):
             return {"vendor": normalize_name(name), "vendor_category": category}
 
-    # Fallback: earliest mention (not subsidiary clause like "now part of X")
-    # Sort by position to get first-mentioned
-    by_pos = sorted(matches, key=lambda x: x[2])
+    # Last resort
     name, category, _ = by_pos[0]
     return {"vendor": normalize_name(name), "vendor_category": category}
 

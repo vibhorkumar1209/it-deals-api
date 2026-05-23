@@ -228,8 +228,8 @@ async def stream_pipeline(
     fetchable_urls = [u for u in all_candidate_urls if is_fetchable(u)]
     other_urls = [u for u in all_candidate_urls if not is_fetchable(u) and u not in fetchable_urls]
 
-    # Prioritise fetchable, pad with others up to MAX_URLS
-    all_urls = (fetchable_urls + other_urls)[:MAX_URLS]
+    # Only attempt URLs from domains where Jina Reader reliably works
+    all_urls = fetchable_urls[:MAX_URLS]
 
     if all_urls:
         save_url_cache(config.company_name, all_urls)
