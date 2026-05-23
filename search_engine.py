@@ -573,16 +573,8 @@ async def strategy_b_known_sources(config: ScraperConfig) -> list[str]:
 
 
 # ── RSS feeds from trusted news sources ──────────────────────────────────────
-RSS_FEEDS = [
-    "https://feed.businesswire.com/rss/home/?rss=G22",
-    "https://www.prnewswire.com/rss/news-releases-list.rss",
-    "https://www.globenewswire.com/RssFeed/subjectcode/IT",
-    "https://www.ciodive.com/feeds/news/",
-    "https://www.expresscomputer.in/feed/",
-    "https://bfsi.eletsonline.com/feed/",
-    "https://www.finextra.com/rss/headlines.aspx",
-    "https://www.bankingtech.com/feed/",
-]
+from parallel_search import KNOWN_IT_DEAL_SOURCES
+RSS_FEEDS = KNOWN_IT_DEAL_SOURCES
 
 
 async def strategy_rss(config: ScraperConfig) -> list[str]:
@@ -668,14 +660,37 @@ async def _timed(coro, timeout: float, label: str):
         return []
 
 
+async def _strategy_parallel(config: ScraperConfig) -> list[str]:
+    """Parallel.ai research — richer context, finds obscure deal articles."""
+    try:
+        from parallel_search import parallel_research, extract_urls_from_parallel_result
+        company = config.company_name
+        year = sorted(config.search_year_range.get("end", 2025) if isinstance(config.search_year_range, dict) else [2025])[-1] if False else config.search_year_range.get("end", 2025)
+        query = (
+            f"Find recent IT technology deals, contracts, outsourcing agreements, and vendor selections "
+            f"involving {company} from {year-1} to {year}. "
+            f"Include: vendor name, deal type (contract/partnership/implementation), "
+            f"technology area (ERP/CRM/cloud/cybersecurity/managed services/ATM), "
+            f"and source URL for each deal found."
+        )
+        result = await parallel_research(query)
+        if result:
+            urls = extract_urls_from_parallel_result(result)
+            logger.info(f"Parallel.ai found {len(urls)} URLs")
+            return urls
+    except Exception as e:
+        logger.warning(f"Parallel strategy failed: {e}")
+    return []
+
+
 async def discover_all_urls(config: ScraperConfig) -> list[str]:
     """Run all strategies in parallel, deduplicate, filter skip list.
     Each strategy has its own hard timeout so one hung strategy can't
     block the whole pipeline.
     """
     results = await asyncio.gather(
-        _timed(strategy_a_search(config),          35, "Strategy A"),
-        # Strategy B (scrape 34 homepages) disabled — too slow, low signal
+        _timed(strategy_a_search(config),          35, "Strategy A (Jina search)"),
+        _timed(_strategy_parallel(config),         50, "Strategy P (Parallel.ai)"),
         _timed(strategy_rss(config),               20, "Strategy E/RSS"),
         return_exceptions=True,
     )
