@@ -225,38 +225,46 @@ async def stream_pipeline(
             failures.append({"url": url, "failure_type": "hard_timeout"})
             return []
 
-    tasks = [_guarded(url) for url in all_urls]
+    # Convert coroutines to Tasks so asyncio.wait can track them
+    pending = {asyncio.ensure_future(_guarded(url)) for url in all_urls}
+    last_heartbeat = asyncio.get_event_loop().time()
 
-    for coro in asyncio.as_completed(tasks):
-        deals = await coro
-        done_count += 1
+    while pending:
+        # Wait up to 8s — then yield a keep-alive heartbeat regardless
+        done, pending = await asyncio.wait(pending, timeout=8)
 
-        for deal in deals:
-            scope = (deal.get("scope_of_service") or "")[:50]
-            vendor_raw = (deal.get("vendor") or "").lower()
-            vendor_norm = re.sub(r'\b(ltd|limited|inc|corp|pvt|llc|plc|gmbh|ag|sa)\.?\b', '', vendor_raw).strip()
-            key = "|".join([
-                deal.get("company_name", "").lower(),
-                vendor_norm,
-                deal.get("record_type", "").lower(),
-                (deal.get("announcement_date") or "")[:7],
-                scope.lower(),
-            ])
-            h = hashlib.sha256(key.encode()).hexdigest()
-            if h in seen_hashes:
-                continue
-            seen_hashes.add(h)
-            buffer.append(deal)
+        for task in done:
+            deals = task.result() if not task.exception() else []
+            done_count += 1
 
-        # Emit full batches immediately
-        while len(buffer) >= batch_size:
-            batch = buffer[:batch_size]
-            buffer = buffer[batch_size:]
-            total_emitted += len(batch)
-            yield {"type": "batch", "deals": batch, "total_so_far": total_emitted}
+            for deal in deals:
+                scope = (deal.get("scope_of_service") or "")[:50]
+                vendor_raw = (deal.get("vendor") or "").lower()
+                vendor_norm = re.sub(r'\b(ltd|limited|inc|corp|pvt|llc|plc|gmbh|ag|sa)\.?\b', '', vendor_raw).strip()
+                key = "|".join([
+                    deal.get("company_name", "").lower(),
+                    vendor_norm,
+                    deal.get("record_type", "").lower(),
+                    (deal.get("announcement_date") or "")[:7],
+                    scope.lower(),
+                ])
+                h = hashlib.sha256(key.encode()).hexdigest()
+                if h in seen_hashes:
+                    continue
+                seen_hashes.add(h)
+                buffer.append(deal)
 
-        # Progress heartbeat every HEARTBEAT_EVERY URLs
-        if done_count % HEARTBEAT_EVERY == 0:
+            # Emit full batches immediately
+            while len(buffer) >= batch_size:
+                batch = buffer[:batch_size]
+                buffer = buffer[batch_size:]
+                total_emitted += len(batch)
+                yield {"type": "batch", "deals": batch, "total_so_far": total_emitted}
+
+        # Heartbeat at least every 8s to keep Render SSE connection alive
+        now = asyncio.get_event_loop().time()
+        if now - last_heartbeat >= 8:
+            last_heartbeat = now
             yield {
                 "type": "heartbeat",
                 "done": done_count,
