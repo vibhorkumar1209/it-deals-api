@@ -142,71 +142,146 @@ async def _process_url(url: str, config: ScraperConfig, failures: list) -> list[
         return [deal]
 
 
+async def _run_parallel_research(config: ScraperConfig) -> str | None:
+    """Run Parallel.ai research query for the company's IT deals."""
+    from parallel_search import parallel_research
+    year = config.search_year_range.get("end", 2025) if isinstance(config.search_year_range, dict) else 2025
+    query = (
+        f"Research and list all IT technology deals, contracts, outsourcing agreements, "
+        f"vendor selections, and technology partnerships involving {config.company_name} "
+        f"from {year - 2} to {year}. "
+        f"For each deal include: vendor/technology company name, deal type, "
+        f"technology area (ERP/CRM/cloud/cybersecurity/ATM/managed services), "
+        f"deal value if known, announcement date, and source URL. "
+        f"Focus on signed contracts and announcements, not analyst reports or stock news."
+    )
+    return await parallel_research(query)
+
+
 async def stream_pipeline(
     config: ScraperConfig,
     batch_size: int = 5,
 ) -> AsyncGenerator[dict[str, Any], None]:
 
-    # ── Phase 1: URL discovery ────────────────────────────────────────────────
-    yield {"type": "progress", "message": "🔍 Searching across press releases, filings, and news sources..."}
+    from parallel_search import (
+        parallel_research, parallel_text_to_deals,
+        extract_urls_from_text, is_fetchable,
+    )
 
-    # Send periodic heartbeats so the SSE connection stays alive during discovery
-    async def _discover_with_heartbeat():
-        task = asyncio.create_task(discover_all_urls(config))
-        while not task.done():
-            try:
-                return await asyncio.wait_for(asyncio.shield(task), timeout=15)
-            except asyncio.TimeoutError:
-                pass  # heartbeat tick — task still running
-        return task.result()
+    # ── Phase 1A: Parallel.ai deep research (primary) ────────────────────────
+    yield {"type": "progress", "message": "🔍 Researching IT deals via Parallel.ai..."}
 
+    parallel_deals: list[dict] = []
+    parallel_urls: list[str] = []
+
+    parallel_task = asyncio.create_task(_run_parallel_research(config))
+
+    # Heartbeat while Parallel.ai runs (up to 90s)
+    elapsed = 0
+    while not parallel_task.done() and elapsed < 90:
+        try:
+            parallel_result = await asyncio.wait_for(
+                asyncio.shield(parallel_task), timeout=10
+            )
+            break
+        except asyncio.TimeoutError:
+            elapsed += 10
+            yield {"type": "heartbeat", "message": f"⏳ Researching deals… ({elapsed}s)"}
+    else:
+        if not parallel_task.done():
+            parallel_task.cancel()
+            parallel_result = None
+        else:
+            parallel_result = parallel_task.result()
+
+    if parallel_result:
+        parallel_deals = parallel_text_to_deals(
+            parallel_result, config.company_name, config.all_company_names
+        )
+        parallel_urls = extract_urls_from_text(parallel_result)
+        yield {"type": "progress", "message": f"✅ Parallel.ai found {len(parallel_deals)} deals — now scanning news sources..."}
+    else:
+        yield {"type": "progress", "message": "⚠️ Parallel.ai unavailable — scanning news sources directly..."}
+
+    # ── Phase 1B: URL discovery (Jina search + RSS) ──────────────────────────
     try:
-        # Each strategy already has its own timeout (60/45/30s) — outer is a safety net
         discover_task = asyncio.create_task(discover_all_urls(config))
-        heartbeat_interval = 10  # seconds between heartbeat yields
         elapsed = 0
-        max_wait = 60   # abort discovery after 60s — proceed with whatever we have
-        while not discover_task.done() and elapsed < max_wait:
+        while not discover_task.done() and elapsed < 60:
             try:
-                all_urls = await asyncio.wait_for(asyncio.shield(discover_task), timeout=heartbeat_interval)
+                all_urls = await asyncio.wait_for(asyncio.shield(discover_task), timeout=10)
                 break
             except asyncio.TimeoutError:
-                elapsed += heartbeat_interval
-                yield {"type": "heartbeat", "message": f"⏳ Still searching… ({elapsed}s)"}
+                elapsed += 10
+                yield {"type": "heartbeat", "message": f"⏳ Searching news sources… ({elapsed}s)"}
         else:
             if not discover_task.done():
                 discover_task.cancel()
                 all_urls = []
-                yield {"type": "progress", "message": "⚠️ Discovery timed out — using known sources only."}
             else:
                 all_urls = discover_task.result()
     except Exception:
         all_urls = []
-        yield {"type": "progress", "message": "⚠️ Discovery error — using known sources only."}
 
-    all_urls = all_urls[:MAX_URLS]
+    # Merge Parallel.ai URLs + search URLs, filter to fetchable domains only
+    all_candidate_urls = list(dict.fromkeys(parallel_urls + all_urls))
+    fetchable_urls = [u for u in all_candidate_urls if is_fetchable(u)]
+    other_urls = [u for u in all_candidate_urls if not is_fetchable(u) and u not in fetchable_urls]
 
-    # Cache for reuse
+    # Prioritise fetchable, pad with others up to MAX_URLS
+    all_urls = (fetchable_urls + other_urls)[:MAX_URLS]
+
     if all_urls:
         save_url_cache(config.company_name, all_urls)
 
     total_urls = len(all_urls)
+    yield {"type": "progress", "message": f"📋 Scanning {total_urls} sources ({len(fetchable_urls)} high-confidence)..."}
 
-    if total_urls == 0:
-        yield {
-            "type": "complete", "total": 0, "failures": 0,
-            "urls_attempted": 0,
-            "summary": {"total_deals": 0, "failures": 0, "sources_attempted": 0},
-        }
-        return
-
-    yield {"type": "progress", "message": f"📋 Found {total_urls} sources — scanning for IT deals..."}
-
-    # ── Phase 2: Fetch + extract ──────────────────────────────────────────────
-    failures: list[dict] = []
+    # ── Emit Parallel.ai deals immediately ───────────────────────────────────
     seen_hashes: set[str] = set()
     buffer: list[dict] = []
     total_emitted = 0
+    failures: list[dict] = []
+
+    def _dedup_and_buffer(deal: dict) -> bool:
+        scope = (deal.get("scope_of_service") or "")[:50]
+        vendor_raw = (deal.get("vendor") or "").lower()
+        vendor_norm = re.sub(r'\b(ltd|limited|inc|corp|pvt|llc|plc|gmbh|ag|sa)\.?\b', '', vendor_raw).strip()
+        key = "|".join([
+            deal.get("company_name", "").lower(),
+            vendor_norm,
+            deal.get("record_type", "").lower(),
+            (deal.get("announcement_date") or "")[:7],
+            scope.lower(),
+        ])
+        h = hashlib.sha256(key.encode()).hexdigest()
+        if h in seen_hashes:
+            return False
+        seen_hashes.add(h)
+        buffer.append(deal)
+        return True
+
+    for deal in parallel_deals:
+        _dedup_and_buffer(deal)
+
+    while len(buffer) >= batch_size:
+        batch = buffer[:batch_size]
+        buffer = buffer[batch_size:]
+        total_emitted += len(batch)
+        yield {"type": "batch", "deals": batch, "total_so_far": total_emitted}
+
+    if total_urls == 0:
+        if buffer:
+            total_emitted += len(buffer)
+            yield {"type": "batch", "deals": buffer, "total_so_far": total_emitted}
+        yield {
+            "type": "complete", "total": total_emitted, "failures": 0,
+            "urls_attempted": 0,
+            "summary": {"total_deals": total_emitted, "failures": 0, "sources_attempted": 0},
+        }
+        return
+
+    # ── Phase 2: Fetch + extract ──────────────────────────────────────────────
     done_count = 0
 
     # Wrap with timeout so as_completed never hangs
@@ -238,21 +313,7 @@ async def stream_pipeline(
             done_count += 1
 
             for deal in deals:
-                scope = (deal.get("scope_of_service") or "")[:50]
-                vendor_raw = (deal.get("vendor") or "").lower()
-                vendor_norm = re.sub(r'\b(ltd|limited|inc|corp|pvt|llc|plc|gmbh|ag|sa)\.?\b', '', vendor_raw).strip()
-                key = "|".join([
-                    deal.get("company_name", "").lower(),
-                    vendor_norm,
-                    deal.get("record_type", "").lower(),
-                    (deal.get("announcement_date") or "")[:7],
-                    scope.lower(),
-                ])
-                h = hashlib.sha256(key.encode()).hexdigest()
-                if h in seen_hashes:
-                    continue
-                seen_hashes.add(h)
-                buffer.append(deal)
+                _dedup_and_buffer(deal)
 
             # Emit full batches immediately
             while len(buffer) >= batch_size:

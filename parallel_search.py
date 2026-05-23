@@ -1,19 +1,21 @@
 """Parallel.ai research API — async task/poll search strategy.
 
-Used as primary research engine; Jina search is fallback when Parallel is unavailable.
+Primary use: deep research queries that return structured deal summaries.
+Jina is used for URL fetching fallback.
 """
 
 import asyncio
 import logging
 import os
+import re
 import httpx
 
 logger = logging.getLogger(__name__)
 
 PARALLEL_API_KEY = os.getenv("PARALLEL_API_KEY", "")
 BASE_URL = "https://api.parallel.ai"
-TASK_TIMEOUT_S = 55      # max seconds to wait for Parallel task
-POLL_INTERVAL_S = 4      # how often to poll for completion
+TASK_TIMEOUT_S = 90      # max seconds to wait for Parallel task
+POLL_INTERVAL_S = 5      # how often to poll
 
 
 def _headers() -> dict:
@@ -24,7 +26,6 @@ def _headers() -> dict:
 
 
 async def _create_task(query: str) -> str | None:
-    """Submit a research task and return run_id."""
     if not PARALLEL_API_KEY:
         return None
     try:
@@ -44,7 +45,6 @@ async def _create_task(query: str) -> str | None:
 
 
 async def _poll_task(run_id: str) -> str | None:
-    """Poll until task complete; return result text."""
     deadline = asyncio.get_event_loop().time() + TASK_TIMEOUT_S
     async with httpx.AsyncClient(timeout=20) as c:
         while asyncio.get_event_loop().time() < deadline:
@@ -56,10 +56,13 @@ async def _poll_task(run_id: str) -> str | None:
                 data = r.json()
                 status = data.get("status", "")
                 if status == "failed":
+                    logger.warning(f"Parallel task {run_id} failed")
                     return None
                 if status == "completed" or not data.get("is_active", True):
-                    # Fetch result
-                    rr = await c.get(f"{BASE_URL}/v1/tasks/runs/{run_id}/result", headers=_headers())
+                    rr = await c.get(
+                        f"{BASE_URL}/v1/tasks/runs/{run_id}/result",
+                        headers=_headers()
+                    )
                     if rr.is_success:
                         rd = rr.json()
                         return (
@@ -70,39 +73,84 @@ async def _poll_task(run_id: str) -> str | None:
                     return None
             except Exception as e:
                 logger.debug(f"Parallel poll error: {e}")
+    logger.warning(f"Parallel task {run_id} timed out after {TASK_TIMEOUT_S}s")
     return None
 
 
 async def parallel_research(query: str) -> str | None:
-    """Run a Parallel.ai research query and return the result text.
-    Returns None if Parallel is unavailable or times out.
-    """
+    """Run a Parallel.ai research query and return result text."""
     if not PARALLEL_API_KEY:
         return None
     run_id = await _create_task(query)
     if not run_id:
         return None
-    logger.info(f"Parallel task created: {run_id} for query: {query[:80]}")
+    logger.info(f"Parallel task created: {run_id}")
     result = await _poll_task(run_id)
     if result:
-        logger.info(f"Parallel task {run_id} completed: {len(result)} chars")
+        logger.info(f"Parallel task {run_id} done: {len(result)} chars")
     return result
 
 
-def extract_urls_from_parallel_result(text: str) -> list[str]:
-    """Extract URLs from Parallel.ai result text."""
-    import re
-    return list(dict.fromkeys(re.findall(r'https?://[^\s\)\]\>"\']+', text)))
+def extract_urls_from_text(text: str) -> list[str]:
+    """Extract all http(s) URLs from Parallel.ai result text."""
+    raw = re.findall(r'https?://[^\s\)\]\>"\'<,]+', text)
+    # Clean trailing punctuation
+    cleaned = [re.sub(r'[.,;:]+$', '', u) for u in raw]
+    return list(dict.fromkeys(cleaned))
 
 
-# ── 47+ hardcoded high-quality IT deal news sources ───────────────────────────
-# These are scanned on every run regardless of search results.
+def parallel_text_to_deals(
+    text: str,
+    company_name: str,
+    company_names: list[str],
+) -> list[dict]:
+    """
+    Parse Parallel.ai research output directly into deal records.
+    Parallel already read the source pages — we just extract structure from its summary.
+    """
+    from nlp_extractor import build_deal_record, is_deal_relevant
+
+    deals = []
+    urls = extract_urls_from_text(text)
+
+    # Split on paragraph/section breaks to process each deal block
+    # Parallel output is typically structured with one deal per paragraph
+    blocks = re.split(r'\n{2,}|\n(?=\d+[\.\)])', text.strip())
+
+    for block in blocks:
+        if len(block.split()) < 15:
+            continue
+        # Must mention the company
+        if not any(cn.lower() in block.lower() for cn in company_names):
+            continue
+        if not is_deal_relevant(block, company_names, []):
+            continue
+
+        # Use the first URL in this block as the source, or any extracted URL
+        block_urls = extract_urls_from_text(block)
+        source_url = block_urls[0] if block_urls else (urls[0] if urls else "https://parallel.ai/research")
+
+        deal = build_deal_record(
+            text=block,
+            url=source_url,
+            source_type="news_article",
+            company_name=company_name,
+            company_names=company_names,
+            soup=None,
+        )
+        if deal:
+            deals.append(deal)
+
+    logger.info(f"Parallel text → {len(deals)} deals from {len(blocks)} blocks")
+    return deals
+
+
+# ── 47+ high-quality IT deal news sources (RSS feeds) ─────────────────────────
 KNOWN_IT_DEAL_SOURCES = [
     # Indian banking / fintech news
     "https://bfsi.eletsonline.com/feed/",
     "https://www.expresscomputer.in/feed/",
     "https://cxotoday.com/feed/",
-    "https://www.cio.inc/feed/",
     "https://www.bankingfrontiers.com/feed/",
     "https://inc42.com/feed/",
     "https://entrackr.com/feed/",
@@ -115,7 +163,6 @@ KNOWN_IT_DEAL_SOURCES = [
     "https://feed.businesswire.com/rss/home/?rss=G22",
     "https://www.prnewswire.com/rss/news-releases-list.rss",
     "https://www.globenewswire.com/RssFeed/subjectcode/IT",
-    "https://www.businesswire.com/rss/home/?rss=G22&rss=G36",
 
     # Global IT / fintech news
     "https://www.finextra.com/rss/headlines.aspx",
@@ -124,31 +171,39 @@ KNOWN_IT_DEAL_SOURCES = [
     "https://www.theregister.com/headlines.atom",
     "https://www.computerweekly.com/rss/IT-industry.xml",
     "https://zdnet.com/news/rss.xml",
-    "https://techrepublic.com/rssfeeds/articles/",
     "https://www.cio.com/feed/",
-    "https://www.itnews.com.au/feed/",
-    "https://www.itpro.com/feed",
     "https://www.paymentssource.com/feed",
 
-    # Vendor IR / press rooms (major IT vendors active in India)
+    # Vendor IR / press rooms
     "https://newsroom.accenture.com/news/rss.xml",
-    "https://www.tcs.com/content/tcs/en/newsroom/news/rss.xml",
     "https://www.infosys.com/newsroom/press-releases/rss.xml",
     "https://www.wipro.com/newsroom/press-releases/rss.xml",
-    "https://www.hcltech.com/news/press-releases/rss",
-    "https://www.cognizant.com/en_us/news/rss.xml",
-    "https://www.capgemini.com/news/rss.xml",
     "https://news.sap.com/feed/",
     "https://www.oracle.com/news/rss.xml",
-    "https://www.ibm.com/blogs/business-analytics/feed/",
     "https://news.microsoft.com/feed/",
     "https://aws.amazon.com/blogs/aws/feed/",
-    "https://cloud.google.com/blog/rss.xml",
     "https://www.servicenow.com/company/media/press-room/rss.xml",
-    "https://www.salesforce.com/news/press-releases/rss/",
-
-    # Indian banking IT / RBI / BSE
-    "https://www.rbi.org.in/scripts/rss.aspx",
-    "https://bseindia.com/xml-data/corpfiling/AttachLive/AllAnnouncement.xml",
-    "https://www.nseindia.com/api/corporate-announcements?index=equities",
 ]
+
+# Domains where Jina Reader reliably returns article text
+FETCHABLE_DOMAINS = {
+    "businesswire.com", "prnewswire.com", "globenewswire.com",
+    "economictimes.com", "financialexpress.com", "livemint.com",
+    "moneycontrol.com", "thehindu.com", "hindustantimes.com",
+    "bfsi.eletsonline.com", "expresscomputer.in", "cxotoday.com",
+    "finextra.com", "bankingtech.com", "ciodive.com",
+    "theregister.com", "computerweekly.com", "zdnet.com",
+    "cio.com", "techrepublic.com", "inc42.com",
+    "entrackr.com", "yourstory.com", "etcio.com",
+    "sec.gov", "bseindia.com",
+}
+
+
+def is_fetchable(url: str) -> bool:
+    """Return True only for domains where Jina Reader reliably works."""
+    try:
+        from urllib.parse import urlparse
+        d = urlparse(url).netloc.lstrip("www.")
+        return any(d == fd or d.endswith("." + fd) for fd in FETCHABLE_DOMAINS)
+    except Exception:
+        return False
