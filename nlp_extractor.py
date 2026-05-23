@@ -16248,9 +16248,40 @@ VENDOR_ALIASES: dict[str, str] = {
     "DXC Technology Company": "DXC",
 }
 
+_init_compiled_masters()
+
 VENDOR_SIGNALS = {"platform", "software", "license", "cloud", "solution", "suite", "product"}
 SI_SIGNALS = {"implement", "deploy", "integrate", "partner", "systems integrator",
               "consulting", "awarded to", "services partner", "delivered by"}
+
+
+# ── Pre-compiled regex patterns (built once at import, not per call) ──────────
+# Each entry: (compiled_pattern, name, category)
+def _build_compiled_master(master: dict) -> list:
+    compiled = []
+    for category, names in master.items():
+        for name in names:
+            pat = re.compile(
+                r'(?<![A-Za-z0-9])' + re.escape(name) + r'(?![A-Za-z0-9])',
+                re.IGNORECASE,
+            )
+            compiled.append((pat, name, category))
+    # Longest name first so longer matches win over shorter substrings
+    compiled.sort(key=lambda x: len(x[1]), reverse=True)
+    return compiled
+
+_VENDOR_COMPILED: list = []   # filled below after both masters are defined
+_SI_COMPILED: list = []       # filled below after both masters are defined
+
+def _init_compiled_masters() -> None:
+    global _VENDOR_COMPILED, _SI_COMPILED
+    _VENDOR_COMPILED = _build_compiled_master(VENDOR_MASTER)
+    _SI_COMPILED = _build_compiled_master(SI_PARTNER_MASTER)
+    import logging as _log
+    _log.getLogger(__name__).info(
+        f"nlp_extractor: compiled {len(_VENDOR_COMPILED)} vendor patterns, "
+        f"{len(_SI_COMPILED)} SI patterns"
+    )
 
 
 def normalize_name(raw: str) -> str:
@@ -16259,27 +16290,30 @@ def normalize_name(raw: str) -> str:
 
 def _find_matches_in_text(text: str, master: dict[str, list[str]]) -> list[tuple[str, str, int]]:
     """Returns list of (name, category, char_position) sorted by match length desc.
-    Uses word-boundary matching to avoid substrings (e.g. 'MCS' inside 'CMS').
+    Uses pre-compiled regex patterns (built once at import) to avoid per-call compilation.
     """
+    # Select the right pre-compiled list
+    global _VENDOR_COMPILED, _SI_COMPILED
+    if master is VENDOR_MASTER:
+        compiled = _VENDOR_COMPILED
+    elif master is SI_PARTNER_MASTER:
+        compiled = _SI_COMPILED
+    else:
+        # Fallback: build on-the-fly (shouldn't happen in normal use)
+        compiled = _build_compiled_master(master)
+
     matches = []
-    for category, names in master.items():
-        for name in names:
-            # Word-boundary regex: \b on both sides if name starts/ends with word char
-            pat = r'(?<![A-Za-z0-9])' + re.escape(name) + r'(?![A-Za-z0-9])'
-            m = re.search(pat, text, re.IGNORECASE)
-            if m:
-                matches.append((name, category, m.start()))
-    # Longest match wins
-    matches.sort(key=lambda x: len(x[0]), reverse=True)
-    # Deduplicate: remove shorter matches subsumed by longer ones
-    seen_positions = []
-    unique = []
-    for name, cat, pos in matches:
-        overlaps = any(abs(pos - sp) < len(name) for sp in seen_positions)
-        if not overlaps:
-            unique.append((name, cat, pos))
+    seen_positions: list[int] = []
+    for pat, name, category in compiled:
+        m = pat.search(text)
+        if m:
+            pos = m.start()
+            # Skip if a longer match already covers this position
+            if any(abs(pos - sp) < len(name) for sp in seen_positions):
+                continue
+            matches.append((name, category, pos))
             seen_positions.append(pos)
-    return unique
+    return matches
 
 
 def extract_vendor(text: str, company_names: list[str] | None = None) -> dict[str, str]:
