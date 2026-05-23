@@ -16283,12 +16283,34 @@ def _find_matches_in_text(text: str, master: dict[str, list[str]]) -> list[tuple
 
 
 def extract_vendor(text: str, company_names: list[str] | None = None) -> dict[str, str]:
-    """Match against VENDOR_MASTER only — no NER fallback (NER invents phantom vendors)."""
+    """Match against VENDOR_MASTER only — no NER fallback (NER invents phantom vendors).
+
+    Selection priority:
+    1. Vendor appearing in a deal-action context (selects, signs, partners with, etc.)
+    2. Earliest mention in the article (main subject, not parenthetical clarification)
+    """
     matches = _find_matches_in_text(text, VENDOR_MASTER)
-    if matches:
-        name, category, _ = matches[0]
-        return {"vendor": normalize_name(name), "vendor_category": category}
-    return {"vendor": "", "vendor_category": "OTHER"}
+    if not matches:
+        return {"vendor": "", "vendor_category": "OTHER"}
+
+    tl = text.lower()
+    DEAL_CONTEXT = [
+        "selects ", "selected ", "chooses ", "signs ", "signed ", "partners with",
+        "has partnered", "agreement with", "contract with", "deploy", "implement",
+        "go-live", "went live", "outsourc", "awarded to",
+    ]
+
+    # Prefer vendor mentioned in deal-action context
+    for name, category, pos in matches:
+        window = tl[max(0, pos - 200): pos + 200]
+        if any(dc in window for dc in DEAL_CONTEXT):
+            return {"vendor": normalize_name(name), "vendor_category": category}
+
+    # Fallback: earliest mention (not subsidiary clause like "now part of X")
+    # Sort by position to get first-mentioned
+    by_pos = sorted(matches, key=lambda x: x[2])
+    name, category, _ = by_pos[0]
+    return {"vendor": normalize_name(name), "vendor_category": category}
 
 
 def extract_si_partner(text: str) -> str | None:
@@ -16297,15 +16319,21 @@ def extract_si_partner(text: str) -> str | None:
         return None
 
     text_lower = text.lower()
+    SI_REQUIRED = [
+        "system integrat", "implementation partner", "si partner",
+        "implementing partner", "deployed by", "implemented by",
+        "rolled out by", "integrated by", "consulting partner",
+        "services partner", "delivery partner",
+    ]
+
     for name, _cat, pos in matches:
-        # Check surrounding context to determine role
-        window = text_lower[max(0, pos - 150):pos + 150]
-        vendor_score = sum(1 for s in VENDOR_SIGNALS if s in window)
-        si_score = sum(1 for s in SI_SIGNALS if s in window)
-        if si_score >= vendor_score:
+        window = text_lower[max(0, pos - 200): pos + 200]
+        # Only return as SI if there's explicit SI role language nearby
+        if any(s in window for s in SI_REQUIRED):
             return normalize_name(name)
 
-    return normalize_name(matches[0][0])
+    # No explicit SI context found — don't guess
+    return None
 
 
 def extract_deal_value(text: str) -> float | None:
