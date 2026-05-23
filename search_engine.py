@@ -616,7 +616,13 @@ async def strategy_rss(config: ScraperConfig) -> list[str]:
         except Exception as e:
             logger.debug(f"RSS feed failed {feed_url}: {e}")
 
-    await asyncio.gather(*[_fetch_feed(f) for f in RSS_FEEDS])
+    # Run all 47 feeds with a dedicated semaphore (8 concurrent) — don't share with search SEM
+    rss_sem = asyncio.Semaphore(8)
+    async def _fetch_feed_throttled(f: str):
+        async with rss_sem:
+            await _fetch_feed(f)
+
+    await asyncio.gather(*[_fetch_feed_throttled(f) for f in RSS_FEEDS])
     return list(dict.fromkeys(u for u in found_urls if u))
 
 
@@ -691,7 +697,7 @@ async def discover_all_urls(config: ScraperConfig) -> list[str]:
     results = await asyncio.gather(
         _timed(strategy_a_search(config),          35, "Strategy A (Jina search)"),
         _timed(_strategy_parallel(config),         50, "Strategy P (Parallel.ai)"),
-        _timed(strategy_rss(config),               20, "Strategy E/RSS"),
+        _timed(strategy_rss(config),               40, "Strategy E/RSS (47 feeds)"),
         return_exceptions=True,
     )
 

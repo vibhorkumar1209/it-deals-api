@@ -17,8 +17,8 @@ from nlp_extractor import build_deal_record
 
 logger = logging.getLogger(__name__)
 
-SEM = asyncio.Semaphore(4)
-MAX_URLS = 15
+SEM = asyncio.Semaphore(5)
+MAX_URLS = 30
 URL_TIMEOUT = 20          # seconds hard kill per URL
 HEARTBEAT_EVERY = 3       # emit SSE heartbeat every N URLs (keeps Render connection alive)
 
