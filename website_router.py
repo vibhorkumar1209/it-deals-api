@@ -80,6 +80,8 @@ JINA_PREFERRED_DOMAINS = {
     "moneycontrol.com", "economictimes.com", "financialexpress.com",
     "livemint.com", "thehindu.com", "hindustantimes.com",
     "finextra.com", "bankingtech.com", "paymentssource.com",
+    "bfsi.eletsonline.com", "cxotoday.com", "cio.inc", "entrackr.com",
+    "inc42.com", "yourstory.com", "etcio.com",
     "cio.com", "cioinsight.com", "computerweekly.com",
     "zdnet.com", "techrepublic.com", "theregister.com",
 }

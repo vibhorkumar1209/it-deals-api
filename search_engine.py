@@ -27,20 +27,20 @@ JINA_KEY       = os.getenv("JINA_KEY", "")          # Jina AI Search — s.jina.
 QUERY_TEMPLATES_CUSTOMER = [
     # Natural-language deal phrases — work well with Jina semantic search
     "{company} signs technology contract {year}",
-    "{company} IT outsourcing deal {year}",
-    "{company} selects technology vendor {year}",
+    "{company} IT outsourcing deal awarded {year}",
+    "{company} selects technology vendor signs agreement {year}",
     "{company} digital transformation contract signed {year}",
-    "{company} managed services agreement {year}",
-    "{company} technology implementation announced {year}",
-    "{company} signs partnership agreement Infosys TCS Wipro Accenture {year}",
-    "{company} SAP Oracle Salesforce ServiceNow implementation {year}",
-    "{company} cloud migration AWS Azure Google Cloud {year}",
-    "{company} cybersecurity contract deal {year}",
-    "{company} ERP CRM HCM system selected {year}",
-    "{company} outsourcing contract awarded {year}",
-    "{company} technology deal businesswire prnewswire {year}",
-    "{company} strategic alliance technology partner {year}",
-    "{company} go-live deployment rollout {year}",
+    "{company} managed services agreement awarded {year}",
+    "{company} technology implementation go-live {year}",
+    "{company} outsourcing Infosys TCS Wipro HCLTech IBM {year}",
+    "{company} SAP Oracle Salesforce ServiceNow Workday implementation {year}",
+    "{company} cloud AWS Azure migration deal {year}",
+    "{company} CMS Newgen Finacle Temenos FSS banking technology {year}",
+    "{company} ATM managed services cash management outsourcing {year}",
+    "{company} cybersecurity contract CrowdStrike Palo Alto Fortinet {year}",
+    "{company} ERP HCM CRM system selected vendor {year}",
+    "{company} strategic partnership technology alliance signed {year}",
+    "{company} press release technology deal announcement {year}",
 ]
 
 QUERY_TEMPLATES_VENDOR = [
@@ -579,6 +579,9 @@ RSS_FEEDS = [
     "https://www.globenewswire.com/RssFeed/subjectcode/IT",
     "https://www.ciodive.com/feeds/news/",
     "https://www.expresscomputer.in/feed/",
+    "https://bfsi.eletsonline.com/feed/",
+    "https://www.finextra.com/rss/headlines.aspx",
+    "https://www.bankingtech.com/feed/",
 ]
 
 

@@ -16447,16 +16447,23 @@ def extract_announcement_date(text: str, url: str, soup=None) -> str | None:
         if r:
             return r
 
-    # 7. Text date patterns
+    # 7. Text date patterns — scan FULL text (articles have long nav headers)
     date_patterns = [
-        r'\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+20\d{2}\b',
+        # "Last Updated: Sep 21, 2022" / "Updated: Sep 21, 2022, 03:14 PM IST"
+        r'(?:Last\s+Updated|Updated|Published)[:\s]+(\w+\s+\d{1,2},?\s+20\d{2})',
+        # "Sep 21, 2022" / "September 21, 2022"
+        r'\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+20\d{2}\b',
+        # "21 September 2022"
         r'\b\d{1,2}\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b',
+        # ISO "2022-09-21"
         r'\b20\d{2}-\d{2}-\d{2}\b',
+        # "21/09/2022" or "09/21/2022"
+        r'\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b',
     ]
     for pat in date_patterns:
-        m = re.search(pat, text[:3000])
+        m = re.search(pat, text, re.IGNORECASE)
         if m:
-            r = _parse(m.group(0))
+            r = _parse(m.group(1) if m.lastindex else m.group(0))
             if r:
                 return r
 
