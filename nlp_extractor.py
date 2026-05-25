@@ -16793,6 +16793,15 @@ def build_deal_record(
         cat = vendor_info.get("vendor_category", "")
 
     si = extract_si_partner(text)
+
+    # For non-software deals (managed services, outsourcing), the service provider
+    # IS the vendor — promote si_partner to vendor if vendor slot is empty.
+    SOFTWARE_CATEGORIES = {"ERP", "CRM", "HCM_HR", "SCM_PROCUREMENT", "CLOUD",
+                           "CYBER", "ANALYTICS", "ITSM"}
+    if si and not vendor and cat not in SOFTWARE_CATEGORIES:
+        vendor = si
+        si = None   # don't double-report as both vendor and SI partner
+
     value = extract_deal_value(text)
     duration = extract_deal_duration(text)
     date = extract_announcement_date(text, url, soup)
