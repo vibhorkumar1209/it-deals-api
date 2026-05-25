@@ -100,19 +100,23 @@ async def _process_url(url: str, config: ScraperConfig, failures: list) -> list[
     if _should_skip(url):
         return []  # Silently skip — not a failure, expected behaviour
     async with SEM:
+        logger.info(f"Fetching: {url[:100]}")
         try:
             text, html, final_type = await asyncio.wait_for(
                 fetch_url(url, None, config),
                 timeout=URL_TIMEOUT,
             )
         except asyncio.TimeoutError:
+            logger.warning(f"TIMEOUT: {url[:100]}")
             failures.append({"url": url, "failure_type": "timeout"})
             return []
         except Exception as e:
+            logger.warning(f"EXCEPTION: {url[:100]} — {e}")
             failures.append({"url": url, "failure_type": "exception", "error": str(e)})
             return []
 
         if not text:
+            logger.warning(f"NO_CONTENT: {url[:100]}")
             failures.append({"url": url, "failure_type": "no_content"})
             return []
 
@@ -226,10 +230,15 @@ async def stream_pipeline(
     # Merge Parallel.ai URLs + search URLs, filter to fetchable domains only
     all_candidate_urls = list(dict.fromkeys(parallel_urls + all_urls))
     fetchable_urls = [u for u in all_candidate_urls if is_fetchable(u)]
-    other_urls = [u for u in all_candidate_urls if not is_fetchable(u) and u not in fetchable_urls]
+
+    logger.info(f"URL funnel: {len(all_candidate_urls)} candidates → {len(fetchable_urls)} fetchable")
+    for u in all_candidate_urls[:5]:
+        logger.info(f"  candidate: {u[:100]}")
 
     # Only attempt URLs from domains where Jina Reader reliably works
     all_urls = fetchable_urls[:MAX_URLS]
+    for u in all_urls:
+        logger.info(f"  will fetch: {u[:100]}")
 
     if all_urls:
         save_url_cache(config.company_name, all_urls)
@@ -247,17 +256,24 @@ async def stream_pipeline(
         scope = (deal.get("scope_of_service") or "")[:50]
         vendor_raw = (deal.get("vendor") or "").lower()
         vendor_norm = re.sub(r'\b(ltd|limited|inc|corp|pvt|llc|plc|gmbh|ag|sa)\.?\b', '', vendor_raw).strip()
-        key = "|".join([
-            deal.get("company_name", "").lower(),
-            vendor_norm,
-            deal.get("record_type", "").lower(),
-            (deal.get("announcement_date") or "")[:7],
-            scope.lower(),
-        ])
+        company = deal.get("company_name", "").lower()
+        date_ym = (deal.get("announcement_date") or "")[:7]  # YYYY-MM
+
+        # Primary dedup: exact match on all fields
+        key = "|".join([company, vendor_norm, deal.get("record_type", "").lower(), date_ym, scope.lower()])
         h = hashlib.sha256(key.encode()).hexdigest()
         if h in seen_hashes:
             return False
+
+        # Secondary dedup: same company + same date-month + overlapping scope
+        # catches same deal from two different news sources with slightly different vendor text
+        loose_key = "|".join([company, date_ym, scope.lower()])
+        lh = hashlib.sha256(loose_key.encode()).hexdigest()
+        if lh in seen_hashes:
+            return False
+
         seen_hashes.add(h)
+        seen_hashes.add(lh)
         buffer.append(deal)
         return True
 

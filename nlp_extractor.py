@@ -16285,21 +16285,21 @@ def normalize_name(raw: str) -> str:
 def _find_matches_in_text(text: str, master: dict[str, list[str]]) -> list[tuple[str, str, int]]:
     """Returns list of (name, category, char_position).
     Uses one compiled alternation pattern per category — avoids 16k per-call compiles.
+    finditer gives ALL matches per category (not just the first).
     """
     cat_patterns = _get_category_patterns(master)
     matches: list[tuple[str, str, int]] = []
     seen_positions: list[int] = []
 
     for category, (pat, _) in cat_patterns.items():  # type: ignore[misc]
-        m = pat.search(text)
-        if m:
+        for m in pat.finditer(text):
             name = m.group(1)
             pos = m.start(1)
             if not any(abs(pos - sp) < len(name) for sp in seen_positions):
                 matches.append((name, category, pos))
                 seen_positions.append(pos)
 
-    # Sort by name length desc so longer/more-specific names take priority
+    # Longest match first so more-specific names take priority over substrings
     matches.sort(key=lambda x: len(x[0]), reverse=True)
     return matches
 
