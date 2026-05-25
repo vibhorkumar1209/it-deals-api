@@ -214,25 +214,27 @@ async def stream_pipeline(
     rss_items: list[dict] = []
 
     try:
-        pending_1b = {
-            asyncio.ensure_future(discover_all_urls(config)),
-            asyncio.ensure_future(strategy_rss_deals(config)),
-        }
-        discover_fut, rss_fut = list(pending_1b)  # keep refs for result extraction
+        # Tag each future so we know which result belongs to which task
+        discover_fut = asyncio.ensure_future(discover_all_urls(config))
+        rss_fut      = asyncio.ensure_future(strategy_rss_deals(config))
+        fut_map = {discover_fut: "discover", rss_fut: "rss"}
+        pending_1b = set(fut_map.keys())
 
         elapsed = 0
         while pending_1b and elapsed < 55:
             done_1b, pending_1b = await asyncio.wait(pending_1b, timeout=10)
             elapsed += 10
             for t in done_1b:
-                if t is discover_fut and not t.exception():
-                    all_urls = t.result()
-                elif t is rss_fut and not t.exception():
-                    rss_items = t.result()
+                if t.exception():
+                    logger.warning(f"Phase 1B {fut_map[t]} error: {t.exception()}")
+                    continue
+                if fut_map[t] == "discover":
+                    all_urls = t.result() or []
+                else:
+                    rss_items = t.result() or []
             if pending_1b:
                 yield {"type": "heartbeat", "message": f"⏳ Scanning feeds… ({elapsed}s)"}
 
-        # Cancel anything still running
         for t in pending_1b:
             t.cancel()
     except Exception as e:
