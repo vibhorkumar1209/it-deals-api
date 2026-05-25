@@ -290,7 +290,7 @@ async def enrich_task(req: EnrichTaskRequest):
             }
 
             if raw:
-                # Try JSON parse first (SDK output_schema returns structured JSON)
+                # Try JSON parse first
                 parsed: dict = {}
                 try:
                     clean = _re.sub(r'```(?:json)?\s*|\s*```', '', raw.strip())
@@ -298,23 +298,45 @@ async def enrich_task(req: EnrichTaskRequest):
                 except Exception:
                     pass
 
+                # If JSON parse failed or missing keys, use Claude Haiku to extract fields
+                fields_missing = [
+                    f for f in req.schema_fields
+                    if f.key not in parsed or parsed.get(f.key) in (None, "null", "", "N/A", "Unknown")
+                ]
+                if fields_missing:
+                    try:
+                        import anthropic as _anthropic
+                        _ac = _anthropic.Anthropic()
+                        _fields_desc = "\n".join(
+                            f'- {f.key}: {f.description or f.label}'
+                            for f in fields_missing
+                        )
+                        _msg = _ac.messages.create(
+                            model="claude-haiku-20240307",
+                            max_tokens=512,
+                            messages=[{
+                                "role": "user",
+                                "content": (
+                                    f"Extract these fields from the research text. "
+                                    f"Return ONLY a JSON object, no explanation.\n\n"
+                                    f"Fields:\n{_fields_desc}\n\n"
+                                    f"Research text:\n{raw[:3000]}\n\n"
+                                    f"Use null for any field not found. Return JSON only."
+                                ),
+                            }],
+                        )
+                        _claude_text = _msg.content[0].text
+                        _clean2 = _re.sub(r'```(?:json)?\s*|\s*```', '', _claude_text.strip())
+                        _claude_parsed = _json.loads(_clean2)
+                        parsed.update({k: v for k, v in _claude_parsed.items() if v not in (None, "null", "")})
+                    except Exception as _ce:
+                        logger.debug(f"Claude parse fallback failed: {_ce}")
+
                 for field in req.schema_fields:
-                    val = ""
-                    if field.key in parsed and parsed[field.key] not in (None, "null", ""):
-                        val = str(parsed[field.key])
-                    else:
-                        # Regex fallback on free-text response
-                        for pat in [
-                            rf'{_re.escape(field.label)}\s*[:\-]\s*(.+)',
-                            rf'{_re.escape(field.key)}\s*[:\-]\s*(.+)',
-                        ]:
-                            m = _re.search(pat, raw, _re.IGNORECASE)
-                            if m:
-                                candidate = m.group(1).strip().rstrip(".,;")
-                                if candidate.lower() not in ("not found", "unknown", "n/a", "none", "-", "null"):
-                                    val = candidate
-                                break
-                    row[field.key] = val
+                    val = parsed.get(field.key, "")
+                    if val in (None, "null", "N/A", "Unknown", "n/a"):
+                        val = ""
+                    row[field.key] = str(val) if val else ""
 
             results.append(row)
             yield _sse({"type": "row", "row": row, "index": i, "total": len(req.inputs)})
