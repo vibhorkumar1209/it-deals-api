@@ -223,20 +223,29 @@ async def enrich_task(req: EnrichTaskRequest):
     from parallel_search import parallel_research
 
     async def _generate():
+        import re as _re
+        import json as _json
+
         def _sse(obj: dict) -> str:
             return f"data: {json.dumps(obj)}\n\n"
 
-        yield _sse({"type": "progress", "message": f"🚀 Starting enrichment for {len(req.inputs)} companies…"})
+        # Early check — fail fast with a clear message
+        parallel_key = os.getenv("PARALLEL_API_KEY", "")
+        if not parallel_key:
+            yield _sse({"type": "error", "message": "PARALLEL_API_KEY not set on server. Add it in Render → Environment."})
+            return
 
-        # Build output_schema string for Parallel.ai SDK structured output
+        yield _sse({"type": "progress", "message": f"🚀 Starting enrichment for {len(req.inputs)} companies via Parallel.ai…"})
+
         schema_lines = "\n".join(
             f'- {f.key}: {f.description or f.label} ({f.type})'
             for f in req.schema_fields
         )
-        output_schema = (
-            f"A JSON object with these fields for {'{company}'} based on the research:\n"
+        output_schema_tmpl = (
+            "A JSON object with these exact fields based on the research:\n"
             f"{schema_lines}\n"
-            f"Use null for any field that cannot be confirmed from public sources."
+            "Use null for any field that cannot be confirmed from public sources. "
+            "Return ONLY the JSON object, no markdown fences."
         )
         results: list[dict] = []
 
@@ -246,20 +255,33 @@ async def enrich_task(req: EnrichTaskRequest):
                 "message": f"⏳ Researching {inp.company_name} ({i+1}/{len(req.inputs)})…"
             })
 
-            # Input is company name + domain context; output_schema drives structured extraction
             query = (
                 f"{inp.company_name} (website: {inp.domain})\n\n"
                 f"{req.goal}"
             )
-            company_schema = output_schema.replace("{company}", inp.company_name)
+            company_schema = output_schema_tmpl
 
-            try:
-                raw = await asyncio.wait_for(
-                    parallel_research(query, output_schema=company_schema),
-                    timeout=120,
-                )
-            except asyncio.TimeoutError:
-                raw = None
+            # Run Parallel.ai as a background task, yield heartbeats every 8s while waiting
+            research_task = asyncio.ensure_future(
+                parallel_research(query, output_schema=company_schema)
+            )
+            elapsed = 0
+            raw = None
+            while not research_task.done() and elapsed < 110:
+                try:
+                    done, _ = await asyncio.wait({research_task}, timeout=8)
+                    if done:
+                        raw = research_task.result()
+                        break
+                except Exception:
+                    break
+                elapsed += 8
+                yield _sse({
+                    "type": "heartbeat",
+                    "message": f"⏳ Researching {inp.company_name}… ({elapsed}s)"
+                })
+            if not research_task.done():
+                research_task.cancel()
 
             row: dict = {
                 "company_name": inp.company_name,
@@ -268,42 +290,34 @@ async def enrich_task(req: EnrichTaskRequest):
             }
 
             if raw:
-                import re, json as _json
-                # First try to parse as JSON (SDK structured output)
+                # Try JSON parse first (SDK output_schema returns structured JSON)
                 parsed: dict = {}
                 try:
-                    # Strip markdown code fences if present
-                    clean = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip(), flags=re.MULTILINE)
+                    clean = _re.sub(r'```(?:json)?\s*|\s*```', '', raw.strip())
                     parsed = _json.loads(clean)
                 except Exception:
                     pass
 
                 for field in req.schema_fields:
-                    if field.key in parsed and parsed[field.key] not in (None, "", "null"):
-                        row[field.key] = str(parsed[field.key])
+                    val = ""
+                    if field.key in parsed and parsed[field.key] not in (None, "null", ""):
+                        val = str(parsed[field.key])
                     else:
-                        # Fallback: regex scan of free text
+                        # Regex fallback on free-text response
                         for pat in [
-                            rf'{re.escape(field.label)}\s*[:\-]\s*(.+)',
-                            rf'{re.escape(field.key)}\s*[:\-]\s*(.+)',
+                            rf'{_re.escape(field.label)}\s*[:\-]\s*(.+)',
+                            rf'{_re.escape(field.key)}\s*[:\-]\s*(.+)',
                         ]:
-                            m = re.search(pat, raw, re.IGNORECASE)
+                            m = _re.search(pat, raw, _re.IGNORECASE)
                             if m:
-                                val = m.group(1).strip().rstrip(".,;")
-                                if val.lower() not in ("not found", "unknown", "n/a", "none", "-", "null"):
-                                    row[field.key] = val
+                                candidate = m.group(1).strip().rstrip(".,;")
+                                if candidate.lower() not in ("not found", "unknown", "n/a", "none", "-", "null"):
+                                    val = candidate
                                 break
-                        else:
-                            row[field.key] = ""
-
-                row["_raw"] = raw[:800]
+                    row[field.key] = val
 
             results.append(row)
             yield _sse({"type": "row", "row": row, "index": i, "total": len(req.inputs)})
-
-            # Small delay to avoid Parallel.ai rate limits
-            if i < len(req.inputs) - 1:
-                await asyncio.sleep(2)
 
         yield _sse({
             "type": "complete",
