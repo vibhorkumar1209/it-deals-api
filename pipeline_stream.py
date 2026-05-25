@@ -210,32 +210,33 @@ async def stream_pipeline(
     # ── Phase 1B: RSS direct extraction + URL discovery (parallel) ──────────
     yield {"type": "heartbeat", "message": "⏳ Scanning RSS feeds and news sources…"}
 
+    all_urls: list[str] = []
+    rss_items: list[dict] = []
+
     try:
-        discover_task = asyncio.create_task(discover_all_urls(config))
-        rss_task = asyncio.create_task(strategy_rss_deals(config))
+        pending_1b = {
+            asyncio.ensure_future(discover_all_urls(config)),
+            asyncio.ensure_future(strategy_rss_deals(config)),
+        }
+        discover_fut, rss_fut = list(pending_1b)  # keep refs for result extraction
 
         elapsed = 0
-        while (not discover_task.done() or not rss_task.done()) and elapsed < 60:
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(asyncio.gather(discover_task, rss_task)),
-                    timeout=10,
-                )
-                break
-            except asyncio.TimeoutError:
-                elapsed += 10
+        while pending_1b and elapsed < 55:
+            done_1b, pending_1b = await asyncio.wait(pending_1b, timeout=10)
+            elapsed += 10
+            for t in done_1b:
+                if t is discover_fut and not t.exception():
+                    all_urls = t.result()
+                elif t is rss_fut and not t.exception():
+                    rss_items = t.result()
+            if pending_1b:
                 yield {"type": "heartbeat", "message": f"⏳ Scanning feeds… ({elapsed}s)"}
 
-        all_urls = discover_task.result() if discover_task.done() else []
-        rss_items = rss_task.result() if rss_task.done() else []
-        if not discover_task.done():
-            discover_task.cancel()
-        if not rss_task.done():
-            rss_task.cancel()
+        # Cancel anything still running
+        for t in pending_1b:
+            t.cancel()
     except Exception as e:
         logger.warning(f"Phase 1B error: {e}")
-        all_urls = []
-        rss_items = []
 
     # Merge Parallel.ai URLs + search URLs, filter to fetchable domains only
     all_candidate_urls = list(dict.fromkeys(parallel_urls + all_urls))

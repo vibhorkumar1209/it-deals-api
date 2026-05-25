@@ -642,7 +642,7 @@ async def strategy_rss_deals(config: ScraperConfig) -> list[dict]:
 
     async def _fetch_feed(feed_url: str):
         try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
                 r = await client.get(feed_url, headers={"User-Agent": "Mozilla/5.0"})
                 if r.status_code != 200:
                     return
