@@ -3864,6 +3864,8 @@ VENDOR_MASTER: dict[str, list[str]] = {
         "CMS IT Services",
         "CMS IT Services Private Limited",
         "CMS Info Systems Private",
+        "CMS Info Systems",
+        "CMS Infosystems",
         "CMake",
         "CN Group",
         "CNC",
@@ -16253,28 +16255,42 @@ SI_SIGNALS = {"implement", "deploy", "integrate", "partner", "systems integrator
               "consulting", "awarded to", "services partner", "delivered by"}
 
 
-# ── Per-category alternation patterns (lazy, built on first call) ─────────────
-# One compiled regex per category — ~10 patterns total vs 16k individual compiles.
-_CAT_PATTERNS_CACHE: dict[str, list[tuple[re.Pattern, str]]] = {}
+# ── Chunked alternation patterns (lazy, built on first call) ─────────────────
+# Large categories (e.g. FRAMEWORK_LISTED with 16k names) are split into chunks
+# of 300 names each to avoid regex size limits and catastrophic backtracking.
+_CAT_PATTERNS_CACHE: dict[int, list] = {}
+_CHUNK_SIZE = 300
 
-def _get_category_patterns(master: dict[str, list[str]]) -> dict[str, list[tuple[re.Pattern, str]]]:
-    """Build/cache one compiled alternation pattern per category."""
+
+def _build_chunks(names: list[str]) -> list[re.Pattern]:
+    """Compile a list of names into chunked alternation patterns."""
+    sorted_names = sorted(names, key=len, reverse=True)
+    patterns = []
+    for i in range(0, len(sorted_names), _CHUNK_SIZE):
+        chunk = sorted_names[i: i + _CHUNK_SIZE]
+        alt = '|'.join(re.escape(n) for n in chunk)
+        try:
+            pat = re.compile(
+                r'(?<![A-Za-z0-9])(' + alt + r')(?![A-Za-z0-9])',
+                re.IGNORECASE,
+            )
+            patterns.append(pat)
+        except re.error as e:
+            logger.warning(f"Regex compile error for chunk {i}: {e}")
+    return patterns
+
+
+def _get_category_patterns(master: dict[str, list[str]]) -> dict[str, list[re.Pattern]]:
+    """Build/cache chunked patterns per category. Returns {category: [Pattern, ...]}."""
     cache_key = id(master)
-    if cache_key in _CAT_PATTERNS_CACHE:  # type: ignore[operator]
-        return _CAT_PATTERNS_CACHE[cache_key]  # type: ignore[index]
+    if cache_key in _CAT_PATTERNS_CACHE:
+        return _CAT_PATTERNS_CACHE[cache_key]  # type: ignore[return-value]
 
-    result: dict[str, list[tuple[re.Pattern, str]]] = {}
+    result: dict[str, list[re.Pattern]] = {}
     for category, names in master.items():
-        # Sort longest first so longer matches win over substrings in alternation
-        sorted_names = sorted(names, key=len, reverse=True)
-        alt = '|'.join(re.escape(n) for n in sorted_names)
-        pat = re.compile(
-            r'(?<![A-Za-z0-9])(' + alt + r')(?![A-Za-z0-9])',
-            re.IGNORECASE,
-        )
-        result[category] = (pat, sorted_names)  # type: ignore[assignment]
+        result[category] = _build_chunks(names)
 
-    _CAT_PATTERNS_CACHE[cache_key] = result  # type: ignore[index]
+    _CAT_PATTERNS_CACHE[cache_key] = result  # type: ignore[assignment]
     return result
 
 
@@ -16284,20 +16300,21 @@ def normalize_name(raw: str) -> str:
 
 def _find_matches_in_text(text: str, master: dict[str, list[str]]) -> list[tuple[str, str, int]]:
     """Returns list of (name, category, char_position).
-    Uses one compiled alternation pattern per category — avoids 16k per-call compiles.
-    finditer gives ALL matches per category (not just the first).
+    Uses chunked alternation patterns per category (300 names/chunk).
+    finditer gives ALL matches; dedup by position to avoid overlaps.
     """
     cat_patterns = _get_category_patterns(master)
     matches: list[tuple[str, str, int]] = []
     seen_positions: list[int] = []
 
-    for category, (pat, _) in cat_patterns.items():  # type: ignore[misc]
-        for m in pat.finditer(text):
-            name = m.group(1)
-            pos = m.start(1)
-            if not any(abs(pos - sp) < len(name) for sp in seen_positions):
-                matches.append((name, category, pos))
-                seen_positions.append(pos)
+    for category, patterns in cat_patterns.items():
+        for pat in patterns:
+            for m in pat.finditer(text):
+                name = m.group(1)
+                pos = m.start(1)
+                if not any(abs(pos - sp) < len(name) for sp in seen_positions):
+                    matches.append((name, category, pos))
+                    seen_positions.append(pos)
 
     # Longest match first so more-specific names take priority over substrings
     matches.sort(key=lambda x: len(x[0]), reverse=True)
