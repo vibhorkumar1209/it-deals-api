@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import AsyncGenerator, Any
 
 from config_loader import ScraperConfig
-from search_engine import discover_all_urls
+from search_engine import discover_all_urls, strategy_rss_deals
 from website_router import fetch_url, classify_url
 from nlp_extractor import build_deal_record
 
@@ -207,33 +207,41 @@ async def stream_pipeline(
     else:
         yield {"type": "progress", "message": "⚠️ Parallel.ai unavailable — scanning news sources directly..."}
 
-    # ── Phase 1B: URL discovery (Jina search + RSS) ──────────────────────────
+    # ── Phase 1B: RSS direct extraction + URL discovery (parallel) ──────────
+    yield {"type": "heartbeat", "message": "⏳ Scanning RSS feeds and news sources…"}
+
     try:
         discover_task = asyncio.create_task(discover_all_urls(config))
+        rss_task = asyncio.create_task(strategy_rss_deals(config))
+
         elapsed = 0
-        while not discover_task.done() and elapsed < 60:
+        while (not discover_task.done() or not rss_task.done()) and elapsed < 60:
             try:
-                all_urls = await asyncio.wait_for(asyncio.shield(discover_task), timeout=10)
+                await asyncio.wait_for(
+                    asyncio.shield(asyncio.gather(discover_task, rss_task)),
+                    timeout=10,
+                )
                 break
             except asyncio.TimeoutError:
                 elapsed += 10
-                yield {"type": "heartbeat", "message": f"⏳ Searching news sources… ({elapsed}s)"}
-        else:
-            if not discover_task.done():
-                discover_task.cancel()
-                all_urls = []
-            else:
-                all_urls = discover_task.result()
-    except Exception:
+                yield {"type": "heartbeat", "message": f"⏳ Scanning feeds… ({elapsed}s)"}
+
+        all_urls = discover_task.result() if discover_task.done() else []
+        rss_items = rss_task.result() if rss_task.done() else []
+        if not discover_task.done():
+            discover_task.cancel()
+        if not rss_task.done():
+            rss_task.cancel()
+    except Exception as e:
+        logger.warning(f"Phase 1B error: {e}")
         all_urls = []
+        rss_items = []
 
     # Merge Parallel.ai URLs + search URLs, filter to fetchable domains only
     all_candidate_urls = list(dict.fromkeys(parallel_urls + all_urls))
     fetchable_urls = [u for u in all_candidate_urls if is_fetchable(u)]
 
-    logger.info(f"URL funnel: {len(all_candidate_urls)} candidates → {len(fetchable_urls)} fetchable")
-    for u in all_candidate_urls[:5]:
-        logger.info(f"  candidate: {u[:100]}")
+    logger.info(f"URL funnel: {len(all_candidate_urls)} candidates → {len(fetchable_urls)} fetchable | RSS items: {len(rss_items)}")
 
     # Only attempt URLs from domains where Jina Reader reliably works
     all_urls = fetchable_urls[:MAX_URLS]
@@ -244,7 +252,7 @@ async def stream_pipeline(
         save_url_cache(config.company_name, all_urls)
 
     total_urls = len(all_urls)
-    yield {"type": "progress", "message": f"📋 Scanning {total_urls} sources ({len(fetchable_urls)} high-confidence)..."}
+    yield {"type": "progress", "message": f"📋 Found {len(rss_items)} RSS deal items + {total_urls} articles to scan..."}
 
     # ── Emit Parallel.ai deals immediately ───────────────────────────────────
     seen_hashes: set[str] = set()
@@ -253,32 +261,51 @@ async def stream_pipeline(
     failures: list[dict] = []
 
     def _dedup_and_buffer(deal: dict) -> bool:
-        scope = (deal.get("scope_of_service") or "")[:50]
         vendor_raw = (deal.get("vendor") or "").lower()
         vendor_norm = re.sub(r'\b(ltd|limited|inc|corp|pvt|llc|plc|gmbh|ag|sa)\.?\b', '', vendor_raw).strip()
         company = deal.get("company_name", "").lower()
         date_ym = (deal.get("announcement_date") or "")[:7]  # YYYY-MM
+        scope = (deal.get("scope_of_service") or "")[:50].lower()
 
-        # Primary dedup: exact match on all fields
-        key = "|".join([company, vendor_norm, deal.get("record_type", "").lower(), date_ym, scope.lower()])
+        # Primary: full key
+        key = "|".join([company, vendor_norm, date_ym, scope])
         h = hashlib.sha256(key.encode()).hexdigest()
         if h in seen_hashes:
             return False
 
-        # Secondary dedup: same company + same date-month + overlapping scope
-        # catches same deal from two different news sources with slightly different vendor text
-        loose_key = "|".join([company, date_ym, scope.lower()])
-        lh = hashlib.sha256(loose_key.encode()).hexdigest()
-        if lh in seen_hashes:
-            return False
+        # Secondary: same deal reported by two sources — company + vendor + month
+        # (scope wording differs between ET and bfsi.eletsonline for same deal)
+        if vendor_norm:
+            loose_key = "|".join([company, vendor_norm, date_ym])
+            lh = hashlib.sha256(loose_key.encode()).hexdigest()
+            if lh in seen_hashes:
+                return False
+            seen_hashes.add(lh)
 
         seen_hashes.add(h)
-        seen_hashes.add(lh)
         buffer.append(deal)
         return True
 
+    # Buffer Parallel.ai deals
     for deal in parallel_deals:
         _dedup_and_buffer(deal)
+
+    # ── Process RSS deal items directly (no fetch needed) ────────────────────
+    rss_deal_count = 0
+    for item in rss_items:
+        deal = build_deal_record(
+            text=item["text"],
+            url=item["url"],
+            source_type="news_article",
+            company_name=config.company_name,
+            company_names=config.all_company_names,
+            soup=None,
+        )
+        if deal:
+            if _dedup_and_buffer(deal):
+                rss_deal_count += 1
+    if rss_deal_count:
+        logger.info(f"RSS direct extraction: {rss_deal_count} deals")
 
     while len(buffer) >= batch_size:
         batch = buffer[:batch_size]

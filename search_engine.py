@@ -626,6 +626,61 @@ async def strategy_rss(config: ScraperConfig) -> list[str]:
     return list(dict.fromkeys(u for u in found_urls if u))
 
 
+async def strategy_rss_deals(config: ScraperConfig) -> list[dict]:
+    """Extract deal text blocks directly from RSS feed items — no article fetch needed.
+    Returns list of {text, url, pub_date} dicts ready for NLP extraction.
+    """
+    from bs4 import BeautifulSoup
+    company_names_lower = [cn.lower() for cn in config.all_company_names]
+    results: list[dict] = []
+
+    DEAL_SIGNALS = [
+        "deal", "contract", "agreement", "partners", "partnership", "selects",
+        "selected", "outsourc", "implementation", "deploy", "signs", "signed",
+        "awarded", "go-live", "migration", "managed services",
+    ]
+
+    async def _fetch_feed(feed_url: str):
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                r = await client.get(feed_url, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code != 200:
+                    return
+                soup = BeautifulSoup(r.text, "lxml-xml")
+                items = soup.find_all("item") or soup.find_all("entry")
+                for item in items:
+                    title_tag = item.find("title") or item.find("summary") or ""
+                    desc_tag  = item.find("description") or item.find("content:encoded") or item.find("content") or ""
+                    title = getattr(title_tag, "get_text", lambda: str(title_tag))()
+                    desc  = getattr(desc_tag,  "get_text", lambda: str(desc_tag))()
+                    combined = f"{title} {desc}"
+                    combined_lower = combined.lower()
+
+                    if not any(cn in combined_lower for cn in company_names_lower):
+                        continue
+                    if not any(sig in combined_lower for sig in DEAL_SIGNALS):
+                        continue
+
+                    link_tag = item.find("link")
+                    url = (link_tag.get("href") or link_tag.get_text(strip=True)) if link_tag else feed_url
+                    pub_tag = item.find("pubDate") or item.find("published") or item.find("updated")
+                    pub_date = getattr(pub_tag, "get_text", lambda: "")() if pub_tag else ""
+
+                    results.append({"text": combined, "url": url, "pub_date": pub_date})
+                    logger.info(f"RSS deal candidate: {title[:80]}")
+        except Exception as e:
+            logger.debug(f"RSS deals feed failed {feed_url}: {e}")
+
+    rss_sem = asyncio.Semaphore(10)
+    async def _throttled(f: str):
+        async with rss_sem:
+            await _fetch_feed(f)
+
+    await asyncio.gather(*[_throttled(f) for f in RSS_FEEDS])
+    logger.info(f"RSS deals: {len(results)} candidate items from {len(RSS_FEEDS)} feeds")
+    return results
+
+
 async def strategy_c_linkedin(config: ScraperConfig) -> list[str]:
     """Return LinkedIn URL for later processing by website_router."""
     if not config.run_linkedin:
