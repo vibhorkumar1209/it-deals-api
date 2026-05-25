@@ -91,6 +91,137 @@ async def parallel_research(query: str) -> str | None:
     return result
 
 
+async def parallel_enrich_deals(
+    deals: list[dict],
+    company_name: str,
+    domain: str,
+) -> list[dict]:
+    """Use Parallel.ai to enrich extracted deals with missing fields.
+
+    For each deal missing date / value / description, sends a targeted
+    Parallel.ai research query and merges the response back into the record.
+    Returns the (possibly enriched) deal list.
+    """
+    if not PARALLEL_API_KEY or not deals:
+        return deals
+
+    # Only enrich deals that are missing at least one key field
+    to_enrich = [
+        d for d in deals
+        if not d.get("announcement_date") or not d.get("deal_description")
+           or not d.get("deal_value_usd")
+    ]
+    if not to_enrich:
+        return deals
+
+    # Build a compact summary of each deal to give Parallel context
+    deal_lines = []
+    for i, d in enumerate(to_enrich, 1):
+        vendor = d.get("vendor") or d.get("si_partner") or "unknown vendor"
+        scope  = d.get("scope_of_service") or d.get("record_type") or "IT deal"
+        deal_lines.append(f"{i}. {company_name} — {vendor} — {scope}")
+
+    query = (
+        f"For {company_name} (website: {domain}), please research and provide details "
+        f"for each of the following IT deals:\n\n"
+        + "\n".join(deal_lines)
+        + "\n\nFor each deal provide:\n"
+        "- Exact announcement or signing date (YYYY-MM-DD if possible)\n"
+        "- Deal value in USD millions (if publicly known)\n"
+        "- Contract duration (e.g. '5 years')\n"
+        "- One-sentence description of what was agreed\n"
+        "- Source URL\n\n"
+        "Only return factual information from public sources."
+    )
+
+    result = await parallel_research(query)
+    if not result:
+        return deals
+
+    # Parse enrichment: match numbered items back to deals
+    enriched_map: dict[int, dict] = {}
+    lines = result.split("\n")
+    current_idx: int | None = None
+    current_block: list[str] = []
+
+    def _flush(idx, block):
+        text = " ".join(block)
+        rec: dict = {}
+        # Date
+        dm = re.search(r'\b(20\d{2}-\d{2}-\d{2})\b', text)
+        if not dm:
+            dm = re.search(
+                r'\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|'
+                r'Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)'
+                r'\s+\d{1,2},?\s+20\d{2}\b', text, re.IGNORECASE,
+            )
+        if dm:
+            rec["_date"] = dm.group(0)
+        # Value
+        vm = re.search(r'\$\s*([\d,]+(?:\.\d+)?)\s*(?:million|mn|M\b)', text, re.IGNORECASE)
+        if vm:
+            try:
+                rec["_value"] = float(vm.group(1).replace(",", ""))
+            except ValueError:
+                pass
+        # Duration
+        dur = re.search(r'(\d+[-\s]year|\d+[-\s]month)', text, re.IGNORECASE)
+        if dur:
+            rec["_duration"] = dur.group(0)
+        # Description: first sentence ≥ 20 words
+        for sent in re.split(r'(?<=[.!?])\s+', text):
+            if len(sent.split()) >= 20:
+                rec["_description"] = sent.strip()
+                break
+        # URL
+        urls = re.findall(r'https?://[^\s\)\]\>"\'<,]+', text)
+        if urls:
+            rec["_url"] = re.sub(r'[.,;:]+$', '', urls[0])
+        if rec:
+            enriched_map[idx] = rec
+
+    for line in lines:
+        m = re.match(r'^(\d+)[.\)]\s+', line.strip())
+        if m:
+            if current_idx is not None:
+                _flush(current_idx, current_block)
+            current_idx = int(m.group(1))
+            current_block = [line[m.end():].strip()]
+        elif current_idx is not None:
+            current_block.append(line.strip())
+
+    if current_idx is not None:
+        _flush(current_idx, current_block)
+
+    # Merge enrichment back into deal records
+    import dateparser as _dp
+    from datetime import datetime, timezone as _tz
+    today = datetime.now(_tz.utc)
+
+    for i, deal in enumerate(to_enrich, 1):
+        patch = enriched_map.get(i, {})
+        if not patch:
+            continue
+        if patch.get("_date") and not deal.get("announcement_date"):
+            try:
+                dt = _dp.parse(patch["_date"], settings={"RETURN_AS_TIMEZONE_AWARE": True})
+                if dt and datetime(2015, 1, 1, tzinfo=_tz.utc) <= dt <= today:
+                    deal["announcement_date"] = dt.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        if patch.get("_value") and not deal.get("deal_value_usd"):
+            deal["deal_value_usd"] = patch["_value"]
+        if patch.get("_duration") and not deal.get("deal_duration"):
+            deal["deal_duration"] = patch["_duration"]
+        if patch.get("_description") and not deal.get("deal_description"):
+            deal["deal_description"] = patch["_description"]
+        if patch.get("_url") and deal.get("source_url") in ("", None, "https://parallel.ai/research"):
+            deal["source_url"] = patch["_url"]
+
+    logger.info(f"Parallel enrichment: {len(enriched_map)}/{len(to_enrich)} deals enriched")
+    return deals
+
+
 def extract_urls_from_text(text: str) -> list[str]:
     """Extract all http(s) URLs from Parallel.ai result text."""
     raw = re.findall(r'https?://[^\s\)\]\>"\'<,]+', text)

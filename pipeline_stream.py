@@ -258,8 +258,10 @@ async def stream_pipeline(
     yield {"type": "progress", "message": f"📋 Found {len(rss_items)} RSS deal items + {total_urls} articles to scan..."}
 
     # ── Emit Parallel.ai deals immediately ───────────────────────────────────
+    PARALLEL_API_KEY = os.getenv("PARALLEL_API_KEY", "")
     seen_hashes: set[str] = set()
     buffer: list[dict] = []
+    all_deals_tracked: list[dict] = []   # master list for enrichment phase
     total_emitted = 0
     failures: list[dict] = []
 
@@ -287,6 +289,7 @@ async def stream_pipeline(
 
         seen_hashes.add(h)
         buffer.append(deal)
+        all_deals_tracked.append(deal)   # track for enrichment phase
         return True
 
     # Buffer Parallel.ai deals
@@ -382,10 +385,37 @@ async def stream_pipeline(
                 ),
             }
 
-    # ── Phase 3: Flush remainder + complete ───────────────────────────────────
+    # ── Phase 3: Flush remainder ──────────────────────────────────────────────
     if buffer:
         total_emitted += len(buffer)
         yield {"type": "batch", "deals": buffer, "total_so_far": total_emitted}
+
+    # ── Phase 4: Parallel.ai enrichment ──────────────────────────────────────
+    # Collect all emitted deals and enrich missing fields via Parallel.ai
+    from parallel_search import parallel_enrich_deals
+    all_emitted: list[dict] = []
+    # Re-collect from the stream events already yielded — track via a local list
+    # Note: we track all buffered deals in all_deals_tracked (set up before phase 2)
+
+    if all_deals_tracked and PARALLEL_API_KEY:
+        yield {"type": "heartbeat", "message": "🔬 Enriching deal details via Parallel.ai…"}
+        try:
+            enriched = await asyncio.wait_for(
+                parallel_enrich_deals(
+                    all_deals_tracked,
+                    config.company_name,
+                    config.domain,
+                ),
+                timeout=90,
+            )
+            # Emit enriched deals as a patch event
+            patched = [d for d in enriched if d.get("announcement_date") or d.get("deal_value_usd")]
+            if patched:
+                yield {"type": "enriched", "deals": enriched}
+        except asyncio.TimeoutError:
+            logger.warning("Parallel enrichment timed out")
+        except Exception as e:
+            logger.warning(f"Parallel enrichment error: {e}")
 
     yield {
         "type": "complete",
