@@ -16248,40 +16248,34 @@ VENDOR_ALIASES: dict[str, str] = {
     "DXC Technology Company": "DXC",
 }
 
-_init_compiled_masters()
-
 VENDOR_SIGNALS = {"platform", "software", "license", "cloud", "solution", "suite", "product"}
 SI_SIGNALS = {"implement", "deploy", "integrate", "partner", "systems integrator",
               "consulting", "awarded to", "services partner", "delivered by"}
 
 
-# ── Pre-compiled regex patterns (built once at import, not per call) ──────────
-# Each entry: (compiled_pattern, name, category)
-def _build_compiled_master(master: dict) -> list:
-    compiled = []
+# ── Per-category alternation patterns (lazy, built on first call) ─────────────
+# One compiled regex per category — ~10 patterns total vs 16k individual compiles.
+_CAT_PATTERNS_CACHE: dict[str, list[tuple[re.Pattern, str]]] = {}
+
+def _get_category_patterns(master: dict[str, list[str]]) -> dict[str, list[tuple[re.Pattern, str]]]:
+    """Build/cache one compiled alternation pattern per category."""
+    cache_key = id(master)
+    if cache_key in _CAT_PATTERNS_CACHE:  # type: ignore[operator]
+        return _CAT_PATTERNS_CACHE[cache_key]  # type: ignore[index]
+
+    result: dict[str, list[tuple[re.Pattern, str]]] = {}
     for category, names in master.items():
-        for name in names:
-            pat = re.compile(
-                r'(?<![A-Za-z0-9])' + re.escape(name) + r'(?![A-Za-z0-9])',
-                re.IGNORECASE,
-            )
-            compiled.append((pat, name, category))
-    # Longest name first so longer matches win over shorter substrings
-    compiled.sort(key=lambda x: len(x[1]), reverse=True)
-    return compiled
+        # Sort longest first so longer matches win over substrings in alternation
+        sorted_names = sorted(names, key=len, reverse=True)
+        alt = '|'.join(re.escape(n) for n in sorted_names)
+        pat = re.compile(
+            r'(?<![A-Za-z0-9])(' + alt + r')(?![A-Za-z0-9])',
+            re.IGNORECASE,
+        )
+        result[category] = (pat, sorted_names)  # type: ignore[assignment]
 
-_VENDOR_COMPILED: list = []   # filled below after both masters are defined
-_SI_COMPILED: list = []       # filled below after both masters are defined
-
-def _init_compiled_masters() -> None:
-    global _VENDOR_COMPILED, _SI_COMPILED
-    _VENDOR_COMPILED = _build_compiled_master(VENDOR_MASTER)
-    _SI_COMPILED = _build_compiled_master(SI_PARTNER_MASTER)
-    import logging as _log
-    _log.getLogger(__name__).info(
-        f"nlp_extractor: compiled {len(_VENDOR_COMPILED)} vendor patterns, "
-        f"{len(_SI_COMPILED)} SI patterns"
-    )
+    _CAT_PATTERNS_CACHE[cache_key] = result  # type: ignore[index]
+    return result
 
 
 def normalize_name(raw: str) -> str:
@@ -16289,30 +16283,24 @@ def normalize_name(raw: str) -> str:
 
 
 def _find_matches_in_text(text: str, master: dict[str, list[str]]) -> list[tuple[str, str, int]]:
-    """Returns list of (name, category, char_position) sorted by match length desc.
-    Uses pre-compiled regex patterns (built once at import) to avoid per-call compilation.
+    """Returns list of (name, category, char_position).
+    Uses one compiled alternation pattern per category — avoids 16k per-call compiles.
     """
-    # Select the right pre-compiled list
-    global _VENDOR_COMPILED, _SI_COMPILED
-    if master is VENDOR_MASTER:
-        compiled = _VENDOR_COMPILED
-    elif master is SI_PARTNER_MASTER:
-        compiled = _SI_COMPILED
-    else:
-        # Fallback: build on-the-fly (shouldn't happen in normal use)
-        compiled = _build_compiled_master(master)
-
-    matches = []
+    cat_patterns = _get_category_patterns(master)
+    matches: list[tuple[str, str, int]] = []
     seen_positions: list[int] = []
-    for pat, name, category in compiled:
+
+    for category, (pat, _) in cat_patterns.items():  # type: ignore[misc]
         m = pat.search(text)
         if m:
-            pos = m.start()
-            # Skip if a longer match already covers this position
-            if any(abs(pos - sp) < len(name) for sp in seen_positions):
-                continue
-            matches.append((name, category, pos))
-            seen_positions.append(pos)
+            name = m.group(1)
+            pos = m.start(1)
+            if not any(abs(pos - sp) < len(name) for sp in seen_positions):
+                matches.append((name, category, pos))
+                seen_positions.append(pos)
+
+    # Sort by name length desc so longer/more-specific names take priority
+    matches.sort(key=lambda x: len(x[0]), reverse=True)
     return matches
 
 
