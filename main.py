@@ -197,6 +197,112 @@ async def extract(req: ReExtractRequest):
     )
 
 
+
+# ── Enrichment Task ───────────────────────────────────────────────────────────
+
+class EnrichInput(BaseModel):
+    company_name: str
+    domain: str
+
+class SchemaField(BaseModel):
+    key: str
+    label: str
+    type: str = "string"          # string | number | date | boolean
+    description: str = ""
+
+class EnrichTaskRequest(BaseModel):
+    goal: str = Field(..., min_length=10)
+    schema_fields: list[SchemaField] = Field(..., min_length=1)
+    inputs: list[EnrichInput] = Field(..., min_length=1, max_length=50)
+
+
+@app.post("/api/enrich-task")
+async def enrich_task(req: EnrichTaskRequest):
+    """SSE stream: run Parallel.ai enrichment for each input against a user-defined schema."""
+    import asyncio
+    from parallel_search import parallel_research
+
+    async def _generate():
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        yield _sse({"type": "progress", "message": f"🚀 Starting enrichment for {len(req.inputs)} companies…"})
+
+        schema_desc = "\n".join(
+            f'- {f.label} ({f.key}): {f.description or f.type}'
+            for f in req.schema_fields
+        )
+        results: list[dict] = []
+
+        for i, inp in enumerate(req.inputs):
+            yield _sse({
+                "type": "heartbeat",
+                "message": f"⏳ Researching {inp.company_name} ({i+1}/{len(req.inputs)})…"
+            })
+
+            query = (
+                f"Research the following for {inp.company_name} (website: {inp.domain}):\n\n"
+                f"{req.goal}\n\n"
+                f"Return your findings as a structured answer with these exact fields:\n"
+                f"{schema_desc}\n\n"
+                f"Be factual. Only include confirmed, publicly available information. "
+                f"If a field is unknown, say 'Not found'."
+            )
+
+            try:
+                raw = await asyncio.wait_for(parallel_research(query), timeout=100)
+            except asyncio.TimeoutError:
+                raw = None
+
+            row: dict = {
+                "company_name": inp.company_name,
+                "domain": inp.domain,
+                "_status": "ok" if raw else "no_result",
+            }
+
+            if raw:
+                # Extract each schema field from the free-text response
+                import re
+                for field in req.schema_fields:
+                    # Try "Label: value" or "key: value" pattern
+                    patterns = [
+                        rf'{re.escape(field.label)}\s*[:\-]\s*(.+)',
+                        rf'{re.escape(field.key)}\s*[:\-]\s*(.+)',
+                    ]
+                    found = None
+                    for pat in patterns:
+                        m = re.search(pat, raw, re.IGNORECASE)
+                        if m:
+                            val = m.group(1).strip().rstrip(".,;")
+                            # Skip "Not found" placeholders
+                            if val.lower() not in ("not found", "unknown", "n/a", "none", "-"):
+                                found = val
+                            break
+                    row[field.key] = found or ""
+
+                row["_raw"] = raw[:800]   # keep first 800 chars for debugging
+
+            results.append(row)
+            yield _sse({"type": "row", "row": row, "index": i, "total": len(req.inputs)})
+
+            # Small delay to avoid Parallel.ai rate limits
+            if i < len(req.inputs) - 1:
+                await asyncio.sleep(2)
+
+        yield _sse({
+            "type": "complete",
+            "results": results,
+            "total": len(results),
+            "succeeded": sum(1 for r in results if r["_status"] == "ok"),
+        })
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
 @app.get("/api/fetch-test")
 async def fetch_test(url: str = "https://m.economictimes.com/industry/banking/finance/banking/hdfc-bank-signs-multi-year-data-and-technology-deal-with-refinitiv/articleshow/94349454.cms"):
     """Quick test: fetch one URL via Jina Reader and show result."""
