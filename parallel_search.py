@@ -1,7 +1,13 @@
-"""Parallel.ai research API — async task/poll search strategy.
+"""Parallel.ai research API.
 
-Primary use: deep research queries that return structured deal summaries.
-Jina is used for URL fetching fallback.
+Uses the official `parallel` SDK when installed; falls back to raw HTTP.
+SDK docs: https://docs.parallel.ai
+
+    from parallel import Parallel
+    from parallel.types import TaskSpecParam
+    client = Parallel(api_key=...)
+    run = client.task_run.create(input=..., task_spec=TaskSpecParam(output_schema=...), processor="base")
+    result = client.task_run.result(run.run_id, api_timeout=3600)
 """
 
 import asyncio
@@ -14,9 +20,59 @@ logger = logging.getLogger(__name__)
 
 PARALLEL_API_KEY = os.getenv("PARALLEL_API_KEY", "")
 BASE_URL = "https://api.parallel.ai"
-TASK_TIMEOUT_S = 90      # max seconds to wait for Parallel task
-POLL_INTERVAL_S = 5      # how often to poll
+TASK_TIMEOUT_S = 90
+POLL_INTERVAL_S = 5
 
+# ── SDK client (lazy init) ────────────────────────────────────────────────────
+_sdk_client = None
+
+def _get_sdk_client():
+    """Return a cached Parallel SDK client, or None if SDK not installed."""
+    global _sdk_client
+    if _sdk_client is not None:
+        return _sdk_client
+    if not PARALLEL_API_KEY:
+        return None
+    try:
+        from parallel import Parallel  # type: ignore
+        _sdk_client = Parallel(api_key=PARALLEL_API_KEY)
+        logger.info("Parallel.ai SDK client initialised")
+        return _sdk_client
+    except ImportError:
+        logger.debug("parallel SDK not installed — using HTTP fallback")
+        return None
+
+
+# ── SDK path (blocking → run in thread) ──────────────────────────────────────
+
+def _sdk_run_sync(query: str, output_schema: str | None = None) -> str | None:
+    """Blocking SDK call — run via asyncio.to_thread in async context."""
+    client = _get_sdk_client()
+    if client is None:
+        return None
+    try:
+        from parallel.types import TaskSpecParam  # type: ignore
+        task_spec = TaskSpecParam(output_schema=output_schema) if output_schema else None
+        kwargs = dict(input=query, processor="base")
+        if task_spec:
+            kwargs["task_spec"] = task_spec
+        run = client.task_run.create(**kwargs)
+        logger.info(f"Parallel SDK run created: {run.run_id}")
+        result = client.task_run.result(run.run_id, api_timeout=TASK_TIMEOUT_S)
+        output = getattr(result, "output", None) or str(result)
+        logger.info(f"Parallel SDK run {run.run_id} done: {len(str(output))} chars")
+        return str(output) if output else None
+    except Exception as e:
+        logger.warning(f"Parallel SDK error: {e}")
+        return None
+
+
+async def _sdk_research(query: str, output_schema: str | None = None) -> str | None:
+    """Async wrapper around the blocking SDK call."""
+    return await asyncio.to_thread(_sdk_run_sync, query, output_schema)
+
+
+# ── HTTP fallback path ────────────────────────────────────────────────────────
 
 def _headers() -> dict:
     return {
@@ -45,9 +101,9 @@ async def _create_task(query: str) -> str | None:
 
 
 async def _poll_task(run_id: str) -> str | None:
-    deadline = asyncio.get_event_loop().time() + TASK_TIMEOUT_S
+    deadline = asyncio.get_running_loop().time() + TASK_TIMEOUT_S
     async with httpx.AsyncClient(timeout=20) as c:
-        while asyncio.get_event_loop().time() < deadline:
+        while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(POLL_INTERVAL_S)
             try:
                 r = await c.get(f"{BASE_URL}/v1/tasks/runs/{run_id}", headers=_headers())
@@ -77,17 +133,27 @@ async def _poll_task(run_id: str) -> str | None:
     return None
 
 
-async def parallel_research(query: str) -> str | None:
-    """Run a Parallel.ai research query and return result text."""
+async def parallel_research(query: str, output_schema: str | None = None) -> str | None:
+    """Run a Parallel.ai research query and return result text.
+
+    Uses the official SDK (with output_schema support) when installed,
+    falls back to raw HTTP polling otherwise.
+    """
     if not PARALLEL_API_KEY:
         return None
+
+    # Try SDK first (supports output_schema for structured output)
+    if _get_sdk_client() is not None:
+        return await _sdk_research(query, output_schema)
+
+    # HTTP fallback (no output_schema support)
     run_id = await _create_task(query)
     if not run_id:
         return None
-    logger.info(f"Parallel task created: {run_id}")
+    logger.info(f"Parallel HTTP task created: {run_id}")
     result = await _poll_task(run_id)
     if result:
-        logger.info(f"Parallel task {run_id} done: {len(result)} chars")
+        logger.info(f"Parallel HTTP task {run_id} done: {len(result)} chars")
     return result
 
 

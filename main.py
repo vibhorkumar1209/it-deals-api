@@ -228,9 +228,15 @@ async def enrich_task(req: EnrichTaskRequest):
 
         yield _sse({"type": "progress", "message": f"🚀 Starting enrichment for {len(req.inputs)} companies…"})
 
-        schema_desc = "\n".join(
-            f'- {f.label} ({f.key}): {f.description or f.type}'
+        # Build output_schema string for Parallel.ai SDK structured output
+        schema_lines = "\n".join(
+            f'- {f.key}: {f.description or f.label} ({f.type})'
             for f in req.schema_fields
+        )
+        output_schema = (
+            f"A JSON object with these fields for {'{company}'} based on the research:\n"
+            f"{schema_lines}\n"
+            f"Use null for any field that cannot be confirmed from public sources."
         )
         results: list[dict] = []
 
@@ -240,17 +246,18 @@ async def enrich_task(req: EnrichTaskRequest):
                 "message": f"⏳ Researching {inp.company_name} ({i+1}/{len(req.inputs)})…"
             })
 
+            # Input is company name + domain context; output_schema drives structured extraction
             query = (
-                f"Research the following for {inp.company_name} (website: {inp.domain}):\n\n"
-                f"{req.goal}\n\n"
-                f"Return your findings as a structured answer with these exact fields:\n"
-                f"{schema_desc}\n\n"
-                f"Be factual. Only include confirmed, publicly available information. "
-                f"If a field is unknown, say 'Not found'."
+                f"{inp.company_name} (website: {inp.domain})\n\n"
+                f"{req.goal}"
             )
+            company_schema = output_schema.replace("{company}", inp.company_name)
 
             try:
-                raw = await asyncio.wait_for(parallel_research(query), timeout=100)
+                raw = await asyncio.wait_for(
+                    parallel_research(query, output_schema=company_schema),
+                    timeout=120,
+                )
             except asyncio.TimeoutError:
                 raw = None
 
@@ -261,26 +268,35 @@ async def enrich_task(req: EnrichTaskRequest):
             }
 
             if raw:
-                # Extract each schema field from the free-text response
-                import re
-                for field in req.schema_fields:
-                    # Try "Label: value" or "key: value" pattern
-                    patterns = [
-                        rf'{re.escape(field.label)}\s*[:\-]\s*(.+)',
-                        rf'{re.escape(field.key)}\s*[:\-]\s*(.+)',
-                    ]
-                    found = None
-                    for pat in patterns:
-                        m = re.search(pat, raw, re.IGNORECASE)
-                        if m:
-                            val = m.group(1).strip().rstrip(".,;")
-                            # Skip "Not found" placeholders
-                            if val.lower() not in ("not found", "unknown", "n/a", "none", "-"):
-                                found = val
-                            break
-                    row[field.key] = found or ""
+                import re, json as _json
+                # First try to parse as JSON (SDK structured output)
+                parsed: dict = {}
+                try:
+                    # Strip markdown code fences if present
+                    clean = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip(), flags=re.MULTILINE)
+                    parsed = _json.loads(clean)
+                except Exception:
+                    pass
 
-                row["_raw"] = raw[:800]   # keep first 800 chars for debugging
+                for field in req.schema_fields:
+                    if field.key in parsed and parsed[field.key] not in (None, "", "null"):
+                        row[field.key] = str(parsed[field.key])
+                    else:
+                        # Fallback: regex scan of free text
+                        for pat in [
+                            rf'{re.escape(field.label)}\s*[:\-]\s*(.+)',
+                            rf'{re.escape(field.key)}\s*[:\-]\s*(.+)',
+                        ]:
+                            m = re.search(pat, raw, re.IGNORECASE)
+                            if m:
+                                val = m.group(1).strip().rstrip(".,;")
+                                if val.lower() not in ("not found", "unknown", "n/a", "none", "-", "null"):
+                                    row[field.key] = val
+                                break
+                        else:
+                            row[field.key] = ""
+
+                row["_raw"] = raw[:800]
 
             results.append(row)
             yield _sse({"type": "row", "row": row, "index": i, "total": len(req.inputs)})
