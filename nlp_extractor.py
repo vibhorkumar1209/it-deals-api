@@ -16492,31 +16492,37 @@ def extract_announcement_date(text: str, url: str, soup=None) -> str | None:
             if r:
                 return r
 
-    # 6. URL pattern
-    m = re.search(r'/(20\d{2})[/-](\d{2})[/-](\d{2})/', url)
-    if m:
-        candidate = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-        r = _parse(candidate)
-        if r:
-            return r
+    # 6. URL date pattern — works for most news sites
+    for url_pat in [
+        r'/(20\d{2})[/-](\d{2})[/-](\d{2})/',   # /2022/09/21/
+        r'[/_](20\d{2})(\d{2})(\d{2})[/_]',      # _20220921_
+    ]:
+        m = re.search(url_pat, url)
+        if m:
+            candidate = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+            r = _parse(candidate)
+            if r:
+                return r
 
-    # 7. Text date patterns — scan FULL text (articles have long nav headers)
+    # 7. Text date patterns — scan FULL text
+    MONTH = r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)'
     date_patterns = [
-        # "Last Updated: Sep 21, 2022" / "Updated: Sep 21, 2022, 03:14 PM IST"
-        r'(?:Last\s+Updated|Updated|Published)[:\s]+(\w+\s+\d{1,2},?\s+20\d{2})',
+        # "Last Updated: Sep 21, 2022" / "Updated: 21 Sep 2022, 03:14 PM IST"
+        rf'(?:Last\s+Updated|Updated|Published|Posted)[:\s]+({MONTH}\s+\d{{1,2}},?\s+20\d{{2}})',
+        rf'(?:Last\s+Updated|Updated|Published|Posted)[:\s]+(\d{{1,2}}\s+{MONTH}\s+20\d{{2}})',
         # "Sep 21, 2022" / "September 21, 2022"
-        r'\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+20\d{2}\b',
+        rf'\b({MONTH}\s+\d{{1,2}},?\s+20\d{{2}})\b',
         # "21 September 2022"
-        r'\b\d{1,2}\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b',
+        rf'\b(\d{{1,2}}\s+{MONTH}\s+20\d{{2}})\b',
         # ISO "2022-09-21"
-        r'\b20\d{2}-\d{2}-\d{2}\b',
-        # "21/09/2022" or "09/21/2022"
-        r'\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b',
+        r'\b(20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b',
+        # "21/09/2022" or "09/21/2022"  — group as one string then parse
+        r'\b(\d{1,2}[/-]\d{1,2}[/-]20\d{2})\b',
     ]
     for pat in date_patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
-            r = _parse(m.group(1) if m.lastindex else m.group(0))
+            r = _parse(m.group(1))
             if r:
                 return r
 
@@ -16553,6 +16559,8 @@ def extract_deal_description(text: str, company_names: list[str], vendor: str) -
     scored = []
     for i, sent in enumerate(sentences):
         sl = sent.lower()
+        if len(sl.split()) < 6:   # skip very short fragments
+            continue
         score = 0
         if any(c in sl for c in company_lower):
             score += 2
@@ -16560,22 +16568,22 @@ def extract_deal_description(text: str, company_names: list[str], vendor: str) -
             score += 2
         if any(k in sl for k in deal_keywords):
             score += 1
-        if score >= 3:
-            scored.append((score, i, sent))
+        scored.append((score, i, sent))
 
+    # Take the best-scoring sentence regardless of threshold
     if scored:
         scored.sort(key=lambda x: -x[0])
-        best_idx = scored[0][1]
-        # Return best sentence + next sentence for context
-        window_sents = sentences[best_idx: best_idx + 2]
-        return " ".join(window_sents)[:400].strip()
+        best_score, best_idx, _ = scored[0]
+        if best_score > 0:
+            window_sents = sentences[best_idx: best_idx + 2]
+            return " ".join(window_sents)[:500].strip()
 
-    # Fallback: first 400 chars around first company mention
+    # Absolute fallback: first company mention + 300 chars forward
     tl = text.lower()
     for cn in company_lower:
         idx = tl.find(cn)
         if idx != -1:
-            return text[max(0, idx - 50): idx + 350].strip()[:400]
+            return text[max(0, idx): idx + 400].strip()[:400]
     return ""
 
 

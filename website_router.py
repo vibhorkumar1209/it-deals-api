@@ -403,15 +403,14 @@ async def fetch_via_jina_reader(url: str) -> tuple[str, str] | None:
     Free tier available; much more reliable than scrape.do for news sites.
     """
     key = os.getenv("JINA_KEY", "")
-    if not key:
-        return None
     try:
         reader_url = f"https://r.jina.ai/{url}"
         headers: dict = {
-            "Authorization": f"Bearer {key}",
             "Accept": "text/plain",
             "X-Return-Format": "text",
         }
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
 
         async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             r = await client.get(reader_url, headers=headers)
