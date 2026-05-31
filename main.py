@@ -399,7 +399,7 @@ async def debug_enrich():
         def _test_claude():
             ac = _anthropic.Anthropic(api_key=anthropic_key)
             msg = ac.messages.create(
-                model="claude-haiku-4-5",
+                model="claude-sonnet-4-20250514",
                 max_tokens=20,
                 messages=[{"role": "user", "content": "Say OK"}],
             )
