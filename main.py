@@ -1,5 +1,6 @@
 """IT Deals Intelligence API — FastAPI with SSE streaming."""
 
+import asyncio
 import json
 import logging
 import os
