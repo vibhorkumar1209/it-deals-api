@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 PARALLEL_API_KEY = os.getenv("PARALLEL_API_KEY", "")
 BASE_URL = "https://api.parallel.ai"
-TASK_TIMEOUT_S = 90
+TASK_TIMEOUT_S = 200
 POLL_INTERVAL_S = 5
 
 # ── SDK client (lazy init) ────────────────────────────────────────────────────

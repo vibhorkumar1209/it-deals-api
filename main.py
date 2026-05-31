@@ -267,7 +267,7 @@ async def enrich_task(req: EnrichTaskRequest):
             )
             elapsed = 0
             raw = None
-            while not research_task.done() and elapsed < 110:
+            while not research_task.done() and elapsed < 220:
                 try:
                     done, _ = await asyncio.wait({research_task}, timeout=8)
                     if done:
