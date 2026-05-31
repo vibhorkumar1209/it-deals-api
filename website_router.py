@@ -129,13 +129,19 @@ async def fetch_type1_static(url: str) -> tuple[str, str] | None:
         logger.warning(f"TYPE1 fetch failed {url}: {e}")
         # Fallback to Jina Reader only for real news/press release domains
         if any(d == jd or d.endswith("." + jd) for jd in JINA_PREFERRED_DOMAINS):
-            return await fetch_via_jina_reader(url)
-        return None
+            result = await fetch_via_jina_reader(url)
+            if result:
+                return result
+        # Last resort: Apify Website Content Crawler
+        return await fetch_via_apify(url)
 
 
 async def fetch_type2_js(url: str) -> tuple[str, str] | None:
-    """JS-rendered SPA — Jina Reader first, scrape.do fallback."""
+    """JS-rendered SPA — Jina Reader first, Apify fallback, scrape.do last resort."""
     result = await fetch_via_jina_reader(url)
+    if result:
+        return result
+    result = await fetch_via_apify(url)
     if result:
         return result
     return await fetch_via_scrapedo(url)
@@ -263,7 +269,13 @@ async def fetch_type6_bot_protected(url: str, proxy_pool: list[str] | None = Non
         except Exception as e:
             logger.warning(f"TYPE6 browserless failed: {e}")
 
-    # scrape.do fallback — handles JS rendering + Cloudflare bypass
+    # Apify fallback — handles JS rendering + Cloudflare bypass
+    result = await fetch_via_apify(url)
+    if result:
+        logger.info(f"TYPE6 Apify success: {url}")
+        return result
+
+    # scrape.do last resort
     sd_key = os.getenv("SCRAPEDO_KEY")
     if sd_key:
         result = await fetch_via_scrapedo(url, sd_key)
@@ -425,6 +437,48 @@ async def fetch_via_jina_reader(url: str) -> tuple[str, str] | None:
             return text, text   # no raw HTML in reader mode
     except Exception as e:
         logger.warning(f"Jina Reader failed for {url}: {e}")
+        return None
+
+
+async def fetch_via_apify(url: str) -> tuple[str, str] | None:
+    """Fetch a URL via Apify Website Content Crawler actor.
+
+    Uses the synchronous Items API so we get results in one HTTP call
+    without polling. Returns (text, text) on success, None on failure.
+    Requires APIFY_API_KEY env var.
+    """
+    key = os.getenv("APIFY_API_KEY", "")
+    if not key:
+        return None
+    try:
+        actor_url = (
+            "https://api.apify.com/v2/acts/apify~website-content-crawler/run-sync-get-dataset-items"
+            f"?token={key}&timeout=60&memory=256"
+        )
+        payload = {
+            "startUrls": [{"url": url}],
+            "maxCrawlPages": 1,
+            "crawlerType": "cheerio",          # fast HTML-only mode
+            "removeElementsCssSelector": "nav,footer,header,script,style,.cookie-banner",
+            "htmlTransformer": "readableText",  # returns clean readable text
+        }
+        async with httpx.AsyncClient(timeout=70) as client:
+            r = await client.post(actor_url, json=payload)
+            if not r.is_success:
+                logger.warning(f"Apify {r.status_code} for {url}: {r.text[:200]}")
+                return None
+            items = r.json()
+            if not items:
+                logger.warning(f"Apify returned empty items for {url}")
+                return None
+            text = items[0].get("text") or items[0].get("markdown") or ""
+            if not text or len(text.split()) < 50:
+                logger.warning(f"Apify too-short text ({len(text.split())} words) for {url}")
+                return None
+            logger.info(f"Apify success: {url[:80]} ({len(text)} chars)")
+            return text, text
+    except Exception as e:
+        logger.warning(f"Apify fetch failed for {url}: {e}")
         return None
 
 
