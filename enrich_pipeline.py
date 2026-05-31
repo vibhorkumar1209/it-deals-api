@@ -86,20 +86,26 @@ def build_search_queries(company_name: str, goal: str, year_range: tuple[int, in
 
 async def _jina_search(query: str) -> list[str]:
     """Run one Jina search query, return list of URLs."""
-    headers = {"Accept": "application/json"}
-    if JINA_KEY:
-        headers["Authorization"] = f"Bearer {JINA_KEY}"
+    if not JINA_KEY:
+        return []
     try:
         async with httpx.AsyncClient(timeout=12) as client:
             r = await client.get(
-                f"https://s.jina.ai/{httpx.URL(query)}",
-                headers=headers,
+                "https://s.jina.ai/",
+                params={"q": query},
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {JINA_KEY}",
+                    "X-Respond-With": "no-content",
+                },
             )
             if not r.is_success:
+                logger.debug(f"Jina {r.status_code} for '{query[:50]}'")
                 return []
             data = r.json()
-            results = data if isinstance(data, list) else data.get("data", [])
-            return [item.get("url", "") for item in results if item.get("url")]
+            urls = [item.get("url", "") for item in data.get("data", []) if item.get("url")]
+            logger.info(f"Jina: {len(urls)} URLs for '{query[:60]}'")
+            return urls
     except Exception as e:
         logger.debug(f"Jina search error: {e}")
         return []
@@ -233,18 +239,31 @@ def _claude_extract(pages: list[dict], company_name: str, goal: str, schema_fiel
         combined += f"\n\n[Source: {p['url']}]\n{snippet}"
     combined = combined[:20000]  # hard cap
 
-    prompt = (
-        f"You are extracting structured data about {company_name} from web research.\n\n"
-        f"GOAL: {goal}\n\n"
-        f"Extract the following fields from the research content below.\n"
-        f"Return a JSON object with these exact keys:\n{fields_desc}\n\n"
-        f"Rules:\n"
-        f"- Use null for any field you cannot confirm from the content\n"
-        f"- For list fields (e.g. multiple deals), return a semicolon-separated string\n"
-        f"- Be specific — include vendor names, dates, values where found\n"
-        f"- Return ONLY the JSON object, no explanation\n\n"
-        f"RESEARCH CONTENT:\n{combined}"
-    )
+    if combined:
+        prompt = (
+            f"You are extracting structured data about {company_name} from web research.\n\n"
+            f"GOAL: {goal}\n\n"
+            f"Extract the following fields from the scraped content below.\n"
+            f"Return a JSON object with these exact keys:\n{fields_desc}\n\n"
+            f"Rules:\n"
+            f"- Use null for any field you cannot confirm from the content\n"
+            f"- For multiple values (e.g. multiple deals), return a semicolon-separated string\n"
+            f"- Be specific — include vendor names, dates, values where found\n"
+            f"- Return ONLY the JSON object, no explanation\n\n"
+            f"SCRAPED CONTENT:\n{combined}"
+        )
+    else:
+        # No scraped pages — ask Claude to answer from its own knowledge
+        prompt = (
+            f"Research the following about {company_name} (website: {company_name}):\n\n"
+            f"GOAL: {goal}\n\n"
+            f"Return a JSON object with these exact keys:\n{fields_desc}\n\n"
+            f"Rules:\n"
+            f"- Answer from your training knowledge about this company\n"
+            f"- Use null for any field you are not confident about\n"
+            f"- For multiple values, return a semicolon-separated string\n"
+            f"- Return ONLY the JSON object, no explanation"
+        )
 
     try:
         ac = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -300,13 +319,15 @@ async def enrich_company(
             urls = []
 
     if not urls:
-        yield {"type": "heartbeat", "message": f"⚠️ No URLs found for {company_name} — trying direct Claude research…"}
-        # Fall back to Claude-only with no scraped content
+        yield {"type": "heartbeat", "message": f"⚠️ No URLs found — using Claude knowledge for {company_name}…"}
         parsed = await asyncio.to_thread(
             _claude_extract, [], company_name, goal, schema_fields
         )
-        row = {"company_name": company_name, "domain": domain, "_status": "ok" if parsed else "no_result"}
-        row.update({f["key"]: str(parsed.get(f["key"], "") or "") for f in schema_fields})
+        has_data = any(v for v in parsed.values() if v not in (None, "", "null"))
+        row = {"company_name": company_name, "domain": domain, "_status": "ok" if has_data else "no_result", "_sources": 0}
+        for f in schema_fields:
+            val = parsed.get(f["key"], "")
+            row[f["key"]] = str(val) if val not in (None, "null") else ""
         yield {"type": "row_done", "row": row}
         return
 
