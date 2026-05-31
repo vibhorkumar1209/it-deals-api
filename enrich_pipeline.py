@@ -84,8 +84,49 @@ def build_search_queries(company_name: str, goal: str, year_range: tuple[int, in
 
 # ── Step 2: Search via Jina → collect URLs ────────────────────────────────────
 
-async def _jina_search(query: str) -> list[str]:
-    """Run one Jina search query, return list of URLs."""
+async def _apify_google_search(queries: list[str], results_per_query: int = 10) -> list[str]:
+    """
+    Search Google via Apify Google Search Scraper actor.
+    Sends all queries in one actor run — much faster than serial searches.
+    Returns flat list of unique URLs from organic results.
+    """
+    if not APIFY_KEY or not queries:
+        return []
+    try:
+        actor_url = (
+            "https://api.apify.com/v2/acts/apify~google-search-scraper"
+            f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout=60&memory=256"
+        )
+        payload = {
+            "queries": "\n".join(queries),   # one query per line
+            "maxPagesPerQuery": 1,
+            "resultsPerPage": results_per_query,
+            "countryCode": "us",
+            "languageCode": "en",
+        }
+        async with httpx.AsyncClient(timeout=70) as client:
+            r = await client.post(actor_url, json=payload)
+            if not r.is_success:
+                logger.warning(f"Apify Google Search {r.status_code}: {r.text[:200]}")
+                return []
+            items = r.json()
+            urls: list[str] = []
+            seen: set[str] = set()
+            for item in items:
+                for result in item.get("organicResults", []):
+                    url = result.get("url", "")
+                    if url and url not in seen:
+                        seen.add(url)
+                        urls.append(url)
+            logger.info(f"Apify Google Search: {len(urls)} URLs from {len(queries)} queries")
+            return urls
+    except Exception as e:
+        logger.warning(f"Apify Google Search error: {e}")
+        return []
+
+
+async def _jina_search_fallback(query: str) -> list[str]:
+    """Fallback: Jina semantic search when Apify is unavailable."""
     if not JINA_KEY:
         return []
     try:
@@ -100,11 +141,8 @@ async def _jina_search(query: str) -> list[str]:
                 },
             )
             if not r.is_success:
-                logger.debug(f"Jina {r.status_code} for '{query[:50]}'")
                 return []
-            data = r.json()
-            urls = [item.get("url", "") for item in data.get("data", []) if item.get("url")]
-            logger.info(f"Jina: {len(urls)} URLs for '{query[:60]}'")
+            urls = [item.get("url", "") for item in r.json().get("data", []) if item.get("url")]
             return urls
     except Exception as e:
         logger.debug(f"Jina search error: {e}")
@@ -112,16 +150,42 @@ async def _jina_search(query: str) -> list[str]:
 
 
 async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
-    """Run queries in batches of 5, collect unique URLs."""
+    """
+    Collect URLs via Apify Google Search (primary) or Jina (fallback).
+    Runs all queries in one Apify call for speed.
+    """
     from urllib.parse import urlparse
 
+    def _filter(raw_urls: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for url in raw_urls:
+            if not url:
+                continue
+            domain = urlparse(url).netloc.lstrip("www.")
+            if any(domain == s or domain.endswith("." + s) for s in SKIP_DOMAINS):
+                continue
+            if url not in seen:
+                seen.add(url)
+                out.append(url)
+                if len(out) >= max_urls:
+                    break
+        return out
+
+    # Primary: Apify Google Search (all queries in one call)
+    if APIFY_KEY:
+        raw = await _apify_google_search(queries, results_per_query=10)
+        urls = _filter(raw)
+        if urls:
+            return urls
+        logger.warning("Apify Google Search returned no URLs — falling back to Jina")
+
+    # Fallback: Jina (batched)
     seen: set[str] = set()
     urls: list[str] = []
-
-    batch_size = 5
-    for i in range(0, len(queries), batch_size):
-        batch = queries[i: i + batch_size]
-        results = await asyncio.gather(*[_jina_search(q) for q in batch], return_exceptions=True)
+    for i in range(0, len(queries), 5):
+        batch = queries[i: i + 5]
+        results = await asyncio.gather(*[_jina_search_fallback(q) for q in batch], return_exceptions=True)
         for result in results:
             if isinstance(result, Exception):
                 continue
@@ -134,12 +198,10 @@ async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
                 if url not in seen:
                     seen.add(url)
                     urls.append(url)
-                    if len(urls) >= max_urls:
-                        return urls
         if len(urls) >= max_urls:
             break
 
-    return urls
+    return urls[:max_urls]
 
 
 # ── Step 3: Scrape via Apify ──────────────────────────────────────────────────
