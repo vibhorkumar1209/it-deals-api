@@ -65,19 +65,19 @@ APIFY_KEY = os.getenv("APIFY_API_KEY", "")
 def build_search_queries(company_name: str, goal: str, year_range: tuple[int, int] = (2022, 2025)) -> list[str]:
     """Generate search queries: company-only + company×vendor combinations."""
     queries: list[str] = []
-    years = list(range(year_range[0], year_range[1] + 1))[-1:]  # last 1 year only
+    years = list(range(year_range[0], year_range[1] + 1))  # full 5-year range
 
+    # Generic deal queries — one per year
     for year in years:
-        # Company + generic deal keywords
-        queries += [
-            f'"{company_name}" IT deal contract signed {year}',
-            f'"{company_name}" technology outsourcing agreement {year}',
-            f'"{company_name}" ERP CRM cloud vendor selected {year}',
-            f'"{company_name}" digital transformation partnership {year}',
-        ]
-        # Company + top vendor pairs (high-signal searches)
-        for vendor in TOP_VENDORS[:8]:  # top 8 to keep total queries ~12
-            queries.append(f'"{company_name}" "{vendor}" deal contract {year}')
+        queries.append(f'"{company_name}" IT deal contract signed {year}')
+        queries.append(f'"{company_name}" technology outsourcing agreement {year}')
+
+    # Company + vendor pairs — top vendors, year-agnostic (broad)
+    for vendor in TOP_VENDORS[:10]:
+        queries.append(f'"{company_name}" "{vendor}" deal contract agreement')
+
+    # Broad catch-all
+    queries.append(f'"{company_name}" digital transformation IT vendor selected 2020 2021 2022 2023 2024')
 
     return queries
 
@@ -279,67 +279,87 @@ def is_deal_page(text: str, company_name: str) -> bool:
 
 # ── Step 5: Extract schema fields via Claude ──────────────────────────────────
 
-def _claude_extract(pages: list[dict], company_name: str, goal: str, schema_fields: list[dict]) -> dict:
+def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schema_fields: list[dict]) -> list[dict]:
     """
-    Call Claude to extract schema fields from all scraped pages combined.
+    Call Claude to extract MULTIPLE deal rows from scraped pages.
+    Returns a list of dicts, one per distinct deal found.
     Runs in a thread (blocking Anthropic SDK call).
     """
     import anthropic
 
     if not ANTHROPIC_KEY:
-        return {}
+        return []
 
     fields_desc = "\n".join(
         f'- {f["key"]}: {f.get("description") or f.get("label", "")} ({f.get("type","string")})'
         for f in schema_fields
     )
+    field_keys = [f["key"] for f in schema_fields]
 
     # Combine page texts, truncate to fit context
     combined = ""
-    for p in pages[:10]:
-        snippet = p["text"][:3000]
+    for p in pages[:12]:
+        snippet = p["text"][:2500]
         combined += f"\n\n[Source: {p['url']}]\n{snippet}"
-    combined = combined[:20000]  # hard cap
+    combined = combined[:24000]  # hard cap
 
     if combined:
         prompt = (
-            f"You are extracting structured data about {company_name} from web research.\n\n"
+            f"You are extracting IT deal records for {company_name} from scraped web content.\n\n"
             f"GOAL: {goal}\n\n"
-            f"Extract the following fields from the scraped content below.\n"
-            f"Return a JSON object with these exact keys:\n{fields_desc}\n\n"
+            f"Extract EVERY distinct deal or contract mentioned. Each deal = one JSON object.\n"
+            f"Return a JSON ARRAY where each element has these exact keys:\n{fields_desc}\n\n"
             f"Rules:\n"
-            f"- Use null for any field you cannot confirm from the content\n"
-            f"- For multiple values (e.g. multiple deals), return a semicolon-separated string\n"
-            f"- Be specific — include vendor names, dates, values where found\n"
-            f"- Return ONLY the JSON object, no explanation\n\n"
+            f"- One object per deal/contract — do NOT merge multiple deals into one\n"
+            f"- Include deals from all years found in the content (2020–2025)\n"
+            f"- Use null for fields not mentioned for that specific deal\n"
+            f"- Be specific: exact vendor name, date, value, contract duration where stated\n"
+            f"- If no deals found, return an empty array []\n"
+            f"- Return ONLY the JSON array, no explanation\n\n"
             f"SCRAPED CONTENT:\n{combined}"
         )
     else:
-        # No scraped pages — ask Claude to answer from its own knowledge
+        # No scraped pages — ask Claude from knowledge
         prompt = (
-            f"Research the following about {company_name} (website: {company_name}):\n\n"
+            f"List all known IT deals and technology contracts for {company_name} from 2020–2025.\n\n"
             f"GOAL: {goal}\n\n"
-            f"Return a JSON object with these exact keys:\n{fields_desc}\n\n"
+            f"Return a JSON ARRAY where each element is one deal with these exact keys:\n{fields_desc}\n\n"
             f"Rules:\n"
-            f"- Answer from your training knowledge about this company\n"
-            f"- Use null for any field you are not confident about\n"
-            f"- For multiple values, return a semicolon-separated string\n"
-            f"- Return ONLY the JSON object, no explanation"
+            f"- One object per deal — do NOT merge multiple deals\n"
+            f"- Include as many distinct deals as you know (target 5–15 deals)\n"
+            f"- Use null for fields you are not confident about\n"
+            f"- Return ONLY the JSON array, no explanation"
         )
 
     try:
         ac = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         msg = ac.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
+            max_tokens=3000,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = msg.content[0].text
         clean = re.sub(r"```(?:json)?\s*|\s*```", "", raw.strip())
-        return json.loads(clean)
+        parsed = json.loads(clean)
+        if isinstance(parsed, dict):
+            # Claude returned a single object — wrap it
+            parsed = [parsed]
+        if not isinstance(parsed, list):
+            return []
+        # Normalise: ensure all keys present, convert nulls
+        out = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            row = {}
+            for key in field_keys:
+                val = item.get(key)
+                row[key] = str(val) if val not in (None, "null", "") else ""
+            out.append(row)
+        return out
     except Exception as e:
         logger.warning(f"Claude extraction error: {e}")
-        return {}
+        return []
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
@@ -382,15 +402,20 @@ async def enrich_company(
 
     if not urls:
         yield {"type": "heartbeat", "message": f"⚠️ No URLs found — using Claude knowledge for {company_name}…"}
-        parsed = await asyncio.to_thread(
-            _claude_extract, [], company_name, goal, schema_fields
+        deals: list[dict] = await asyncio.to_thread(
+            _claude_extract_deals, [], company_name, goal, schema_fields
         )
-        has_data = any(v for v in parsed.values() if v not in (None, "", "null"))
-        row = {"company_name": company_name, "domain": domain, "_status": "ok" if has_data else "no_result", "_sources": 0}
-        for f in schema_fields:
-            val = parsed.get(f["key"], "")
-            row[f["key"]] = str(val) if val not in (None, "null") else ""
-        yield {"type": "row_done", "row": row}
+        if not deals:
+            row = {"company_name": company_name, "domain": domain, "_status": "no_result", "_sources": 0}
+            for f in schema_fields:
+                row[f["key"]] = ""
+            yield {"type": "row_done", "row": row}
+            return
+        yield {"type": "heartbeat", "message": f"✅ Found {len(deals)} deals for {company_name} (from knowledge)"}
+        for deal in deals:
+            row = {"company_name": company_name, "domain": domain, "_status": "ok", "_sources": 0}
+            row.update(deal)
+            yield {"type": "row_done", "row": row}
         return
 
     yield {"type": "heartbeat", "message": f"🕸️ Scraping {len(urls)} URLs for {company_name}…"}
@@ -415,20 +440,34 @@ async def enrich_company(
     relevant = [p for p in scraped if is_deal_page(p["text"], company_name)]
     yield {"type": "heartbeat", "message": f"📋 {len(relevant)}/{len(scraped)} pages are deal-relevant — extracting…"}
 
-    # Step 5: Extract with Claude
-    pages_to_use = relevant if relevant else scraped[:5]  # fallback to top pages if none flagged relevant
-    parsed = await asyncio.to_thread(
-        _claude_extract, pages_to_use, company_name, goal, schema_fields
+    # Step 5: Extract multiple deals with Claude
+    pages_to_use = relevant if relevant else scraped[:5]
+    deals: list[dict] = await asyncio.to_thread(
+        _claude_extract_deals, pages_to_use, company_name, goal, schema_fields
     )
 
-    row: dict = {
-        "company_name": company_name,
-        "domain": domain,
-        "_status": "ok" if any(v for v in parsed.values() if v not in (None, "", "null")) else "no_result",
-        "_sources": len(relevant),
-    }
-    for f in schema_fields:
-        val = parsed.get(f["key"], "")
-        row[f["key"]] = str(val) if val not in (None, "null") else ""
+    if not deals:
+        # No deals extracted — yield a no_result row
+        row: dict = {
+            "company_name": company_name,
+            "domain": domain,
+            "_status": "no_result",
+            "_sources": len(relevant),
+        }
+        for f in schema_fields:
+            row[f["key"]] = ""
+        yield {"type": "row_done", "row": row}
+        return
 
-    yield {"type": "row_done", "row": row}
+    yield {"type": "heartbeat", "message": f"✅ Found {len(deals)} deals for {company_name}"}
+
+    # Yield one row per deal
+    for deal in deals:
+        row = {
+            "company_name": company_name,
+            "domain": domain,
+            "_status": "ok",
+            "_sources": len(relevant),
+        }
+        row.update(deal)
+        yield {"type": "row_done", "row": row}

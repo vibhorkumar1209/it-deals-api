@@ -237,12 +237,12 @@ async def enrich_task(req: EnrichTaskRequest):
 
         results: list[dict] = []
 
+        deal_index = 0  # global row counter across all companies
+
         for i, inp in enumerate(req.inputs):
             yield _sse({"type": "heartbeat", "message": f"🔍 Company {i+1}/{len(req.inputs)}: {inp.company_name}"})
 
-            row: dict = {"company_name": inp.company_name, "domain": inp.domain, "_status": "no_result"}
-            for f in req.schema_fields:
-                row[f.key] = ""
+            company_deals: list[dict] = []
 
             try:
                 async for event in enrich_company(
@@ -252,14 +252,24 @@ async def enrich_task(req: EnrichTaskRequest):
                     schema_fields=schema_fields,
                 ):
                     if event["type"] == "row_done":
-                        row = event["row"]
+                        deal_row = event["row"]
+                        company_deals.append(deal_row)
+                        results.append(deal_row)
+                        yield _sse({"type": "row", "row": deal_row, "index": deal_index, "total": None})
+                        deal_index += 1
                     else:
                         yield _sse(event)
             except Exception as e:
                 logger.error(f"Enrich pipeline error for {inp.company_name}: {e}", exc_info=True)
+                # emit a no_result row so frontend doesn't hang
+                fallback = {"company_name": inp.company_name, "domain": inp.domain, "_status": "error"}
+                for f in req.schema_fields:
+                    fallback[f.key] = ""
+                results.append(fallback)
+                yield _sse({"type": "row", "row": fallback, "index": deal_index, "total": None})
+                deal_index += 1
 
-            results.append(row)
-            yield _sse({"type": "row", "row": row, "index": i, "total": len(req.inputs)})
+            yield _sse({"type": "heartbeat", "message": f"✅ {inp.company_name}: {len(company_deals)} deals found"})
 
         yield _sse({
             "type": "complete",
