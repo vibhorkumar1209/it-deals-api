@@ -229,13 +229,15 @@ async def enrich_task(req: EnrichTaskRequest):
         def _sse(obj: dict) -> str:
             return f"data: {json.dumps(obj)}\n\n"
 
-        # Early check — fail fast with a clear message
+        # Early checks — fail fast with clear messages
         parallel_key = os.getenv("PARALLEL_API_KEY", "")
-        if not parallel_key:
-            yield _sse({"type": "error", "message": "PARALLEL_API_KEY not set on server. Add it in Render → Environment."})
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not parallel_key and not anthropic_key:
+            yield _sse({"type": "error", "message": "Neither PARALLEL_API_KEY nor ANTHROPIC_API_KEY set on server."})
             return
 
-        yield _sse({"type": "progress", "message": f"🚀 Starting enrichment for {len(req.inputs)} companies via Parallel.ai…"})
+        engine = "Parallel.ai + Claude" if (parallel_key and anthropic_key) else ("Claude" if anthropic_key else "Parallel.ai")
+        yield _sse({"type": "progress", "message": f"🚀 Starting enrichment for {len(req.inputs)} companies via {engine}…"})
 
         schema_lines = "\n".join(
             f'- {f.key}: {f.description or f.label} ({f.type})'
@@ -247,6 +249,15 @@ async def enrich_task(req: EnrichTaskRequest):
             "Use null for any field that cannot be confirmed from public sources. "
             "Return ONLY the JSON object, no markdown fences."
         )
+        # Init Anthropic client once (safe — no-op if key missing)
+        import anthropic as _anthropic
+        _ac = _anthropic.Anthropic(api_key=anthropic_key) if anthropic_key else None
+
+        _fields_desc = "\n".join(
+            f'- {f.key}: {f.description or f.label} ({f.type})'
+            for f in req.schema_fields
+        )
+
         results: list[dict] = []
 
         for i, inp in enumerate(req.inputs):
@@ -259,50 +270,44 @@ async def enrich_task(req: EnrichTaskRequest):
                 f"{inp.company_name} (website: {inp.domain})\n\n"
                 f"{req.goal}"
             )
-            company_schema = output_schema_tmpl
 
-            # Build Claude prompt for direct research
-            import anthropic as _anthropic
-            _ac = _anthropic.Anthropic()
-            _fields_desc = "\n".join(
-                f'- {f.key}: {f.description or f.label} ({f.type})'
-                for f in req.schema_fields
-            )
-            _claude_prompt = (
-                f"Research the following for {inp.company_name} (website: {inp.domain}):\n\n"
-                f"{req.goal}\n\n"
-                f"Return a JSON object with these exact fields:\n{_fields_desc}\n\n"
-                f"Use null for any field you cannot confirm. Return ONLY the JSON object."
-            )
+            # Build tasks — run Claude + Parallel.ai concurrently, use first result
+            pending: set = set()
 
-            # Run Parallel.ai AND Claude concurrently — use whichever finishes first
-            parallel_task = asyncio.ensure_future(
-                parallel_research(query, output_schema=company_schema)
-            )
-            claude_task = asyncio.ensure_future(
-                asyncio.to_thread(
-                    lambda: _ac.messages.create(
+            if _ac:
+                _prompt = (
+                    f"Research the following for {inp.company_name} (website: {inp.domain}):\n\n"
+                    f"{req.goal}\n\n"
+                    f"Return a JSON object with these exact fields:\n{_fields_desc}\n\n"
+                    f"Use null for any field you cannot confirm. Return ONLY the JSON object."
+                )
+                # Capture prompt value in default arg to avoid closure over loop variable
+                def _run_claude(prompt=_prompt, client=_ac):
+                    return client.messages.create(
                         model="claude-3-haiku-20240307",
                         max_tokens=1024,
-                        messages=[{"role": "user", "content": _claude_prompt}],
+                        messages=[{"role": "user", "content": prompt}],
                     ).content[0].text
-                )
-            )
 
-            pending = {parallel_task, claude_task}
+                pending.add(asyncio.ensure_future(asyncio.to_thread(_run_claude)))
+
+            if parallel_key:
+                pending.add(asyncio.ensure_future(
+                    parallel_research(query, output_schema=output_schema_tmpl)
+                ))
+
             elapsed = 0
             raw = None
             while pending and elapsed < 220:
                 done, pending = await asyncio.wait(pending, timeout=8)
                 elapsed += 8
                 for t in done:
-                    if t.exception():
-                        logger.warning(f"Research task error: {t.exception()}")
-                        continue
-                    result = t.result()
-                    if result:
-                        raw = result
-                        break
+                    try:
+                        result = t.result()
+                        if result:
+                            raw = result
+                    except Exception as _te:
+                        logger.warning(f"Research task error for {inp.company_name}: {_te}")
                 if raw:
                     break
                 yield _sse({
@@ -310,7 +315,6 @@ async def enrich_task(req: EnrichTaskRequest):
                     "message": f"⏳ Researching {inp.company_name}… ({elapsed}s)"
                 })
 
-            # Cancel whichever is still running
             for t in pending:
                 t.cancel()
 
@@ -482,6 +486,51 @@ async def debug(company: str = "HDFC Bank"):
         return entry
 
     out["url_results"] = await asyncio.gather(*[_probe(u) for u in unique_urls])
+    return out
+
+
+@app.get("/api/debug-enrich")
+async def debug_enrich():
+    """Diagnose enrichment: check keys, test Claude, test Parallel.ai."""
+    import anthropic as _anthropic
+    out: dict = {
+        "env": {
+            "ANTHROPIC_API_KEY_set": bool(os.getenv("ANTHROPIC_API_KEY")),
+            "PARALLEL_API_KEY_set": bool(os.getenv("PARALLEL_API_KEY")),
+        },
+        "claude_test": None,
+        "parallel_test": None,
+    }
+    # Test Claude
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if anthropic_key:
+        try:
+            ac = _anthropic.Anthropic(api_key=anthropic_key)
+            msg = ac.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=50,
+                messages=[{"role": "user", "content": "Reply with just: OK"}],
+            )
+            out["claude_test"] = msg.content[0].text
+        except Exception as e:
+            out["claude_test"] = f"ERROR: {e}"
+    else:
+        out["claude_test"] = "ANTHROPIC_API_KEY not set"
+    # Test Parallel.ai
+    from parallel_search import parallel_research
+    if os.getenv("PARALLEL_API_KEY"):
+        try:
+            result = await asyncio.wait_for(
+                parallel_research("What is 2+2?", output_schema="The answer as a number"),
+                timeout=30
+            )
+            out["parallel_test"] = result or "returned None"
+        except asyncio.TimeoutError:
+            out["parallel_test"] = "timeout after 30s"
+        except Exception as e:
+            out["parallel_test"] = f"ERROR: {e}"
+    else:
+        out["parallel_test"] = "PARALLEL_API_KEY not set"
     return out
 
 
