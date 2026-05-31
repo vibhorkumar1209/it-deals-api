@@ -65,7 +65,7 @@ APIFY_KEY = os.getenv("APIFY_API_KEY", "")
 def build_search_queries(company_name: str, goal: str, year_range: tuple[int, int] = (2022, 2025)) -> list[str]:
     """Generate search queries: company-only + company×vendor combinations."""
     queries: list[str] = []
-    years = list(range(year_range[0], year_range[1] + 1))[-2:]  # last 2 years
+    years = list(range(year_range[0], year_range[1] + 1))[-1:]  # last 1 year only
 
     for year in years:
         # Company + generic deal keywords
@@ -76,7 +76,7 @@ def build_search_queries(company_name: str, goal: str, year_range: tuple[int, in
             f'"{company_name}" digital transformation partnership {year}',
         ]
         # Company + top vendor pairs (high-signal searches)
-        for vendor in TOP_VENDORS[:15]:  # top 15 to keep query count manageable
+        for vendor in TOP_VENDORS[:8]:  # top 8 to keep total queries ~12
             queries.append(f'"{company_name}" "{vendor}" deal contract {year}')
 
     return queries
@@ -365,7 +365,7 @@ async def enrich_company(
     # Step 2: Collect URLs (run in batches, yield heartbeat between)
     url_collect_task = asyncio.ensure_future(collect_urls(queries, max_urls=max_urls))
     elapsed = 0
-    while not url_collect_task.done() and elapsed < 60:
+    while not url_collect_task.done() and elapsed < 90:
         done, _ = await asyncio.wait({url_collect_task}, timeout=8)
         elapsed += 8
         if done:
