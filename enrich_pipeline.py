@@ -249,7 +249,7 @@ def _claude_extract(pages: list[dict], company_name: str, goal: str, schema_fiel
     try:
         ac = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         msg = ac.messages.create(
-            model="claude-3-haiku-20240307",
+            model="claude-3-5-haiku-20241022",
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
