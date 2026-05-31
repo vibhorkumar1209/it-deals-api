@@ -218,160 +218,44 @@ class EnrichTaskRequest(BaseModel):
 
 @app.post("/api/enrich-task")
 async def enrich_task(req: EnrichTaskRequest):
-    """SSE stream: run Parallel.ai enrichment for each input against a user-defined schema."""
-    import asyncio
-    from parallel_search import parallel_research
+    """SSE stream: search → Apify scrape → identify → Claude classify."""
+    from enrich_pipeline import enrich_company
 
     async def _generate():
-        import re as _re
-        import json as _json
-
         def _sse(obj: dict) -> str:
             return f"data: {json.dumps(obj)}\n\n"
 
-        # Early checks — fail fast with clear messages
-        parallel_key = os.getenv("PARALLEL_API_KEY", "")
         anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-        if not parallel_key and not anthropic_key:
-            yield _sse({"type": "error", "message": "Neither PARALLEL_API_KEY nor ANTHROPIC_API_KEY set on server."})
+        if not anthropic_key:
+            yield _sse({"type": "error", "message": "ANTHROPIC_API_KEY not set on server."})
             return
 
-        engine = "Parallel.ai + Claude" if (parallel_key and anthropic_key) else ("Claude" if anthropic_key else "Parallel.ai")
-        yield _sse({"type": "progress", "message": f"🚀 Starting enrichment for {len(req.inputs)} companies via {engine}…"})
+        schema_fields = [f.model_dump() for f in req.schema_fields]
 
-        schema_lines = "\n".join(
-            f'- {f.key}: {f.description or f.label} ({f.type})'
-            for f in req.schema_fields
-        )
-        output_schema_tmpl = (
-            "A JSON object with these exact fields based on the research:\n"
-            f"{schema_lines}\n"
-            "Use null for any field that cannot be confirmed from public sources. "
-            "Return ONLY the JSON object, no markdown fences."
-        )
-        # Init Anthropic client once (safe — no-op if key missing)
-        import anthropic as _anthropic
-        _ac = _anthropic.Anthropic(api_key=anthropic_key) if anthropic_key else None
-
-        _fields_desc = "\n".join(
-            f'- {f.key}: {f.description or f.label} ({f.type})'
-            for f in req.schema_fields
-        )
+        yield _sse({"type": "progress", "message": f"🚀 Starting enrichment for {len(req.inputs)} companies…"})
 
         results: list[dict] = []
 
         for i, inp in enumerate(req.inputs):
-            yield _sse({
-                "type": "heartbeat",
-                "message": f"⏳ Researching {inp.company_name} ({i+1}/{len(req.inputs)})…"
-            })
+            yield _sse({"type": "heartbeat", "message": f"🔍 Company {i+1}/{len(req.inputs)}: {inp.company_name}"})
 
-            query = (
-                f"{inp.company_name} (website: {inp.domain})\n\n"
-                f"{req.goal}"
-            )
+            row: dict = {"company_name": inp.company_name, "domain": inp.domain, "_status": "no_result"}
+            for f in req.schema_fields:
+                row[f.key] = ""
 
-            # Build tasks — run Claude + Parallel.ai concurrently, use first result
-            pending: set = set()
-
-            if _ac:
-                _prompt = (
-                    f"Research the following for {inp.company_name} (website: {inp.domain}):\n\n"
-                    f"{req.goal}\n\n"
-                    f"Return a JSON object with these exact fields:\n{_fields_desc}\n\n"
-                    f"Use null for any field you cannot confirm. Return ONLY the JSON object."
-                )
-                # Capture prompt value in default arg to avoid closure over loop variable
-                def _run_claude(prompt=_prompt, client=_ac):
-                    return client.messages.create(
-                        model="claude-3-haiku-20240307",
-                        max_tokens=1024,
-                        messages=[{"role": "user", "content": prompt}],
-                    ).content[0].text
-
-                pending.add(asyncio.ensure_future(asyncio.to_thread(_run_claude)))
-
-            if parallel_key:
-                pending.add(asyncio.ensure_future(
-                    parallel_research(query, output_schema=output_schema_tmpl)
-                ))
-
-            elapsed = 0
-            raw = None
-            while pending and elapsed < 220:
-                done, pending = await asyncio.wait(pending, timeout=8)
-                elapsed += 8
-                for t in done:
-                    try:
-                        result = t.result()
-                        if result:
-                            raw = result
-                    except Exception as _te:
-                        logger.warning(f"Research task error for {inp.company_name}: {_te}")
-                if raw:
-                    break
-                yield _sse({
-                    "type": "heartbeat",
-                    "message": f"⏳ Researching {inp.company_name}… ({elapsed}s)"
-                })
-
-            for t in pending:
-                t.cancel()
-
-            row: dict = {
-                "company_name": inp.company_name,
-                "domain": inp.domain,
-                "_status": "ok" if raw else "no_result",
-            }
-
-            if raw:
-                # Try JSON parse first
-                parsed: dict = {}
-                try:
-                    clean = _re.sub(r'```(?:json)?\s*|\s*```', '', raw.strip())
-                    parsed = _json.loads(clean)
-                except Exception:
-                    pass
-
-                # If JSON parse failed or missing keys, use Claude Haiku to extract fields
-                fields_missing = [
-                    f for f in req.schema_fields
-                    if f.key not in parsed or parsed.get(f.key) in (None, "null", "", "N/A", "Unknown")
-                ]
-                if fields_missing:
-                    try:
-                        import anthropic as _anthropic
-                        _ac = _anthropic.Anthropic()
-                        _fields_desc = "\n".join(
-                            f'- {f.key}: {f.description or f.label}'
-                            for f in fields_missing
-                        )
-                        _msg = _ac.messages.create(
-                            model="claude-3-haiku-20240307",
-                            max_tokens=512,
-                            messages=[{
-                                "role": "user",
-                                "content": (
-                                    f"Extract these fields from the research text. "
-                                    f"Return ONLY a JSON object, no explanation.\n\n"
-                                    f"Fields:\n{_fields_desc}\n\n"
-                                    f"Research text:\n{raw[:3000]}\n\n"
-                                    f"Use null for any field not found. Return JSON only."
-                                ),
-                            }],
-                        )
-                        _claude_text = _msg.content[0].text
-                        _clean2 = _re.sub(r'```(?:json)?\s*|\s*```', '', _claude_text.strip())
-                        _claude_parsed = _json.loads(_clean2)
-                        parsed.update({k: v for k, v in _claude_parsed.items() if v not in (None, "null", "")})
-                    except Exception as _ce:
-                        logger.debug(f"Claude parse fallback failed: {_ce}")
-
-                for field in req.schema_fields:
-                    val = parsed.get(field.key, "")
-                    if val in (None, "null", "N/A", "Unknown", "n/a"):
-                        val = ""
-                    row[field.key] = str(val) if val else ""
+            try:
+                async for event in enrich_company(
+                    company_name=inp.company_name,
+                    domain=inp.domain,
+                    goal=req.goal,
+                    schema_fields=schema_fields,
+                ):
+                    if event["type"] == "row_done":
+                        row = event["row"]
+                    else:
+                        yield _sse(event)
+            except Exception as e:
+                logger.error(f"Enrich pipeline error for {inp.company_name}: {e}", exc_info=True)
 
             results.append(row)
             yield _sse({"type": "row", "row": row, "index": i, "total": len(req.inputs)})
@@ -380,7 +264,7 @@ async def enrich_task(req: EnrichTaskRequest):
             "type": "complete",
             "results": results,
             "total": len(results),
-            "succeeded": sum(1 for r in results if r["_status"] == "ok"),
+            "succeeded": sum(1 for r in results if r.get("_status") == "ok"),
         })
 
     return StreamingResponse(
