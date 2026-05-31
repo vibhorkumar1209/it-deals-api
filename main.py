@@ -261,57 +261,58 @@ async def enrich_task(req: EnrichTaskRequest):
             )
             company_schema = output_schema_tmpl
 
-            # Run Parallel.ai as a background task, yield heartbeats every 8s while waiting
-            research_task = asyncio.ensure_future(
+            # Build Claude prompt for direct research
+            import anthropic as _anthropic
+            _ac = _anthropic.Anthropic()
+            _fields_desc = "\n".join(
+                f'- {f.key}: {f.description or f.label} ({f.type})'
+                for f in req.schema_fields
+            )
+            _claude_prompt = (
+                f"Research the following for {inp.company_name} (website: {inp.domain}):\n\n"
+                f"{req.goal}\n\n"
+                f"Return a JSON object with these exact fields:\n{_fields_desc}\n\n"
+                f"Use null for any field you cannot confirm. Return ONLY the JSON object."
+            )
+
+            # Run Parallel.ai AND Claude concurrently — use whichever finishes first
+            parallel_task = asyncio.ensure_future(
                 parallel_research(query, output_schema=company_schema)
             )
+            claude_task = asyncio.ensure_future(
+                asyncio.to_thread(
+                    lambda: _ac.messages.create(
+                        model="claude-3-haiku-20240307",
+                        max_tokens=1024,
+                        messages=[{"role": "user", "content": _claude_prompt}],
+                    ).content[0].text
+                )
+            )
+
+            pending = {parallel_task, claude_task}
             elapsed = 0
             raw = None
-            while not research_task.done() and elapsed < 220:
-                try:
-                    done, _ = await asyncio.wait({research_task}, timeout=8)
-                    if done:
-                        raw = research_task.result()
-                        break
-                except Exception:
-                    break
+            while pending and elapsed < 220:
+                done, pending = await asyncio.wait(pending, timeout=8)
                 elapsed += 8
+                for t in done:
+                    if t.exception():
+                        logger.warning(f"Research task error: {t.exception()}")
+                        continue
+                    result = t.result()
+                    if result:
+                        raw = result
+                        break
+                if raw:
+                    break
                 yield _sse({
                     "type": "heartbeat",
                     "message": f"⏳ Researching {inp.company_name}… ({elapsed}s)"
                 })
-            if not research_task.done():
-                research_task.cancel()
 
-            # Fallback to Claude when Parallel.ai times out or returns nothing
-            if not raw:
-                yield _sse({"type": "heartbeat", "message": f"⚡ Switching to Claude for {inp.company_name}…"})
-                try:
-                    import anthropic as _anthropic
-                    _ac = _anthropic.Anthropic()
-                    _fields_desc = "\n".join(
-                        f'- {f.key}: {f.description or f.label} ({f.type})'
-                        for f in req.schema_fields
-                    )
-                    _claude_resp = await asyncio.to_thread(
-                        lambda: _ac.messages.create(
-                            model="claude-haiku-20240307",
-                            max_tokens=1024,
-                            messages=[{
-                                "role": "user",
-                                "content": (
-                                    f"Research the following for {inp.company_name} (website: {inp.domain}):\n\n"
-                                    f"{req.goal}\n\n"
-                                    f"Return a JSON object with these exact fields:\n{_fields_desc}\n\n"
-                                    f"Use null for any field you cannot confirm. Return ONLY the JSON object."
-                                ),
-                            }],
-                        )
-                    )
-                    raw = _claude_resp.content[0].text
-                    logger.info(f"Claude fallback for {inp.company_name}: {len(raw)} chars")
-                except Exception as _ce:
-                    logger.warning(f"Claude fallback failed for {inp.company_name}: {_ce}")
+            # Cancel whichever is still running
+            for t in pending:
+                t.cancel()
 
             row: dict = {
                 "company_name": inp.company_name,
@@ -342,7 +343,7 @@ async def enrich_task(req: EnrichTaskRequest):
                             for f in fields_missing
                         )
                         _msg = _ac.messages.create(
-                            model="claude-haiku-20240307",
+                            model="claude-3-haiku-20240307",
                             max_tokens=512,
                             messages=[{
                                 "role": "user",
