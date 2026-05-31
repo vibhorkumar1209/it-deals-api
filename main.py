@@ -375,46 +375,40 @@ async def debug(company: str = "HDFC Bank"):
 
 @app.get("/api/debug-enrich")
 async def debug_enrich():
-    """Diagnose enrichment: check keys, test Claude, test Parallel.ai."""
+    """Diagnose enrichment: check env keys and test Claude via thread."""
     import anthropic as _anthropic
+
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    apify_key     = os.getenv("APIFY_API_KEY", "")
+    parallel_key  = os.getenv("PARALLEL_API_KEY", "")
+    jina_key      = os.getenv("JINA_KEY", "")
+
     out: dict = {
         "env": {
-            "ANTHROPIC_API_KEY_set": bool(os.getenv("ANTHROPIC_API_KEY")),
-            "PARALLEL_API_KEY_set": bool(os.getenv("PARALLEL_API_KEY")),
+            "ANTHROPIC_API_KEY": "set" if anthropic_key else "MISSING",
+            "APIFY_API_KEY":     "set" if apify_key     else "MISSING",
+            "PARALLEL_API_KEY":  "set" if parallel_key  else "MISSING",
+            "JINA_KEY":          "set" if jina_key      else "MISSING",
         },
-        "claude_test": None,
-        "parallel_test": None,
+        "claude_test": "skipped — key missing",
+        "anthropic_version": _anthropic.__version__,
     }
-    # Test Claude
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+
     if anthropic_key:
-        try:
+        def _test_claude():
             ac = _anthropic.Anthropic(api_key=anthropic_key)
             msg = ac.messages.create(
                 model="claude-3-haiku-20240307",
-                max_tokens=50,
-                messages=[{"role": "user", "content": "Reply with just: OK"}],
+                max_tokens=20,
+                messages=[{"role": "user", "content": "Say OK"}],
             )
-            out["claude_test"] = msg.content[0].text
+            return msg.content[0].text
+        try:
+            result = await asyncio.to_thread(_test_claude)
+            out["claude_test"] = result
         except Exception as e:
             out["claude_test"] = f"ERROR: {e}"
-    else:
-        out["claude_test"] = "ANTHROPIC_API_KEY not set"
-    # Test Parallel.ai
-    from parallel_search import parallel_research
-    if os.getenv("PARALLEL_API_KEY"):
-        try:
-            result = await asyncio.wait_for(
-                parallel_research("What is 2+2?", output_schema="The answer as a number"),
-                timeout=30
-            )
-            out["parallel_test"] = result or "returned None"
-        except asyncio.TimeoutError:
-            out["parallel_test"] = "timeout after 30s"
-        except Exception as e:
-            out["parallel_test"] = f"ERROR: {e}"
-    else:
-        out["parallel_test"] = "PARALLEL_API_KEY not set"
+
     return out
 
 
