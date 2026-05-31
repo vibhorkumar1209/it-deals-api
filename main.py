@@ -283,6 +283,36 @@ async def enrich_task(req: EnrichTaskRequest):
             if not research_task.done():
                 research_task.cancel()
 
+            # Fallback to Claude when Parallel.ai times out or returns nothing
+            if not raw:
+                yield _sse({"type": "heartbeat", "message": f"⚡ Switching to Claude for {inp.company_name}…"})
+                try:
+                    import anthropic as _anthropic
+                    _ac = _anthropic.Anthropic()
+                    _fields_desc = "\n".join(
+                        f'- {f.key}: {f.description or f.label} ({f.type})'
+                        for f in req.schema_fields
+                    )
+                    _claude_resp = await asyncio.to_thread(
+                        lambda: _ac.messages.create(
+                            model="claude-haiku-20240307",
+                            max_tokens=1024,
+                            messages=[{
+                                "role": "user",
+                                "content": (
+                                    f"Research the following for {inp.company_name} (website: {inp.domain}):\n\n"
+                                    f"{req.goal}\n\n"
+                                    f"Return a JSON object with these exact fields:\n{_fields_desc}\n\n"
+                                    f"Use null for any field you cannot confirm. Return ONLY the JSON object."
+                                ),
+                            }],
+                        )
+                    )
+                    raw = _claude_resp.content[0].text
+                    logger.info(f"Claude fallback for {inp.company_name}: {len(raw)} chars")
+                except Exception as _ce:
+                    logger.warning(f"Claude fallback failed for {inp.company_name}: {_ce}")
+
             row: dict = {
                 "company_name": inp.company_name,
                 "domain": inp.domain,
