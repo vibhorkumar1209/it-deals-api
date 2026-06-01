@@ -252,7 +252,8 @@ async def _google_news_rss_search(queries: list[str], results_per_query: int = 1
                 domain = urlparse(u).netloc.lstrip("www.")
                 if any(domain == s or domain.endswith("." + s) for s in SKIP_DOMAINS):
                     continue
-                if "news.google.com" in u:
+                # Skip only the channel-level search page, keep article redirect URLs
+                if u == "https://news.google.com/" or "rss/search" in u:
                     continue
                 if u not in seen_u:
                     seen_u.add(u)

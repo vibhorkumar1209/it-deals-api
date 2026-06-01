@@ -438,7 +438,7 @@ async def debug_enrich():
         rss_url = f"https://news.google.com/rss/search?q={_qp('HDFC Bank IBM deal 2023')}&hl=en-US&gl=US&ceid=US:en"
         async with _httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             r = await client.get(rss_url, headers={"User-Agent": "Mozilla/5.0 (compatible; RSS reader)"})
-        urls = [u for u in _re2.findall(r'<link>([^<]+)</link>', r.text) if u.startswith("http") and "google.com" not in u][:4]
+        urls = [u for u in _re2.findall(r'<link>([^<]+)</link>', r.text) if u.startswith("http") and "rss/search" not in u and u != "https://news.google.com/"][:4]
         out["gnews_rss_test"] = {"status_code": r.status_code, "ok": r.is_success,
                                   "urls_found": len(urls), "sample": urls}
     except Exception as e:
