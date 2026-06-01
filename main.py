@@ -220,6 +220,7 @@ class EnrichTaskRequest(BaseModel):
     vendors: list[str] = Field(default_factory=list)    # extra vendor names to search
     sources: list[str] = Field(default_factory=list)    # domains for site: queries
     keywords: list[str] = Field(default_factory=list)   # extra deal signal keywords
+    run_t3: bool = Field(default=False)                 # opt-in: run Tier 3 keyword catch-all
 
 
 @app.post("/api/enrich-task")
@@ -260,6 +261,7 @@ async def enrich_task(req: EnrichTaskRequest):
                     extra_sources=req.sources,
                     extra_keywords=req.keywords,
                     industry=inp.industry,
+                    run_t3=req.run_t3,
                 ):
                     if event["type"] == "row_done":
                         deal_row = event["row"]

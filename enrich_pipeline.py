@@ -759,6 +759,7 @@ async def enrich_company(
     extra_sources: list[str] | None = None,
     extra_keywords: list[str] | None = None,
     industry: str = "",
+    run_t3: bool = False,
 ) -> AsyncGenerator[dict, None]:
     """
     Tiered enrichment pipeline powered by lists.json.
@@ -780,8 +781,8 @@ async def enrich_company(
     total_relevant = 0
 
     for tier in [1, 2, 3]:
-        # T3 is a last-resort catch-all — only run if T1+T2 found nothing at all
-        if tier == 3 and len(all_deals) > 0:
+        # T3 is opt-in only — skip unless user explicitly enabled it
+        if tier == 3 and not run_t3:
             break
 
         if tier == 1:
@@ -789,7 +790,7 @@ async def enrich_company(
         elif tier == 2:
             yield {"type": "heartbeat", "message": f"📈 Only {len(all_deals)} deals — escalating to Tier 2 (broader keywords + more vendors)…"}
         else:
-            yield {"type": "heartbeat", "message": f"📈 Still 0 deals after T1+T2 — Tier 3 keyword catch-all…"}
+            yield {"type": "heartbeat", "message": f"📈 Tier 3 keyword catch-all enabled — running deep search…"}
 
         task = asyncio.ensure_future(_run_tier(
             company_name, goal, schema_fields, year_range, tier, max_urls,
