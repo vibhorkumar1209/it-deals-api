@@ -90,24 +90,27 @@ def build_search_queries(company_name: str, goal: str, year_range: tuple[int, in
     queries: list[str] = []
     years = list(range(year_range[0], year_range[1] + 1))
 
-    # 1. Broad template × year (up to ~50 queries for 5 years × 10 templates)
-    for year in years:
-        for tmpl in BROAD_QUERY_TEMPLATES:
-            queries.append(tmpl.format(company=company_name, year=year))
+    yr_str = " OR ".join(str(y) for y in years)
 
-    # 2. Company × vendor pairs — all vendors, no year filter (catches undated articles)
-    for vendor in TOP_VENDORS:
-        queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement OR partnership')
+    # 1. High-value catch-alls (run first — fastest signal)
+    queries.append(f'"{company_name}" IT deal contract signed awarded ({yr_str})')
+    queries.append(f'"{company_name}" vendor selected outsourcing managed services ({yr_str})')
+    queries.append(f'"{company_name}" digital transformation technology partnership ({yr_str})')
+    queries.append(f'"{company_name}" ERP CRM cloud implementation agreement ({yr_str})')
 
-    # 3. Press-release wires — very high signal
+    # 2. Press-release wires — very high signal, one per year
     for year in years:
         queries.append(f'site:businesswire.com OR site:prnewswire.com "{company_name}" IT deal {year}')
         queries.append(f'site:economictimes.indiatimes.com OR site:financialexpress.com "{company_name}" technology contract {year}')
 
-    # 4. Catch-all across the whole range
-    yr_str = " OR ".join(str(y) for y in years)
-    queries.append(f'"{company_name}" IT deal contract signed awarded ({yr_str})')
-    queries.append(f'"{company_name}" vendor selected outsourcing managed services ({yr_str})')
+    # 3. Broad template × year (capped at 6 templates to keep total manageable)
+    for year in years:
+        for tmpl in BROAD_QUERY_TEMPLATES[:6]:
+            queries.append(tmpl.format(company=company_name, year=year))
+
+    # 4. Company × top vendors (year-agnostic — catches undated / evergreen articles)
+    for vendor in TOP_VENDORS[:20]:
+        queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement OR partnership')
 
     return queries
 
@@ -117,42 +120,48 @@ def build_search_queries(company_name: str, goal: str, year_range: tuple[int, in
 async def _apify_google_search(queries: list[str], results_per_query: int = 10) -> list[str]:
     """
     Search Google via Apify Google Search Scraper actor.
-    Sends all queries in one actor run — much faster than serial searches.
+    Batches queries in chunks of APIFY_BATCH_SIZE to avoid timeouts.
     Returns flat list of unique URLs from organic results.
     """
+    APIFY_BATCH_SIZE = 20
     if not APIFY_KEY or not queries:
         return []
-    try:
-        actor_url = (
-            "https://api.apify.com/v2/acts/apify~google-search-scraper"
-            f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout=60&memory=256"
-        )
-        payload = {
-            "queries": "\n".join(queries),   # one query per line
-            "maxPagesPerQuery": 1,
-            "resultsPerPage": results_per_query,
-            "countryCode": "us",
-            "languageCode": "en",
-        }
-        async with httpx.AsyncClient(timeout=70) as client:
-            r = await client.post(actor_url, json=payload)
+
+    seen: set[str] = set()
+    urls: list[str] = []
+
+    for batch_start in range(0, len(queries), APIFY_BATCH_SIZE):
+        batch = queries[batch_start: batch_start + APIFY_BATCH_SIZE]
+        try:
+            actor_url = (
+                "https://api.apify.com/v2/acts/apify~google-search-scraper"
+                f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout=90&memory=512"
+            )
+            payload = {
+                "queries": "\n".join(batch),
+                "maxPagesPerQuery": 1,
+                "resultsPerPage": results_per_query,
+                "countryCode": "us",
+                "languageCode": "en",
+            }
+            async with httpx.AsyncClient(timeout=100) as client:
+                r = await client.post(actor_url, json=payload)
             if not r.is_success:
-                logger.warning(f"Apify Google Search {r.status_code}: {r.text[:200]}")
-                return []
-            items = r.json()
-            urls: list[str] = []
-            seen: set[str] = set()
-            for item in items:
+                logger.warning(f"Apify Google Search batch {batch_start}: {r.status_code} {r.text[:150]}")
+                continue
+            for item in r.json():
                 for result in item.get("organicResults", []):
                     url = result.get("url", "")
                     if url and url not in seen:
                         seen.add(url)
                         urls.append(url)
-            logger.info(f"Apify Google Search: {len(urls)} URLs from {len(queries)} queries")
-            return urls
-    except Exception as e:
-        logger.warning(f"Apify Google Search error: {e}")
-        return []
+            logger.info(f"Apify batch {batch_start//APIFY_BATCH_SIZE+1}: +{len(urls)} URLs so far")
+        except Exception as e:
+            logger.warning(f"Apify Google Search batch {batch_start} error: {e}")
+            continue
+
+    logger.info(f"Apify Google Search total: {len(urls)} URLs from {len(queries)} queries")
+    return urls
 
 
 async def _jina_search_fallback(query: str) -> list[str]:
@@ -458,21 +467,24 @@ async def enrich_company(
         _search_window(company_name, goal, schema_fields, year_range, max_urls, seen_urls)
     )
     elapsed = 0
-    while not w1_task.done() and elapsed < 120:
+    while not w1_task.done() and elapsed < 180:
         done, _ = await asyncio.wait({w1_task}, timeout=8)
         elapsed += 8
         if done:
             break
-        yield {"type": "heartbeat", "message": f"🔍 Searching {w1_label}… ({elapsed}s)"}
+        batch_num = (elapsed // 100) + 1
+        yield {"type": "heartbeat", "message": f"🔍 Searching {w1_label}… batch {batch_num} ({elapsed}s)"}
 
     if not w1_task.done():
         w1_task.cancel()
+        logger.warning("Window 1 search timed out after 180s")
         w1_deals, w1_relevant, w1_urls = [], [], []
     else:
         try:
             w1_deals, w1_relevant, w1_urls = w1_task.result()
         except Exception as e:
             logger.warning(f"Window 1 error: {e}")
+            yield {"type": "heartbeat", "message": f"⚠️ Search error: {e}"}
             w1_deals, w1_relevant, w1_urls = [], [], []
 
     yield {"type": "heartbeat", "message": f"📋 Window {w1_label}: {len(w1_deals)} deals from {len(w1_relevant)} relevant pages"}
@@ -494,21 +506,24 @@ async def enrich_company(
             _search_window(company_name, goal, schema_fields, w2_range, max_urls, seen_urls)
         )
         elapsed = 0
-        while not w2_task.done() and elapsed < 120:
+        while not w2_task.done() and elapsed < 180:
             done, _ = await asyncio.wait({w2_task}, timeout=8)
             elapsed += 8
             if done:
                 break
-            yield {"type": "heartbeat", "message": f"🔍 Searching {w2_label}… ({elapsed}s)"}
+            batch_num = (elapsed // 100) + 1
+            yield {"type": "heartbeat", "message": f"🔍 Searching {w2_label}… batch {batch_num} ({elapsed}s)"}
 
         if not w2_task.done():
             w2_task.cancel()
+            logger.warning("Window 2 search timed out after 180s")
             w2_deals, w2_relevant = [], []
         else:
             try:
                 w2_deals, w2_relevant, _ = w2_task.result()
             except Exception as e:
                 logger.warning(f"Window 2 error: {e}")
+                yield {"type": "heartbeat", "message": f"⚠️ Window 2 error: {e}"}
                 w2_deals, w2_relevant = [], []
 
         yield {"type": "heartbeat", "message": f"📋 Window {w2_label}: {len(w2_deals)} deals from {len(w2_relevant)} relevant pages"}
