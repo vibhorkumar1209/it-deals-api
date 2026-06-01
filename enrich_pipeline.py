@@ -250,16 +250,24 @@ async def _bing_via_custom_scraper(queries: list[str], results_per_query: int = 
                 data = r.json()
                 if not data.get("success"):
                     return []
-                links = data.get("data", {}).get("links", [])
+                page_data = data.get("data", {})
+                # Bing wraps result hrefs in bing.com/ck/a tracking URLs.
+                # Real URLs appear as plain text citations in bodyText.
+                body_text = page_data.get("bodyText", "")
+                # Extract http(s) URLs from bodyText
+                raw_urls = re.findall(r'https?://[^\s\'"<>]+', body_text)
                 urls = []
-                for lnk in links:
-                    href = lnk.get("href", "")
+                seen_u: set = set()
+                for href in raw_urls:
+                    href = href.rstrip(".,;)")
                     if not href.startswith("http"):
                         continue
                     domain = urlparse(href).netloc.lstrip("www.")
                     if any(domain == s or domain.endswith("." + s) for s in SKIP_BING | SKIP_DOMAINS):
                         continue
-                    urls.append(href)
+                    if href not in seen_u:
+                        seen_u.add(href)
+                        urls.append(href)
                 return urls[:results_per_query]
         except Exception as e:
             logger.debug(f"Bing/custom scraper error: {e}")

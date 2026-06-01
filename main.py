@@ -445,9 +445,13 @@ async def debug_enrich():
             skip = {"bing.com", "microsoft.com", "msn.com"}
             urls = [lnk["href"] for lnk in links if lnk.get("href","").startswith("http")
                     and not any(s in lnk["href"] for s in skip)][:4]
+            import re as _re2
+            body = (body.get("data") or {}).get("bodyText", "") if not r.is_success else (r.json().get("data") or {}).get("bodyText", "")
+            raw = _re2.findall(r'https?://[^\s\'"<>]+', body)
+            result_urls = [u.rstrip(".,;)") for u in raw if not any(s in u for s in skip)][:4]
             out["bing_search_test"] = {"status_code": r.status_code, "ok": r.is_success,
-                                        "total_links": len(links), "result_urls": len(urls), "sample": urls[:3],
-                                        "all_hrefs": [lnk.get("href","")[:80] for lnk in links[:10]]}
+                                        "body_words": len(body.split()), "result_urls": len(result_urls),
+                                        "sample": result_urls[:3]}
         except Exception as e:
             out["bing_search_test"] = {"error": str(e)}
 
