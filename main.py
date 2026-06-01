@@ -204,6 +204,7 @@ async def extract(req: ReExtractRequest):
 class EnrichInput(BaseModel):
     company_name: str
     domain: str
+    industry: str = ""   # e.g. "banking", "retail", "manufacturing" — filters vendor list
 
 class SchemaField(BaseModel):
     key: str
@@ -258,6 +259,7 @@ async def enrich_task(req: EnrichTaskRequest):
                     extra_vendors=req.vendors,
                     extra_sources=req.sources,
                     extra_keywords=req.keywords,
+                    industry=inp.industry,
                 ):
                     if event["type"] == "row_done":
                         deal_row = event["row"]

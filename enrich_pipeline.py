@@ -91,6 +91,7 @@ def build_search_queries(
     extra_vendors: list[str] | None = None,
     extra_sources: list[str] | None = None,
     extra_keywords: list[str] | None = None,
+    industry: str = "",
 ) -> list[str]:
     """
     Tiered query builder using three independent lists from lists.json:
@@ -110,7 +111,31 @@ def build_search_queries(
     # ── Independent lists ─────────────────────────────────────────────────────
     # Put fallback (high-signal) vendors first, then full list — prevents obscure vendors in top-N
     _full_vendors = lists.get("vendors", _FALLBACK_VENDORS)
-    all_vendors  = list(dict.fromkeys((extra_vendors or []) + _FALLBACK_VENDORS + _full_vendors))
+    vendor_meta    = lists.get("vendor_meta", {})
+    vendor_cat_map = lists.get("vendor_cat_map", {})
+
+    # Industry filtering: if industry provided, prefer vendors whose sub_industry or
+    # primary_market contains a keyword from the industry string (case-insensitive)
+    if industry:
+        ind_lower = industry.lower()
+        ind_tokens = [t.strip() for t in ind_lower.replace(",", " ").split() if len(t.strip()) > 3]
+        def _industry_match(v: str) -> bool:
+            meta = vendor_meta.get(v, {})
+            haystack = (
+                meta.get("sub_industry", "") + " " +
+                meta.get("primary_market", "") + " " +
+                " ".join(vendor_cat_map.get(v, []))
+            ).lower()
+            return any(tok in haystack for tok in ind_tokens)
+        industry_vendors = [v for v in _full_vendors if _industry_match(v)]
+        # Industry-matched vendors first, then fallback list, then rest
+        all_vendors = list(dict.fromkeys(
+            (extra_vendors or []) + industry_vendors + _FALLBACK_VENDORS + _full_vendors
+        ))
+        logger.info(f"Industry filter '{industry}': {len(industry_vendors)} matched vendors prioritised")
+    else:
+        all_vendors = list(dict.fromkeys((extra_vendors or []) + _FALLBACK_VENDORS + _full_vendors))
+
     kw_product   = list(dict.fromkeys((extra_keywords or []) + lists.get("kw_product",    [])))
     kw_process   = list(dict.fromkeys(                         lists.get("kw_process",   [])))
     kw_technology= list(dict.fromkeys(                         lists.get("kw_technology", [])))
@@ -119,10 +144,6 @@ def build_search_queries(
     # Tier-based slice sizes
     n_vendors  = {1: TIER1_VENDORS,  2: TIER2_VENDORS,  3: TIER3_VENDORS}.get(tier, TIER1_VENDORS)
     vendors    = all_vendors[:n_vendors]
-
-    # ── Per-vendor metadata ───────────────────────────────────────────────────
-    vendor_meta    = lists.get("vendor_meta", {})
-    vendor_cat_map = lists.get("vendor_cat_map", {})
 
     # Build separate buckets — most targeted first so Apify cap hits best queries
     queries_vendor: list[str] = []
@@ -426,7 +447,7 @@ async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
         return out
 
     # Primary: Google News RSS (free, clean real URLs, no anti-bot)
-    raw = await _google_news_rss_search(queries, results_per_query=10)
+    raw = await _google_news_rss_search(queries, results_per_query=5)
     urls = _filter(raw)
     if urls:
         logger.info(f"Google News RSS returned {len(urls)} filtered URLs")
@@ -435,7 +456,7 @@ async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
 
     # Secondary: Apify Google Search Scraper
     if APIFY_KEY:
-        raw = await _apify_google_search(queries, results_per_query=10)
+        raw = await _apify_google_search(queries, results_per_query=5)
         urls = _filter(raw)
         if urls:
             return urls
@@ -675,6 +696,19 @@ def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schem
 
 MIN_DEALS_THRESHOLD = 25   # escalate to next tier if below this
 
+def _dedup_by_domain(urls: list[str], max_per_domain: int = 2) -> list[str]:
+    """Keep at most max_per_domain URLs per root domain to avoid scraping the same site repeatedly."""
+    from urllib.parse import urlparse
+    domain_count: dict[str, int] = {}
+    out: list[str] = []
+    for url in urls:
+        domain = urlparse(url).netloc.lstrip("www.")
+        if domain_count.get(domain, 0) < max_per_domain:
+            domain_count[domain] = domain_count.get(domain, 0) + 1
+            out.append(url)
+    return out
+
+
 async def _run_tier(
     company_name: str, goal: str, schema_fields: list[dict],
     year_range: tuple[int, int], tier: int, max_urls: int,
@@ -682,6 +716,7 @@ async def _run_tier(
     extra_vendors: list[str] | None,
     extra_sources: list[str] | None,
     extra_keywords: list[str] | None,
+    industry: str = "",
 ) -> tuple[list[dict], int]:
     """Run one search tier. Returns (deals, relevant_page_count)."""
     queries = build_search_queries(
@@ -689,9 +724,10 @@ async def _run_tier(
         extra_vendors=extra_vendors,
         extra_sources=extra_sources,
         extra_keywords=extra_keywords,
+        industry=industry,
     )
     raw_urls = await collect_urls(queries, max_urls=max_urls)
-    urls = [u for u in raw_urls if u not in seen_urls]
+    urls = _dedup_by_domain([u for u in raw_urls if u not in seen_urls])
     seen_urls.update(urls)
     if not urls:
         return [], 0
@@ -722,6 +758,7 @@ async def enrich_company(
     extra_vendors: list[str] | None = None,
     extra_sources: list[str] | None = None,
     extra_keywords: list[str] | None = None,
+    industry: str = "",
 ) -> AsyncGenerator[dict, None]:
     """
     Tiered enrichment pipeline powered by lists.json.
@@ -743,16 +780,20 @@ async def enrich_company(
     total_relevant = 0
 
     for tier in [1, 2, 3]:
+        # T3 is a last-resort catch-all — only run if T1+T2 found nothing at all
+        if tier == 3 and len(all_deals) > 0:
+            break
+
         if tier == 1:
             yield {"type": "heartbeat", "message": f"🔍 Tier 1 search for {company_name} (sources + top keywords + vendors)…"}
         elif tier == 2:
             yield {"type": "heartbeat", "message": f"📈 Only {len(all_deals)} deals — escalating to Tier 2 (broader keywords + more vendors)…"}
         else:
-            yield {"type": "heartbeat", "message": f"📈 Still {len(all_deals)} deals — Tier 3 catch-all search…"}
+            yield {"type": "heartbeat", "message": f"📈 Still 0 deals after T1+T2 — Tier 3 keyword catch-all…"}
 
         task = asyncio.ensure_future(_run_tier(
             company_name, goal, schema_fields, year_range, tier, max_urls,
-            seen_urls, extra_vendors, extra_sources, extra_keywords,
+            seen_urls, extra_vendors, extra_sources, extra_keywords, industry,
         ))
         elapsed = 0
         while not task.done() and elapsed < 1200:
