@@ -210,18 +210,20 @@ async def _apify_google_search(queries: list[str], results_per_query: int = 10) 
     if not APIFY_KEY or not queries:
         return []
     try:
+        # Cap queries to 40 max per call so Apify finishes within timeout
+        capped = queries[:40]
         actor_url = (
             "https://api.apify.com/v2/acts/apify~google-search-scraper"
-            f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout=60&memory=256"
+            f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout=180&memory=512"
         )
         payload = {
-            "queries": "\n".join(queries),   # one query per line
+            "queries": "\n".join(capped),    # one query per line
             "maxPagesPerQuery": 1,
             "resultsPerPage": results_per_query,
             "countryCode": "us",
             "languageCode": "en",
         }
-        async with httpx.AsyncClient(timeout=70) as client:
+        async with httpx.AsyncClient(timeout=200) as client:
             r = await client.post(actor_url, json=payload)
             if not r.is_success:
                 logger.warning(f"Apify Google Search {r.status_code}: {r.text[:200]}")
@@ -549,7 +551,7 @@ async def enrich_company(
     """
     lists = _load_lists()
     n_vendors  = len(lists.get("vendors", _FALLBACK_VENDORS))
-    n_keywords = len(lists.get("keyword_frequency", {}))
+    n_keywords = len(lists.get("all_keywords", []))
     n_sources  = len(lists.get("all_sources", []))
     yield {"type": "heartbeat", "message":
            f"📚 Lists loaded: {n_vendors:,} vendors · {n_keywords} keywords · {n_sources} sources"}
@@ -571,7 +573,7 @@ async def enrich_company(
             seen_urls, extra_vendors, extra_sources, extra_keywords,
         ))
         elapsed = 0
-        while not task.done() and elapsed < 120:
+        while not task.done() and elapsed < 240:
             done, _ = await asyncio.wait({task}, timeout=8)
             elapsed += 8
             if done:
