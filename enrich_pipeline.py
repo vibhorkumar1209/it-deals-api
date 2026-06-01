@@ -103,12 +103,13 @@ def build_search_queries(
     Tier 3 (~15q): broad catch-alls
     """
     lists  = _load_lists()
-    queries: list[str] = []
     years  = list(range(year_range[0], year_range[1] + 1))
     yr_str = " OR ".join(str(y) for y in years)
 
     # ── Independent lists ─────────────────────────────────────────────────────
-    all_vendors  = list(dict.fromkeys((extra_vendors  or []) + lists.get("vendors",       _FALLBACK_VENDORS)))
+    # Put fallback (high-signal) vendors first, then full list — prevents obscure vendors in top-N
+    _full_vendors = lists.get("vendors", _FALLBACK_VENDORS)
+    all_vendors  = list(dict.fromkeys((extra_vendors or []) + _FALLBACK_VENDORS + _full_vendors))
     kw_product   = list(dict.fromkeys((extra_keywords or []) + lists.get("kw_product",    [])))
     kw_process   = list(dict.fromkeys(                         lists.get("kw_process",   [])))
     kw_technology= list(dict.fromkeys(                         lists.get("kw_technology", [])))
@@ -118,81 +119,99 @@ def build_search_queries(
     n_vendors  = {1: TIER1_VENDORS,  2: TIER2_VENDORS,  3: len(all_vendors)}.get(tier, TIER1_VENDORS)
     vendors    = all_vendors[:n_vendors]
 
-    # ── 1. Broad anchors (always, every year) ────────────────────────────────
-    for year in years:
-        queries.append(f'"{company_name}" IT deal contract signed {year}')
-        queries.append(f'"{company_name}" technology outsourcing agreement {year}')
-
-    # ── 2. Source site: queries (always — highest precision) ─────────────────
-    for i in range(0, min(len(sources), 36), SOURCE_GROUP_SZ):
-        grp = sources[i: i + SOURCE_GROUP_SZ]
-        site_expr = " OR ".join(f"site:{s}" for s in grp)
-        queries.append(f'({site_expr}) "{company_name}" deal OR contract OR agreement ({yr_str})')
-
-    # ── Per-vendor metadata (sub_industry, primary_market, own keywords) ────────
+    # ── Per-vendor metadata ───────────────────────────────────────────────────
     vendor_meta    = lists.get("vendor_meta", {})
-    vendor_cat_map = lists.get("vendor_cat_map", {})   # from Frameworks file
+    vendor_cat_map = lists.get("vendor_cat_map", {})
+
+    # Build separate buckets — most targeted first so Apify cap hits best queries
+    queries_vendor: list[str] = []
+    queries_kw: list[str] = []
+    queries_site: list[str] = []
+    queries_broad: list[str] = []
 
     if tier == 1:
-        # ── 3T1. Product keywords (33) — what platforms were bought ───────────
-        for kw in kw_product:
-            queries.append(f'"{company_name}" "{kw}" deal OR contract OR implementation ({yr_str})')
-
-        # ── 4T1. Process keywords (first 20) — business area outsourced ───────
-        for kw in kw_process[:20]:
-            queries.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
-
-        # ── 5T1. Vendor + market context (most precise signal) ────────────────
+        # Vendor + market context (most precise — goes first in final list)
         for vendor in vendors:
-            meta  = vendor_meta.get(vendor, {})
+            meta   = vendor_meta.get(vendor, {})
             market = meta.get("primary_market", "")
             cats   = vendor_cat_map.get(vendor, [])
             if market:
-                queries.append(f'"{company_name}" "{vendor}" "{market}" deal OR contract ({yr_str})')
+                queries_vendor.append(f'"{company_name}" "{vendor}" "{market}" deal OR contract ({yr_str})')
             elif cats:
-                queries.append(f'"{company_name}" "{vendor}" "{cats[0]}" deal OR contract')
+                queries_vendor.append(f'"{company_name}" "{vendor}" "{cats[0]}" deal OR contract')
             else:
-                queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+                queries_vendor.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+
+        # Top product keywords (first 15)
+        for kw in kw_product[:15]:
+            queries_kw.append(f'"{company_name}" "{kw}" deal OR contract OR implementation ({yr_str})')
+
+        # Top process keywords (first 10)
+        for kw in kw_process[:10]:
+            queries_kw.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
+
+        # Site: queries — top 3 groups only
+        for i in range(0, min(len(sources), SOURCE_GROUP_SZ * 3), SOURCE_GROUP_SZ):
+            grp = sources[i: i + SOURCE_GROUP_SZ]
+            site_expr = " OR ".join(f"site:{s}" for s in grp)
+            queries_site.append(f'({site_expr}) "{company_name}" deal OR contract OR agreement ({yr_str})')
+
+        # Broad anchors (2 per year range)
+        queries_broad.append(f'"{company_name}" IT deal contract signed ({yr_str})')
+        queries_broad.append(f'"{company_name}" technology outsourcing agreement ({yr_str})')
 
     elif tier == 2:
-        # ── 3T2. Remaining process keywords (21–120) ─────────────────────────
-        for kw in kw_process[20:]:
-            queries.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
-
-        # ── 4T2. Technology keywords (first 50) ───────────────────────────────
-        for kw in kw_technology[:50]:
-            queries.append(f'"{company_name}" "{kw}" deal OR contract OR selected ({yr_str})')
-
-        # ── 5T2. Vendor + sub-industry + process keyword combos ───────────────
+        # Vendor + sub-industry + process keyword combos
         for vendor in vendors:
             meta    = vendor_meta.get(vendor, {})
             sub_ind = meta.get("sub_industry", "")
             vkw_pr  = meta.get("kw_process", [])
             if vkw_pr:
-                # vendor's own process keywords — hyper-targeted
                 for kw in vkw_pr[:2]:
-                    queries.append(f'"{company_name}" "{vendor}" "{kw}" ({yr_str})')
+                    queries_vendor.append(f'"{company_name}" "{vendor}" "{kw}" ({yr_str})')
             elif sub_ind:
-                queries.append(f'"{company_name}" "{vendor}" "{sub_ind}" contract OR deal')
+                queries_vendor.append(f'"{company_name}" "{vendor}" "{sub_ind}" contract OR deal')
             else:
-                queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+                queries_vendor.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+
+        # Remaining product keywords + first 50 process keywords
+        for kw in kw_product[15:]:
+            queries_kw.append(f'"{company_name}" "{kw}" deal OR contract OR implementation ({yr_str})')
+        for kw in kw_process[10:60]:
+            queries_kw.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
+
+        # Technology keywords (first 40)
+        for kw in kw_technology[:40]:
+            queries_kw.append(f'"{company_name}" "{kw}" deal OR contract OR selected ({yr_str})')
+
+        # Remaining site: groups
+        for i in range(SOURCE_GROUP_SZ * 3, min(len(sources), 36), SOURCE_GROUP_SZ):
+            grp = sources[i: i + SOURCE_GROUP_SZ]
+            site_expr = " OR ".join(f"site:{s}" for s in grp)
+            queries_site.append(f'({site_expr}) "{company_name}" deal OR contract OR agreement ({yr_str})')
 
     elif tier >= 3:
-        # ── 3T3. Remaining technology keywords ───────────────────────────────
-        for kw in kw_technology[50:]:
-            queries.append(f'"{company_name}" "{kw}" deal OR contract OR selected ({yr_str})')
-
-        # ── 4T3. Vendor + technology keyword combos ───────────────────────────
+        # Vendor + technology keyword combos
         for vendor in vendors:
-            meta    = vendor_meta.get(vendor, {})
+            meta     = vendor_meta.get(vendor, {})
             vkw_tech = meta.get("kw_technology", [])
             if vkw_tech:
                 for kw in vkw_tech[:2]:
-                    queries.append(f'"{company_name}" "{vendor}" "{kw}" ({yr_str})')
+                    queries_vendor.append(f'"{company_name}" "{vendor}" "{kw}" ({yr_str})')
             else:
-                queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
-        queries.append(f'"{company_name}" vendor selected partnership announcement ({yr_str})')
-        queries.append(f'"{company_name}" outsourcing managed services digital transformation ({yr_str})')
+                queries_vendor.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+
+        # Remaining process + all remaining tech keywords
+        for kw in kw_process[60:]:
+            queries_kw.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
+        for kw in kw_technology[40:]:
+            queries_kw.append(f'"{company_name}" "{kw}" deal OR contract OR selected ({yr_str})')
+
+        queries_broad.append(f'"{company_name}" vendor selected partnership announcement ({yr_str})')
+        queries_broad.append(f'"{company_name}" outsourcing managed services digital transformation ({yr_str})')
+
+    # Final order: vendor (most targeted) → kw → site → broad
+    queries = queries_vendor + queries_kw + queries_site + queries_broad
 
     logger.info(f"Tier {tier}: {len(queries)} queries for {company_name} "
                 f"({len(vendors)} vendors, sources={len(sources)})")
