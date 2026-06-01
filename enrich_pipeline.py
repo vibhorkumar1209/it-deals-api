@@ -266,37 +266,48 @@ async def _apify_google_search(queries: list[str], results_per_query: int = 10) 
 
 async def _scraperapi_google_search(queries: list[str], results_per_query: int = 10) -> list[str]:
     """
-    Search Google via ScraperAPI structured Google Search endpoint.
-    Runs queries in parallel batches of 5. No per-run cost overhead vs Apify actor.
+    Search Google via ScraperAPI by scraping Google search result pages.
+    Uses the standard scraping endpoint (works on all plans).
+    Parses organic result links from the returned HTML.
     """
     if not SCRAPER_API_KEY or not queries:
         return []
+
+    from urllib.parse import quote_plus
+    import re as _re
 
     capped = queries[:40]
 
     async def _one(query: str) -> list[str]:
         try:
+            google_url = f"https://www.google.com/search?q={quote_plus(query)}&num={results_per_query}&hl=en"
             async with httpx.AsyncClient(timeout=30) as client:
                 r = await client.get(
-                    "https://api.scraperapi.com/structured/google/search",
+                    "https://api.scraperapi.com/",
                     params={
                         "api_key": SCRAPER_API_KEY,
-                        "query": query,
-                        "num": results_per_query,
-                        "output": "json",
+                        "url": google_url,
+                        "render": "false",
                     },
                 )
                 if not r.is_success:
-                    logger.debug(f"ScraperAPI {r.status_code} for query: {query[:60]}")
+                    logger.debug(f"ScraperAPI {r.status_code} for: {query[:60]}")
                     return []
-                data = r.json()
-                return [item.get("link", "") for item in data.get("organic_results", []) if item.get("link")]
+                # Extract URLs from /url?q=... patterns in Google HTML
+                raw_links = _re.findall(r'/url\?q=(https?://[^&"]+)', r.text)
+                # Decode percent-encoding
+                from urllib.parse import unquote
+                links = [unquote(l) for l in raw_links]
+                # Filter out Google's own domains
+                links = [l for l in links if "google.com" not in l and "googleapis.com" not in l]
+                return links[:results_per_query]
         except Exception as e:
             logger.debug(f"ScraperAPI error: {e}")
             return []
 
     urls: list[str] = []
     seen: set[str] = set()
+    # Run in batches of 5 parallel requests
     for i in range(0, len(capped), 5):
         batch = capped[i: i + 5]
         results = await asyncio.gather(*[_one(q) for q in batch], return_exceptions=True)

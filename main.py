@@ -429,23 +429,28 @@ async def debug_enrich():
         except Exception as e:
             out["claude_test"] = f"ERROR: {e}"
 
-    # Test ScraperAPI Google Search with 1 query
+    # Test ScraperAPI — standard scraping endpoint (works on all plans)
     if scraper_api_key:
-        import httpx as _httpx
+        import httpx as _httpx, re as _re
+        from urllib.parse import quote_plus, unquote
         try:
+            google_url = f"https://www.google.com/search?q={quote_plus('HDFC Bank IBM deal 2023')}&num=5&hl=en"
             async with _httpx.AsyncClient(timeout=30) as client:
                 r = await client.get(
-                    "https://api.scraperapi.com/structured/google/search",
-                    params={"api_key": scraper_api_key, "query": '"HDFC Bank" IBM deal 2023', "num": 3, "output": "json"},
+                    "https://api.scraperapi.com/",
+                    params={"api_key": scraper_api_key, "url": google_url, "render": "false"},
                 )
-            body = r.json() if r.is_success else {}
-            urls = [x.get("link") for x in body.get("organic_results", []) if x.get("link")]
+            if r.is_success:
+                raw = _re.findall(r'/url\?q=(https?://[^&"]+)', r.text)
+                urls = [unquote(l) for l in raw if "google.com" not in l][:3]
+            else:
+                urls = []
             out["scraperapi_test"] = {
                 "status_code": r.status_code,
                 "ok": r.is_success,
                 "urls_found": len(urls),
-                "sample_urls": urls[:2],
-                "error": body.get("error") if not r.is_success else None,
+                "sample_urls": urls,
+                "error": r.text[:200] if not r.is_success else None,
             }
         except Exception as e:
             out["scraperapi_test"] = {"error": str(e)}
