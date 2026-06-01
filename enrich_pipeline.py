@@ -129,21 +129,29 @@ def build_search_queries(
         site_expr = " OR ".join(f"site:{s}" for s in grp)
         queries.append(f'({site_expr}) "{company_name}" deal OR contract OR agreement ({yr_str})')
 
+    # ── Categorised vendor pairs (highest precision — vendor + its category) ──
+    vendor_cat_map = lists.get("vendor_cat_map", {})
+
     if tier == 1:
-        # ── 3T1. Product keywords: "company bought/implemented <product>" ────
-        for kw in kw_product:                   # all 33 — very targeted
+        # ── 3T1. Product keywords ─────────────────────────────────────────────
+        for kw in kw_product:
             queries.append(f'"{company_name}" "{kw}" deal OR contract OR implementation ({yr_str})')
 
-        # ── 4T1. Process keywords: business areas (first 20) ─────────────────
+        # ── 4T1. Process keywords (first 20) ─────────────────────────────────
         for kw in kw_process[:20]:
             queries.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
 
-        # ── 5T1. Top vendors ──────────────────────────────────────────────────
+        # ── 5T1. Categorised vendor+category pairs (top vendors) ──────────────
         for vendor in vendors:
-            queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+            cats = vendor_cat_map.get(vendor, [])
+            if cats:
+                # Use first category as context — most precise query possible
+                queries.append(f'"{company_name}" "{vendor}" "{cats[0]}" OR deal OR contract')
+            else:
+                queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
 
     elif tier == 2:
-        # ── 3T2. Remaining process keywords (21–120) ─────────────────────────
+        # ── 3T2. Remaining process keywords ──────────────────────────────────
         for kw in kw_process[20:]:
             queries.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
 
@@ -151,9 +159,13 @@ def build_search_queries(
         for kw in kw_technology[:50]:
             queries.append(f'"{company_name}" "{kw}" deal OR contract OR selected ({yr_str})')
 
-        # ── 5T2. More vendors ─────────────────────────────────────────────────
+        # ── 5T2. More vendors with all their categories ───────────────────────
         for vendor in vendors:
-            queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+            cats = vendor_cat_map.get(vendor, [])
+            for cat in cats[:2]:   # up to 2 category queries per vendor
+                queries.append(f'"{company_name}" "{vendor}" "{cat}" contract OR selected')
+            if not cats:
+                queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
 
     elif tier >= 3:
         # ── 3T3. Remaining technology keywords ───────────────────────────────
