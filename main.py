@@ -215,6 +215,10 @@ class EnrichTaskRequest(BaseModel):
     goal: str = Field(..., min_length=10)
     schema_fields: list[SchemaField] = Field(..., min_length=1)
     inputs: list[EnrichInput] = Field(..., min_length=1, max_length=50)
+    # Optional enrichment boosters — merged with pipeline defaults when provided
+    vendors: list[str] = Field(default_factory=list)    # extra vendor names to search
+    sources: list[str] = Field(default_factory=list)    # domains for site: queries
+    keywords: list[str] = Field(default_factory=list)   # extra deal signal keywords
 
 
 @app.post("/api/enrich-task")
@@ -250,6 +254,9 @@ async def enrich_task(req: EnrichTaskRequest):
                     domain=inp.domain,
                     goal=req.goal,
                     schema_fields=schema_fields,
+                    extra_vendors=req.vendors,
+                    extra_sources=req.sources,
+                    extra_keywords=req.keywords,
                 ):
                     if event["type"] == "row_done":
                         deal_row = event["row"]

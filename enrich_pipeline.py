@@ -62,22 +62,58 @@ APIFY_KEY = os.getenv("APIFY_API_KEY", "")
 
 # ── Step 1: Generate search queries ──────────────────────────────────────────
 
-def build_search_queries(company_name: str, goal: str, year_range: tuple[int, int] = (2022, 2025)) -> list[str]:
-    """Generate search queries: company-only + company×vendor combinations."""
+def build_search_queries(
+    company_name: str,
+    goal: str,
+    year_range: tuple[int, int] = (2022, 2025),
+    extra_vendors: list[str] | None = None,
+    extra_sources: list[str] | None = None,
+    extra_keywords: list[str] | None = None,
+) -> list[str]:
+    """
+    Generate search queries combining:
+    - Generic deal templates × years
+    - Company × vendors (built-in + caller-supplied)
+    - site: queries for caller-supplied source domains
+    - Keyword-boosted catch-alls
+    """
     queries: list[str] = []
-    years = list(range(year_range[0], year_range[1] + 1))  # full 5-year range
+    years = list(range(year_range[0], year_range[1] + 1))
+    yr_str = " OR ".join(str(y) for y in years)
 
-    # Generic deal queries — one per year
+    # Merge vendor lists (caller list takes priority / deduped)
+    vendors = list(dict.fromkeys((extra_vendors or []) + TOP_VENDORS))
+
+    # Merge keyword signals
+    base_kw = ["IT deal", "technology contract", "outsourcing agreement",
+                "digital transformation", "managed services", "cloud migration",
+                "ERP implementation", "cybersecurity deal", "vendor selected"]
+    all_kw = list(dict.fromkeys((extra_keywords or []) + base_kw))
+
+    # 1. Generic deal queries per year
     for year in years:
         queries.append(f'"{company_name}" IT deal contract signed {year}')
         queries.append(f'"{company_name}" technology outsourcing agreement {year}')
 
-    # Company + vendor pairs — top vendors, year-agnostic (broad)
-    for vendor in TOP_VENDORS[:10]:
-        queries.append(f'"{company_name}" "{vendor}" deal contract agreement')
+    # 2. Keyword × year range (extra keywords get their own targeted queries)
+    for kw in (extra_keywords or [])[:10]:
+        queries.append(f'"{company_name}" {kw} ({yr_str})')
 
-    # Broad catch-all
-    queries.append(f'"{company_name}" digital transformation IT vendor selected 2020 2021 2022 2023 2024')
+    # 3. Company × vendor pairs (top vendors + caller vendors)
+    for vendor in vendors[:20]:
+        queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+
+    # 4. site: queries for caller-supplied sources (high-signal)
+    if extra_sources:
+        # Group up to 3 sources per query to avoid URL length limits
+        for i in range(0, min(len(extra_sources), 30), 3):
+            group = extra_sources[i: i + 3]
+            site_expr = " OR ".join(f'site:{s.strip()}' for s in group)
+            queries.append(f'({site_expr}) "{company_name}" deal contract ({yr_str})')
+
+    # 5. Broad catch-all
+    kw_sample = " OR ".join(f'"{k}"' for k in all_kw[:5])
+    queries.append(f'"{company_name}" ({kw_sample}) ({yr_str})')
 
     return queries
 
@@ -371,16 +407,29 @@ async def enrich_company(
     schema_fields: list[dict],
     year_range: tuple[int, int] = (2022, 2025),
     max_urls: int = 20,
+    extra_vendors: list[str] | None = None,
+    extra_sources: list[str] | None = None,
+    extra_keywords: list[str] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """
     Full enrichment pipeline for one company. Yields progress events then final row.
+    Accepts optional extra vendors, sources (domains), and keywords to boost coverage.
     """
-
     yield {"type": "heartbeat", "message": f"🔍 Building search queries for {company_name}…"}
 
     # Step 1: Generate queries
-    queries = build_search_queries(company_name, goal, year_range)
-    yield {"type": "heartbeat", "message": f"🔍 Running {len(queries)} searches for {company_name}…"}
+    queries = build_search_queries(
+        company_name, goal, year_range,
+        extra_vendors=extra_vendors,
+        extra_sources=extra_sources,
+        extra_keywords=extra_keywords,
+    )
+    boost_info = []
+    if extra_vendors:  boost_info.append(f"{len(extra_vendors)} vendors")
+    if extra_sources:  boost_info.append(f"{len(extra_sources)} sources")
+    if extra_keywords: boost_info.append(f"{len(extra_keywords)} keywords")
+    boost_str = f" [+{', '.join(boost_info)}]" if boost_info else ""
+    yield {"type": "heartbeat", "message": f"🔍 Running {len(queries)} searches for {company_name}{boost_str}…"}
 
     # Step 2: Collect URLs (run in batches, yield heartbeat between)
     url_collect_task = asyncio.ensure_future(collect_urls(queries, max_urls=max_urls))
