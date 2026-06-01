@@ -22,9 +22,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-JINA_KEY      = os.getenv("JINA_KEY", "")
-ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-APIFY_KEY     = os.getenv("APIFY_API_KEY", "")
+JINA_KEY       = os.getenv("JINA_KEY", "")
+ANTHROPIC_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
+APIFY_KEY      = os.getenv("APIFY_API_KEY", "")
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 
 # ── Load pre-built lists.json (vendors + keywords + sources) ─────────────────
 _LISTS: dict = {}
@@ -263,6 +264,54 @@ async def _apify_google_search(queries: list[str], results_per_query: int = 10) 
         return []
 
 
+async def _scraperapi_google_search(queries: list[str], results_per_query: int = 10) -> list[str]:
+    """
+    Search Google via ScraperAPI structured Google Search endpoint.
+    Runs queries in parallel batches of 5. No per-run cost overhead vs Apify actor.
+    """
+    if not SCRAPER_API_KEY or not queries:
+        return []
+
+    capped = queries[:40]
+
+    async def _one(query: str) -> list[str]:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    "https://api.scraperapi.com/structured/google/search",
+                    params={
+                        "api_key": SCRAPER_API_KEY,
+                        "query": query,
+                        "num": results_per_query,
+                        "output": "json",
+                    },
+                )
+                if not r.is_success:
+                    logger.debug(f"ScraperAPI {r.status_code} for query: {query[:60]}")
+                    return []
+                data = r.json()
+                return [item.get("link", "") for item in data.get("organic_results", []) if item.get("link")]
+        except Exception as e:
+            logger.debug(f"ScraperAPI error: {e}")
+            return []
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for i in range(0, len(capped), 5):
+        batch = capped[i: i + 5]
+        results = await asyncio.gather(*[_one(q) for q in batch], return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                continue
+            for url in result:
+                if url and url not in seen:
+                    seen.add(url)
+                    urls.append(url)
+
+    logger.info(f"ScraperAPI Google Search: {len(urls)} URLs from {len(capped)} queries")
+    return urls
+
+
 async def _jina_search_fallback(query: str) -> list[str]:
     """Fallback: Jina semantic search when Apify is unavailable."""
     if not JINA_KEY:
@@ -310,7 +359,16 @@ async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
                     break
         return out
 
-    # Primary: Apify Google Search (all queries in one call)
+    # Primary: ScraperAPI (parallel, no per-run overhead)
+    if SCRAPER_API_KEY:
+        raw = await _scraperapi_google_search(queries, results_per_query=10)
+        urls = _filter(raw)
+        if urls:
+            logger.info(f"ScraperAPI returned {len(urls)} filtered URLs")
+            return urls
+        logger.warning("ScraperAPI returned no URLs — trying Apify")
+
+    # Secondary: Apify Google Search Scraper
     if APIFY_KEY:
         raw = await _apify_google_search(queries, results_per_query=10)
         urls = _filter(raw)

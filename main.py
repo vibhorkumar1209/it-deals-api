@@ -396,17 +396,19 @@ async def debug_enrich():
     """Diagnose enrichment: check env keys and test Claude via thread."""
     import anthropic as _anthropic
 
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-    apify_key     = os.getenv("APIFY_API_KEY", "")
-    parallel_key  = os.getenv("PARALLEL_API_KEY", "")
-    jina_key      = os.getenv("JINA_KEY", "")
+    anthropic_key   = os.getenv("ANTHROPIC_API_KEY", "")
+    apify_key       = os.getenv("APIFY_API_KEY", "")
+    parallel_key    = os.getenv("PARALLEL_API_KEY", "")
+    jina_key        = os.getenv("JINA_KEY", "")
+    scraper_api_key = os.getenv("SCRAPER_API_KEY", "")
 
     out: dict = {
         "env": {
-            "ANTHROPIC_API_KEY": "set" if anthropic_key else "MISSING",
-            "APIFY_API_KEY":     "set" if apify_key     else "MISSING",
-            "PARALLEL_API_KEY":  "set" if parallel_key  else "MISSING",
-            "JINA_KEY":          "set" if jina_key      else "MISSING",
+            "ANTHROPIC_API_KEY": "set" if anthropic_key   else "MISSING",
+            "APIFY_API_KEY":     "set" if apify_key       else "MISSING",
+            "PARALLEL_API_KEY":  "set" if parallel_key    else "MISSING",
+            "JINA_KEY":          "set" if jina_key        else "MISSING",
+            "SCRAPER_API_KEY":   "set" if scraper_api_key else "MISSING",
         },
         "claude_test": "skipped — key missing",
         "anthropic_version": _anthropic.__version__,
@@ -426,6 +428,27 @@ async def debug_enrich():
             out["claude_test"] = result
         except Exception as e:
             out["claude_test"] = f"ERROR: {e}"
+
+    # Test ScraperAPI Google Search with 1 query
+    if scraper_api_key:
+        import httpx as _httpx
+        try:
+            async with _httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    "https://api.scraperapi.com/structured/google/search",
+                    params={"api_key": scraper_api_key, "query": '"HDFC Bank" IBM deal 2023', "num": 3, "output": "json"},
+                )
+            body = r.json() if r.is_success else {}
+            urls = [x.get("link") for x in body.get("organic_results", []) if x.get("link")]
+            out["scraperapi_test"] = {
+                "status_code": r.status_code,
+                "ok": r.is_success,
+                "urls_found": len(urls),
+                "sample_urls": urls[:2],
+                "error": body.get("error") if not r.is_success else None,
+            }
+        except Exception as e:
+            out["scraperapi_test"] = {"error": str(e)}
 
     # Test Apify Google Search with 1 query
     if apify_key:
