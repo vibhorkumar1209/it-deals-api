@@ -623,37 +623,26 @@ def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schem
         combined += f"\n\n[Source: {p['url']}]\n{snippet}"
     combined = combined[:24000]  # hard cap
 
-    if combined:
-        prompt = (
-            f"You are extracting IT deal records for {company_name} from scraped web content.\n\n"
-            f"GOAL: {goal}\n\n"
-            f"KNOWN VENDOR REFERENCE LIST (use for matching vendor names exactly):\n{vendor_hint}\n\n"
-            f"Extract EVERY distinct deal or contract mentioned. Each deal = one JSON object.\n"
-            f"Return a JSON ARRAY where each element has these exact keys:\n{fields_desc}\n\n"
-            f"Rules:\n"
-            f"- One object per deal/contract — do NOT merge multiple deals into one\n"
-            f"- Include deals from all years found in the content (2020–2025)\n"
-            f"- Match vendor names exactly to the reference list where possible\n"
-            f"- Use null for fields not mentioned for that specific deal\n"
-            f"- Be specific: exact vendor name, date, value, contract duration where stated\n"
-            f"- If no deals found, return an empty array []\n"
-            f"- Return ONLY the JSON array, no explanation\n\n"
-            f"SCRAPED CONTENT:\n{combined}"
-        )
-    else:
-        # No scraped pages — ask Claude from knowledge
-        prompt = (
-            f"List all known IT deals and technology contracts for {company_name} from 2020–2025.\n\n"
-            f"GOAL: {goal}\n\n"
-            f"KNOWN VENDOR REFERENCE LIST (use for matching vendor names):\n{vendor_hint}\n\n"
-            f"Return a JSON ARRAY where each element is one deal with these exact keys:\n{fields_desc}\n\n"
-            f"Rules:\n"
-            f"- One object per deal — do NOT merge multiple deals\n"
-            f"- Include as many distinct deals as you know (target 5–15 deals)\n"
-            f"- Match vendor names to the reference list where possible\n"
-            f"- Use null for fields you are not confident about\n"
-            f"- Return ONLY the JSON array, no explanation"
-        )
+    if not combined:
+        return []
+
+    prompt = (
+        f"You are extracting IT deal records for {company_name} from scraped web content.\n\n"
+        f"GOAL: {goal}\n\n"
+        f"KNOWN VENDOR REFERENCE LIST (use for matching vendor names exactly):\n{vendor_hint}\n\n"
+        f"Extract EVERY distinct deal or contract mentioned. Each deal = one JSON object.\n"
+        f"Return a JSON ARRAY where each element has these exact keys:\n{fields_desc}\n\n"
+        f"Rules:\n"
+        f"- One object per deal/contract — do NOT merge multiple deals into one\n"
+        f"- Include deals from all years found in the content (2020–2025)\n"
+        f"- Match vendor names exactly to the reference list where possible\n"
+        f"- Use null for fields not mentioned for that specific deal\n"
+        f"- Be specific: exact vendor name, date, value, contract duration where stated\n"
+        f"- Only extract deals supported by the scraped content — no guessing\n"
+        f"- If no deals found, return an empty array []\n"
+        f"- Return ONLY the JSON array, no explanation\n\n"
+        f"SCRAPED CONTENT:\n{combined}"
+    )
 
     try:
         ac = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -800,20 +789,12 @@ async def enrich_company(
         if len(all_deals) >= MIN_DEALS_THRESHOLD:
             break   # enough deals — stop escalating
 
-    # Fallback: Claude knowledge if nothing scraped across all tiers
     if not all_deals:
-        yield {"type": "heartbeat", "message": f"⚠️ No scraped deals — using Claude knowledge for {company_name}…"}
-        kb_deals = await asyncio.to_thread(_claude_extract_deals, [], company_name, goal, schema_fields)
-        if not kb_deals:
-            row = {"company_name": company_name, "domain": domain, "_status": "no_result", "_sources": 0}
-            for f in schema_fields:
-                row[f["key"]] = ""
-            yield {"type": "row_done", "row": row}
-            return
-        for deal in kb_deals:
-            row = {"company_name": company_name, "domain": domain, "_status": "ok", "_sources": 0}
-            row.update(deal)
-            yield {"type": "row_done", "row": row}
+        yield {"type": "heartbeat", "message": f"⚠️ No deals found from scraped content for {company_name} — skipping"}
+        row = {"company_name": company_name, "domain": domain, "_status": "no_result", "_sources": total_relevant}
+        for f in schema_fields:
+            row[f["key"]] = ""
+        yield {"type": "row_done", "row": row}
         return
 
     yield {"type": "heartbeat", "message": f"✅ {company_name}: {len(all_deals)} total deals"}
