@@ -22,42 +22,62 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# ── Top vendors to combine in searches ───────────────────────────────────────
-# A curated shortlist covering the most commonly found IT deal vendors.
-# Used to build targeted "company + vendor" search queries.
-TOP_VENDORS = [
-    # Global SIs
+JINA_KEY      = os.getenv("JINA_KEY", "")
+ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+APIFY_KEY     = os.getenv("APIFY_API_KEY", "")
+
+# ── Load pre-built lists.json (vendors + keywords + sources) ─────────────────
+_LISTS: dict = {}
+
+def _load_lists() -> dict:
+    global _LISTS
+    if _LISTS:
+        return _LISTS
+    candidates = [
+        os.path.join(os.path.dirname(__file__), "lists.json"),
+        "/app/lists.json",           # Render
+        "lists.json",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    _LISTS = json.load(f)
+                logger.info(f"Loaded lists.json: {len(_LISTS.get('vendors', []))} vendors, "
+                            f"{len(_LISTS.get('keyword_frequency', {}))} keywords, "
+                            f"{len(_LISTS.get('all_sources', []))} sources")
+                return _LISTS
+            except Exception as e:
+                logger.warning(f"Failed to load lists.json from {path}: {e}")
+    logger.warning("lists.json not found — using built-in fallback vendors")
+    return {}
+
+
+# ── Fallback vendor list (used when lists.json not present) ──────────────────
+_FALLBACK_VENDORS = [
     "TCS", "Infosys", "Wipro", "HCLTech", "Accenture", "IBM", "Cognizant",
-    "Capgemini", "DXC Technology", "Tech Mahindra",
-    # ERP / Cloud platforms
-    "SAP", "Oracle", "Microsoft", "AWS", "Google Cloud", "Salesforce",
-    "ServiceNow", "Workday", "SAP S/4HANA",
-    # Cybersecurity
-    "Palo Alto Networks", "CrowdStrike", "Fortinet", "Zscaler",
-    # Analytics / Data
-    "Snowflake", "Databricks", "SAS",
-    # Banking / Fintech
-    "Temenos", "Finacle", "Newgen", "FIS", "Fiserv", "Finastra",
-    # Managed Services
-    "Atos", "NTT", "Unisys",
+    "Capgemini", "DXC Technology", "Tech Mahindra", "SAP", "Oracle",
+    "Microsoft", "AWS", "Google Cloud", "Salesforce", "ServiceNow",
+    "Workday", "Palo Alto Networks", "Snowflake", "Temenos", "Finacle",
+    "FIS", "Fiserv", "Finastra", "Atos", "NTT", "Unisys",
 ]
 
-# ── Deal search keywords ──────────────────────────────────────────────────────
-DEAL_KEYWORDS = [
-    "deal", "contract", "signed", "awarded", "selected", "partnership",
-    "outsourcing", "implementation", "agreement", "go-live", "digital transformation",
-]
-
-# ── Domains to skip (social, aggregators with no article text) ────────────────
+# ── Domains to skip ───────────────────────────────────────────────────────────
 SKIP_DOMAINS = {
     "linkedin.com", "twitter.com", "x.com", "facebook.com", "instagram.com",
     "youtube.com", "reddit.com", "quora.com", "wikipedia.org",
     "glassdoor.com", "indeed.com", "crunchbase.com",
 }
 
-JINA_KEY = os.getenv("JINA_KEY", "")
-ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-APIFY_KEY = os.getenv("APIFY_API_KEY", "")
+# ── Tiered query budget ───────────────────────────────────────────────────────
+# Tier 1 (always): sources + top-N keywords → ~30 queries, fast + cheap
+# Tier 2 (if < MIN_DEALS): vendor pairs + more keywords → +25 queries
+# Tier 3 (if still thin): broader catch-alls → +15 queries
+TIER1_KEYWORDS   = 8    # top keywords by vendor-coverage frequency
+TIER1_VENDORS    = 10   # top vendors from lists (or fallback)
+TIER2_KEYWORDS   = 15
+TIER2_VENDORS    = 20
+SOURCE_GROUP_SZ  = 3    # domains per site: query
 
 
 # ── Step 1: Generate search queries ──────────────────────────────────────────
@@ -66,55 +86,71 @@ def build_search_queries(
     company_name: str,
     goal: str,
     year_range: tuple[int, int] = (2022, 2025),
+    tier: int = 1,
     extra_vendors: list[str] | None = None,
     extra_sources: list[str] | None = None,
     extra_keywords: list[str] | None = None,
 ) -> list[str]:
     """
-    Generate search queries combining:
-    - Generic deal templates × years
-    - Company × vendors (built-in + caller-supplied)
-    - site: queries for caller-supplied source domains
-    - Keyword-boosted catch-alls
+    Tiered query builder powered by lists.json.
+
+    Tier 1 (~30 queries): sources + top-8 keywords + top-10 vendors
+    Tier 2 (~25 more):    more keywords + more vendors
+    Tier 3 (~15 more):    broad catch-alls
+
+    extra_* from the request take priority over lists.json defaults.
     """
+    lists   = _load_lists()
     queries: list[str] = []
-    years = list(range(year_range[0], year_range[1] + 1))
-    yr_str = " OR ".join(str(y) for y in years)
+    years   = list(range(year_range[0], year_range[1] + 1))
+    yr_str  = " OR ".join(str(y) for y in years)
 
-    # Merge vendor lists (caller list takes priority / deduped)
-    vendors = list(dict.fromkeys((extra_vendors or []) + TOP_VENDORS))
+    # ── Resolve vendors ───────────────────────────────────────────────────────
+    list_vendors = lists.get("vendors", _FALLBACK_VENDORS)
+    n_vendors = TIER2_VENDORS if tier >= 2 else TIER1_VENDORS
+    # Caller-supplied vendors go first (most specific), then lists.json
+    vendors = list(dict.fromkeys((extra_vendors or []) + list_vendors))[:n_vendors]
 
-    # Merge keyword signals
-    base_kw = ["IT deal", "technology contract", "outsourcing agreement",
-                "digital transformation", "managed services", "cloud migration",
-                "ERP implementation", "cybersecurity deal", "vendor selected"]
-    all_kw = list(dict.fromkeys((extra_keywords or []) + base_kw))
+    # ── Resolve keywords ──────────────────────────────────────────────────────
+    ranked_kw = lists.get("top_keywords_ranked", [])
+    n_kw = TIER2_KEYWORDS if tier >= 2 else TIER1_KEYWORDS
+    keywords = list(dict.fromkeys((extra_keywords or []) + ranked_kw))[:n_kw]
 
-    # 1. Generic deal queries per year
+    # ── Resolve sources ───────────────────────────────────────────────────────
+    list_sources = lists.get("all_sources", [])
+    sources = list(dict.fromkeys((extra_sources or []) + list_sources))
+
+    # ── Build queries ─────────────────────────────────────────────────────────
+
+    # 1. Always: broad deal anchors per year (small, high-recall)
     for year in years:
         queries.append(f'"{company_name}" IT deal contract signed {year}')
         queries.append(f'"{company_name}" technology outsourcing agreement {year}')
 
-    # 2. Keyword × year range (extra keywords get their own targeted queries)
-    for kw in (extra_keywords or [])[:10]:
-        queries.append(f'"{company_name}" {kw} ({yr_str})')
+    # 2. Always: site: queries against known sources (highest precision)
+    #    Group sources 3/query to keep query string short
+    for i in range(0, min(len(sources), 36), SOURCE_GROUP_SZ):
+        grp = sources[i: i + SOURCE_GROUP_SZ]
+        site_expr = " OR ".join(f"site:{s}" for s in grp)
+        queries.append(f'({site_expr}) "{company_name}" deal OR contract OR agreement ({yr_str})')
 
-    # 3. Company × vendor pairs (top vendors + caller vendors)
-    for vendor in vendors[:20]:
+    # 3. Company × top keywords (keyword = deal category signal)
+    for kw in keywords:
+        queries.append(f'"{company_name}" "{kw}" deal OR contract OR signed ({yr_str})')
+
+    # 4. Company × vendor pairs (vendor name is most precise signal)
+    for vendor in vendors:
         queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
 
-    # 4. site: queries for caller-supplied sources (high-signal)
-    if extra_sources:
-        # Group up to 3 sources per query to avoid URL length limits
-        for i in range(0, min(len(extra_sources), 30), 3):
-            group = extra_sources[i: i + 3]
-            site_expr = " OR ".join(f'site:{s.strip()}' for s in group)
-            queries.append(f'({site_expr}) "{company_name}" deal contract ({yr_str})')
+    if tier >= 3:
+        # 5. Tier 3: catch-alls with OR-chained keywords
+        kw_or = " OR ".join(f'"{k}"' for k in keywords[:6])
+        queries.append(f'"{company_name}" ({kw_or}) signed awarded ({yr_str})')
+        queries.append(f'"{company_name}" vendor selected partnership announcement ({yr_str})')
+        queries.append(f'"{company_name}" outsourcing managed services digital transformation ({yr_str})')
 
-    # 5. Broad catch-all
-    kw_sample = " OR ".join(f'"{k}"' for k in all_kw[:5])
-    queries.append(f'"{company_name}" ({kw_sample}) ({yr_str})')
-
+    logger.info(f"Built {len(queries)} tier-{tier} queries for {company_name} "
+                f"({len(vendors)} vendors, {len(keywords)} keywords, {len(sources)} sources)")
     return queries
 
 
@@ -318,6 +354,7 @@ def is_deal_page(text: str, company_name: str) -> bool:
 def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schema_fields: list[dict]) -> list[dict]:
     """
     Call Claude to extract MULTIPLE deal rows from scraped pages.
+    Injects the known vendor list so Claude can match vendor names precisely.
     Returns a list of dicts, one per distinct deal found.
     Runs in a thread (blocking Anthropic SDK call).
     """
@@ -332,6 +369,11 @@ def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schem
     )
     field_keys = [f["key"] for f in schema_fields]
 
+    # Inject vendor list as a recognition aid (first 200 vendors to stay within token budget)
+    lists = _load_lists()
+    vendor_list = lists.get("vendors", _FALLBACK_VENDORS)
+    vendor_hint = ", ".join(vendor_list[:200])
+
     # Combine page texts, truncate to fit context
     combined = ""
     for p in pages[:12]:
@@ -343,11 +385,13 @@ def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schem
         prompt = (
             f"You are extracting IT deal records for {company_name} from scraped web content.\n\n"
             f"GOAL: {goal}\n\n"
+            f"KNOWN VENDOR REFERENCE LIST (use for matching vendor names exactly):\n{vendor_hint}\n\n"
             f"Extract EVERY distinct deal or contract mentioned. Each deal = one JSON object.\n"
             f"Return a JSON ARRAY where each element has these exact keys:\n{fields_desc}\n\n"
             f"Rules:\n"
             f"- One object per deal/contract — do NOT merge multiple deals into one\n"
             f"- Include deals from all years found in the content (2020–2025)\n"
+            f"- Match vendor names exactly to the reference list where possible\n"
             f"- Use null for fields not mentioned for that specific deal\n"
             f"- Be specific: exact vendor name, date, value, contract duration where stated\n"
             f"- If no deals found, return an empty array []\n"
@@ -359,10 +403,12 @@ def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schem
         prompt = (
             f"List all known IT deals and technology contracts for {company_name} from 2020–2025.\n\n"
             f"GOAL: {goal}\n\n"
+            f"KNOWN VENDOR REFERENCE LIST (use for matching vendor names):\n{vendor_hint}\n\n"
             f"Return a JSON ARRAY where each element is one deal with these exact keys:\n{fields_desc}\n\n"
             f"Rules:\n"
             f"- One object per deal — do NOT merge multiple deals\n"
             f"- Include as many distinct deals as you know (target 5–15 deals)\n"
+            f"- Match vendor names to the reference list where possible\n"
             f"- Use null for fields you are not confident about\n"
             f"- Return ONLY the JSON array, no explanation"
         )
@@ -400,123 +446,130 @@ def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schem
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
+MIN_DEALS_THRESHOLD = 10   # escalate to next tier if below this
+
+async def _run_tier(
+    company_name: str, goal: str, schema_fields: list[dict],
+    year_range: tuple[int, int], tier: int, max_urls: int,
+    seen_urls: set,
+    extra_vendors: list[str] | None,
+    extra_sources: list[str] | None,
+    extra_keywords: list[str] | None,
+) -> tuple[list[dict], int]:
+    """Run one search tier. Returns (deals, relevant_page_count)."""
+    queries = build_search_queries(
+        company_name, goal, year_range, tier=tier,
+        extra_vendors=extra_vendors,
+        extra_sources=extra_sources,
+        extra_keywords=extra_keywords,
+    )
+    raw_urls = await collect_urls(queries, max_urls=max_urls)
+    urls = [u for u in raw_urls if u not in seen_urls]
+    seen_urls.update(urls)
+    if not urls:
+        return [], 0
+
+    # Scrape
+    if APIFY_KEY:
+        scraped: list[dict] = []
+        for i in range(0, len(urls), 10):
+            scraped.extend(await scrape_urls_apify(urls[i: i + 10]))
+    else:
+        scraped = await scrape_urls_jina_fallback(urls[:15])
+
+    relevant = [p for p in scraped if is_deal_page(p["text"], company_name)]
+    pages_to_use = relevant if relevant else scraped[:5]
+    deals = await asyncio.to_thread(_claude_extract_deals, pages_to_use, company_name, goal, schema_fields)
+    return deals, len(relevant)
+
+
 async def enrich_company(
     company_name: str,
     domain: str,
     goal: str,
     schema_fields: list[dict],
     year_range: tuple[int, int] = (2022, 2025),
-    max_urls: int = 20,
+    max_urls: int = 30,
     extra_vendors: list[str] | None = None,
     extra_sources: list[str] | None = None,
     extra_keywords: list[str] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """
-    Full enrichment pipeline for one company. Yields progress events then final row.
-    Accepts optional extra vendors, sources (domains), and keywords to boost coverage.
+    Tiered enrichment pipeline powered by lists.json.
+
+    Tier 1 (~30 queries): all 32 sources + top-8 keywords + top-10 vendors
+    Tier 2 (~25 more):    top-15 keywords + top-20 vendors  (if <10 deals found)
+    Tier 3 (~15 more):    broad catch-alls                  (if still <10 deals)
+    Fallback:             Claude knowledge                  (if no URLs found at all)
     """
-    yield {"type": "heartbeat", "message": f"🔍 Building search queries for {company_name}…"}
+    lists = _load_lists()
+    n_vendors  = len(lists.get("vendors", _FALLBACK_VENDORS))
+    n_keywords = len(lists.get("keyword_frequency", {}))
+    n_sources  = len(lists.get("all_sources", []))
+    yield {"type": "heartbeat", "message":
+           f"📚 Lists loaded: {n_vendors:,} vendors · {n_keywords} keywords · {n_sources} sources"}
 
-    # Step 1: Generate queries
-    queries = build_search_queries(
-        company_name, goal, year_range,
-        extra_vendors=extra_vendors,
-        extra_sources=extra_sources,
-        extra_keywords=extra_keywords,
-    )
-    boost_info = []
-    if extra_vendors:  boost_info.append(f"{len(extra_vendors)} vendors")
-    if extra_sources:  boost_info.append(f"{len(extra_sources)} sources")
-    if extra_keywords: boost_info.append(f"{len(extra_keywords)} keywords")
-    boost_str = f" [+{', '.join(boost_info)}]" if boost_info else ""
-    yield {"type": "heartbeat", "message": f"🔍 Running {len(queries)} searches for {company_name}{boost_str}…"}
+    seen_urls: set = set()
+    all_deals: list[dict] = []
+    total_relevant = 0
 
-    # Step 2: Collect URLs (run in batches, yield heartbeat between)
-    url_collect_task = asyncio.ensure_future(collect_urls(queries, max_urls=max_urls))
-    elapsed = 0
-    while not url_collect_task.done() and elapsed < 90:
-        done, _ = await asyncio.wait({url_collect_task}, timeout=8)
-        elapsed += 8
-        if done:
-            break
-        yield {"type": "heartbeat", "message": f"🔍 Searching… ({elapsed}s)"}
-    if not url_collect_task.done():
-        url_collect_task.cancel()
-        urls: list[str] = []
-    else:
-        try:
-            urls = url_collect_task.result()
-        except Exception:
-            urls = []
+    for tier in [1, 2, 3]:
+        if tier == 1:
+            yield {"type": "heartbeat", "message": f"🔍 Tier 1 search for {company_name} (sources + top keywords + vendors)…"}
+        elif tier == 2:
+            yield {"type": "heartbeat", "message": f"📈 Only {len(all_deals)} deals — escalating to Tier 2 (broader keywords + more vendors)…"}
+        else:
+            yield {"type": "heartbeat", "message": f"📈 Still {len(all_deals)} deals — Tier 3 catch-all search…"}
 
-    if not urls:
-        yield {"type": "heartbeat", "message": f"⚠️ No URLs found — using Claude knowledge for {company_name}…"}
-        deals: list[dict] = await asyncio.to_thread(
-            _claude_extract_deals, [], company_name, goal, schema_fields
-        )
-        if not deals:
+        task = asyncio.ensure_future(_run_tier(
+            company_name, goal, schema_fields, year_range, tier, max_urls,
+            seen_urls, extra_vendors, extra_sources, extra_keywords,
+        ))
+        elapsed = 0
+        while not task.done() and elapsed < 120:
+            done, _ = await asyncio.wait({task}, timeout=8)
+            elapsed += 8
+            if done:
+                break
+            yield {"type": "heartbeat", "message": f"🔍 Tier {tier} searching… ({elapsed}s)"}
+
+        if not task.done():
+            task.cancel()
+            tier_deals, tier_relevant = [], 0
+        else:
+            try:
+                tier_deals, tier_relevant = task.result()
+            except Exception as e:
+                logger.warning(f"Tier {tier} error: {e}")
+                tier_deals, tier_relevant = [], 0
+
+        total_relevant += tier_relevant
+        yield {"type": "heartbeat", "message": f"📋 Tier {tier}: {len(tier_deals)} deals from {tier_relevant} relevant pages"}
+
+        for deal in tier_deals:
+            row = {"company_name": company_name, "domain": domain,
+                   "_status": "ok", "_sources": total_relevant}
+            row.update(deal)
+            all_deals.append(deal)
+            yield {"type": "row_done", "row": row}
+
+        if len(all_deals) >= MIN_DEALS_THRESHOLD:
+            break   # enough deals — stop escalating
+
+    # Fallback: Claude knowledge if nothing scraped across all tiers
+    if not all_deals:
+        yield {"type": "heartbeat", "message": f"⚠️ No scraped deals — using Claude knowledge for {company_name}…"}
+        kb_deals = await asyncio.to_thread(_claude_extract_deals, [], company_name, goal, schema_fields)
+        if not kb_deals:
             row = {"company_name": company_name, "domain": domain, "_status": "no_result", "_sources": 0}
             for f in schema_fields:
                 row[f["key"]] = ""
             yield {"type": "row_done", "row": row}
             return
-        yield {"type": "heartbeat", "message": f"✅ Found {len(deals)} deals for {company_name} (from knowledge)"}
-        for deal in deals:
+        for deal in kb_deals:
             row = {"company_name": company_name, "domain": domain, "_status": "ok", "_sources": 0}
             row.update(deal)
             yield {"type": "row_done", "row": row}
         return
 
-    yield {"type": "heartbeat", "message": f"🕸️ Scraping {len(urls)} URLs for {company_name}…"}
-
-    # Step 3: Scrape via Apify (or Jina fallback)
-    if APIFY_KEY:
-        # Scrape in batches of 10 to stay within Apify timeout
-        scraped: list[dict] = []
-        for i in range(0, len(urls), 10):
-            batch = urls[i: i + 10]
-            batch_result = await scrape_urls_apify(batch)
-            scraped.extend(batch_result)
-            if i + 10 < len(urls):
-                yield {"type": "heartbeat", "message": f"🕸️ Scraped {len(scraped)} pages… ({i+10}/{len(urls)})"}
-    else:
-        yield {"type": "heartbeat", "message": f"🕸️ Scraping via Jina (no Apify key)…"}
-        scraped = await scrape_urls_jina_fallback(urls[:10])
-
-    yield {"type": "heartbeat", "message": f"✅ Scraped {len(scraped)} pages — identifying deals…"}
-
-    # Step 4: Filter deal-relevant pages
-    relevant = [p for p in scraped if is_deal_page(p["text"], company_name)]
-    yield {"type": "heartbeat", "message": f"📋 {len(relevant)}/{len(scraped)} pages are deal-relevant — extracting…"}
-
-    # Step 5: Extract multiple deals with Claude
-    pages_to_use = relevant if relevant else scraped[:5]
-    deals: list[dict] = await asyncio.to_thread(
-        _claude_extract_deals, pages_to_use, company_name, goal, schema_fields
-    )
-
-    if not deals:
-        # No deals extracted — yield a no_result row
-        row: dict = {
-            "company_name": company_name,
-            "domain": domain,
-            "_status": "no_result",
-            "_sources": len(relevant),
-        }
-        for f in schema_fields:
-            row[f["key"]] = ""
-        yield {"type": "row_done", "row": row}
-        return
-
-    yield {"type": "heartbeat", "message": f"✅ Found {len(deals)} deals for {company_name}"}
-
-    # Yield one row per deal
-    for deal in deals:
-        row = {
-            "company_name": company_name,
-            "domain": domain,
-            "_status": "ok",
-            "_sources": len(relevant),
-        }
-        row.update(deal)
-        yield {"type": "row_done", "row": row}
+    yield {"type": "heartbeat", "message": f"✅ {company_name}: {len(all_deals)} total deals"}
