@@ -430,6 +430,13 @@ async def debug_enrich():
             out["claude_test"] = f"ERROR: {e}"
 
     # Test ScraperAPI — standard scraping endpoint (works on all plans)
+    out["scraperapi_key_debug"] = {
+        "length": len(scraper_api_key),
+        "prefix": scraper_api_key[:6] + "..." if scraper_api_key else "",
+        "has_spaces": " " in scraper_api_key,
+        "has_newline": "\n" in scraper_api_key or "\r" in scraper_api_key,
+        "has_quotes": '"' in scraper_api_key or "'" in scraper_api_key,
+    }
     if scraper_api_key:
         import httpx as _httpx, re as _re
         from urllib.parse import quote_plus, unquote
