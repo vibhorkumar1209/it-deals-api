@@ -92,65 +92,82 @@ def build_search_queries(
     extra_keywords: list[str] | None = None,
 ) -> list[str]:
     """
-    Tiered query builder powered by lists.json.
+    Tiered query builder using three independent lists from lists.json:
+      - vendors    (18,906): searched as named parties in deals
+      - kw_product (33):     product/platform names — searched as "what was bought"
+      - kw_process (120):    business processes    — searched as deal context
+      - kw_technology (150): technology terms      — searched as deal type
 
-    Tier 1 (~30 queries): sources + top-8 keywords + top-10 vendors
-    Tier 2 (~25 more):    more keywords + more vendors
-    Tier 3 (~15 more):    broad catch-alls
-
-    extra_* from the request take priority over lists.json defaults.
+    Tier 1 (~35q): all sources + product kw + process kw sample + top vendors
+    Tier 2 (~30q): technology kw + more vendors
+    Tier 3 (~15q): broad catch-alls
     """
-    lists   = _load_lists()
+    lists  = _load_lists()
     queries: list[str] = []
-    years   = list(range(year_range[0], year_range[1] + 1))
-    yr_str  = " OR ".join(str(y) for y in years)
+    years  = list(range(year_range[0], year_range[1] + 1))
+    yr_str = " OR ".join(str(y) for y in years)
 
-    # ── Resolve vendors ───────────────────────────────────────────────────────
-    list_vendors = lists.get("vendors", _FALLBACK_VENDORS)
-    n_vendors = TIER2_VENDORS if tier >= 2 else TIER1_VENDORS
-    # Caller-supplied vendors go first (most specific), then lists.json
-    vendors = list(dict.fromkeys((extra_vendors or []) + list_vendors))[:n_vendors]
+    # ── Independent lists ─────────────────────────────────────────────────────
+    all_vendors  = list(dict.fromkeys((extra_vendors  or []) + lists.get("vendors",       _FALLBACK_VENDORS)))
+    kw_product   = list(dict.fromkeys((extra_keywords or []) + lists.get("kw_product",    [])))
+    kw_process   = list(dict.fromkeys(                         lists.get("kw_process",   [])))
+    kw_technology= list(dict.fromkeys(                         lists.get("kw_technology", [])))
+    sources      = list(dict.fromkeys((extra_sources  or []) + lists.get("all_sources",  [])))
 
-    # ── Resolve keywords ──────────────────────────────────────────────────────
-    ranked_kw = lists.get("top_keywords_ranked", [])
-    n_kw = TIER2_KEYWORDS if tier >= 2 else TIER1_KEYWORDS
-    keywords = list(dict.fromkeys((extra_keywords or []) + ranked_kw))[:n_kw]
+    # Tier-based slice sizes
+    n_vendors  = {1: TIER1_VENDORS,  2: TIER2_VENDORS,  3: len(all_vendors)}.get(tier, TIER1_VENDORS)
+    vendors    = all_vendors[:n_vendors]
 
-    # ── Resolve sources ───────────────────────────────────────────────────────
-    list_sources = lists.get("all_sources", [])
-    sources = list(dict.fromkeys((extra_sources or []) + list_sources))
-
-    # ── Build queries ─────────────────────────────────────────────────────────
-
-    # 1. Always: broad deal anchors per year (small, high-recall)
+    # ── 1. Broad anchors (always, every year) ────────────────────────────────
     for year in years:
         queries.append(f'"{company_name}" IT deal contract signed {year}')
         queries.append(f'"{company_name}" technology outsourcing agreement {year}')
 
-    # 2. Always: site: queries against known sources (highest precision)
-    #    Group sources 3/query to keep query string short
+    # ── 2. Source site: queries (always — highest precision) ─────────────────
     for i in range(0, min(len(sources), 36), SOURCE_GROUP_SZ):
         grp = sources[i: i + SOURCE_GROUP_SZ]
         site_expr = " OR ".join(f"site:{s}" for s in grp)
         queries.append(f'({site_expr}) "{company_name}" deal OR contract OR agreement ({yr_str})')
 
-    # 3. Company × top keywords (keyword = deal category signal)
-    for kw in keywords:
-        queries.append(f'"{company_name}" "{kw}" deal OR contract OR signed ({yr_str})')
+    if tier == 1:
+        # ── 3T1. Product keywords: "company bought/implemented <product>" ────
+        for kw in kw_product:                   # all 33 — very targeted
+            queries.append(f'"{company_name}" "{kw}" deal OR contract OR implementation ({yr_str})')
 
-    # 4. Company × vendor pairs (vendor name is most precise signal)
-    for vendor in vendors:
-        queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+        # ── 4T1. Process keywords: business areas (first 20) ─────────────────
+        for kw in kw_process[:20]:
+            queries.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
 
-    if tier >= 3:
-        # 5. Tier 3: catch-alls with OR-chained keywords
-        kw_or = " OR ".join(f'"{k}"' for k in keywords[:6])
-        queries.append(f'"{company_name}" ({kw_or}) signed awarded ({yr_str})')
+        # ── 5T1. Top vendors ──────────────────────────────────────────────────
+        for vendor in vendors:
+            queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+
+    elif tier == 2:
+        # ── 3T2. Remaining process keywords (21–120) ─────────────────────────
+        for kw in kw_process[20:]:
+            queries.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
+
+        # ── 4T2. Technology keywords (first 50) ───────────────────────────────
+        for kw in kw_technology[:50]:
+            queries.append(f'"{company_name}" "{kw}" deal OR contract OR selected ({yr_str})')
+
+        # ── 5T2. More vendors ─────────────────────────────────────────────────
+        for vendor in vendors:
+            queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+
+    elif tier >= 3:
+        # ── 3T3. Remaining technology keywords ───────────────────────────────
+        for kw in kw_technology[50:]:
+            queries.append(f'"{company_name}" "{kw}" deal OR contract OR selected ({yr_str})')
+
+        # ── 4T3. Remaining vendors + catch-alls ──────────────────────────────
+        for vendor in vendors:
+            queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
         queries.append(f'"{company_name}" vendor selected partnership announcement ({yr_str})')
         queries.append(f'"{company_name}" outsourcing managed services digital transformation ({yr_str})')
 
-    logger.info(f"Built {len(queries)} tier-{tier} queries for {company_name} "
-                f"({len(vendors)} vendors, {len(keywords)} keywords, {len(sources)} sources)")
+    logger.info(f"Tier {tier}: {len(queries)} queries for {company_name} "
+                f"({len(vendors)} vendors, sources={len(sources)})")
     return queries
 
 
@@ -369,10 +386,10 @@ def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schem
     )
     field_keys = [f["key"] for f in schema_fields]
 
-    # Inject vendor list as a recognition aid (first 200 vendors to stay within token budget)
+    # Inject vendor list as a name-matching reference (first 300 alphabetically, token-budgeted)
     lists = _load_lists()
     vendor_list = lists.get("vendors", _FALLBACK_VENDORS)
-    vendor_hint = ", ".join(vendor_list[:200])
+    vendor_hint = ", ".join(vendor_list[:300])
 
     # Combine page texts, truncate to fit context
     combined = ""
