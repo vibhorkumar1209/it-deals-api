@@ -427,6 +427,46 @@ async def debug_enrich():
         except Exception as e:
             out["claude_test"] = f"ERROR: {e}"
 
+    # Test Apify Google Search with 1 query
+    if apify_key:
+        import httpx as _httpx
+        try:
+            actor_url = (
+                f"https://api.apify.com/v2/acts/apify~google-search-scraper"
+                f"/run-sync-get-dataset-items?token={apify_key}&timeout=30&memory=256"
+            )
+            async with _httpx.AsyncClient(timeout=40) as client:
+                r = await client.post(actor_url, json={
+                    "queries": '"HDFC Bank" IBM deal 2023',
+                    "maxPagesPerQuery": 1,
+                    "resultsPerPage": 3,
+                    "countryCode": "us",
+                })
+            out["apify_test"] = {
+                "status_code": r.status_code,
+                "ok": r.is_success,
+                "response_preview": r.text[:300] if not r.is_success else f"{len(r.json())} result sets, first set has {len(r.json()[0].get('organicResults', [])) if r.json() else 0} URLs",
+            }
+        except Exception as e:
+            out["apify_test"] = {"error": str(e)}
+
+    # Test Jina search
+    if jina_key:
+        import httpx as _httpx
+        try:
+            async with _httpx.AsyncClient(timeout=15) as client:
+                r = await client.get("https://s.jina.ai/", params={"q": "HDFC Bank IBM deal 2023"},
+                    headers={"Accept": "application/json", "Authorization": f"Bearer {jina_key}", "X-Respond-With": "no-content"})
+            body = r.json()
+            out["jina_test"] = {
+                "status_code": r.status_code,
+                "ok": r.is_success,
+                "urls_found": len(body.get("data") or []),
+                "error": body.get("message") if not r.is_success else None,
+            }
+        except Exception as e:
+            out["jina_test"] = {"error": str(e)}
+
     return out
 
 
