@@ -220,47 +220,49 @@ def build_search_queries(
     return queries
 
 
-# ── Step 2: Search via DuckDuckGo / Apify / Jina → collect URLs ──────────────
+# ── Step 2: Search via Bing (custom scraper) / Apify / Jina → collect URLs ────
 
-async def _ddg_search(queries: list[str], results_per_query: int = 10) -> list[str]:
+async def _bing_via_custom_scraper(queries: list[str], results_per_query: int = 10) -> list[str]:
     """
-    Search via DuckDuckGo HTML endpoint — free, no API key, no rate limits.
+    Search Bing by routing through the custom scraper API.
+    The custom scraper runs on its own IP (avoids blocks), returns a links array.
     Runs queries in parallel batches of 5.
     """
-    from urllib.parse import quote_plus, unquote
+    if not SCRAPER_BASE_URL or not queries:
+        return []
+
+    from urllib.parse import quote_plus, urlparse
+
+    headers = {"x-api-key": SCRAPER_API_KEY} if SCRAPER_API_KEY else {}
+    SKIP_BING = {"bing.com", "microsoft.com", "msn.com", "live.com", "microsofttranslator.com"}
 
     async def _one(query: str) -> list[str]:
         try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            bing_url = f"https://www.bing.com/search?q={quote_plus(query)}&count={results_per_query}&setlang=en&cc=US"
+            async with httpx.AsyncClient(timeout=25) as client:
                 r = await client.get(
-                    "https://html.duckduckgo.com/html/",
-                    params={"q": query},
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.5",
-                    },
+                    f"{SCRAPER_BASE_URL.rstrip('/')}/scrape/web",
+                    params={"url": bing_url},
+                    headers=headers,
                 )
                 if not r.is_success:
                     return []
-                # DDG HTML result links appear as /l/?uddg=URL or result__a hrefs
-                # Extract redirect URLs from uddg= parameter
-                import re
-                uddg = re.findall(r'uddg=(https?%3A[^&"]+)', r.text)
-                urls = [unquote(u) for u in uddg]
-                # Also extract direct href links from result anchors
-                direct = re.findall(r'class="result__url"[^>]*>([^<]+)<', r.text)
-                # Combine and return unique non-DDG URLs
-                all_urls = urls + [f"https://{d.strip()}" for d in direct if d.strip()]
-                seen: set = set()
-                out = []
-                for u in all_urls:
-                    if u not in seen and "duckduckgo.com" not in u:
-                        seen.add(u)
-                        out.append(u)
-                return out[:results_per_query]
+                data = r.json()
+                if not data.get("success"):
+                    return []
+                links = data.get("data", {}).get("links", [])
+                urls = []
+                for lnk in links:
+                    href = lnk.get("href", "")
+                    if not href.startswith("http"):
+                        continue
+                    domain = urlparse(href).netloc.lstrip("www.")
+                    if any(domain == s or domain.endswith("." + s) for s in SKIP_BING | SKIP_DOMAINS):
+                        continue
+                    urls.append(href)
+                return urls[:results_per_query]
         except Exception as e:
-            logger.debug(f"DDG search error: {e}")
+            logger.debug(f"Bing/custom scraper error: {e}")
             return []
 
     urls: list[str] = []
@@ -276,7 +278,7 @@ async def _ddg_search(queries: list[str], results_per_query: int = 10) -> list[s
                     seen.add(url)
                     urls.append(url)
 
-    logger.info(f"DDG search: {len(urls)} URLs from {len(queries[:40])} queries")
+    logger.info(f"Bing/custom scraper: {len(urls)} URLs from {len(queries[:40])} queries")
     return urls
 
 
@@ -429,13 +431,13 @@ async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
                     break
         return out
 
-    # Primary: DuckDuckGo HTML (free, no API key needed)
-    raw = await _ddg_search(queries, results_per_query=10)
+    # Primary: Bing via custom scraper (own IP, no API cost)
+    raw = await _bing_via_custom_scraper(queries, results_per_query=10)
     urls = _filter(raw)
     if urls:
-        logger.info(f"DDG returned {len(urls)} filtered URLs")
+        logger.info(f"Bing/custom scraper returned {len(urls)} filtered URLs")
         return urls
-    logger.warning("DDG returned no URLs — trying Apify")
+    logger.warning("Bing/custom scraper returned no URLs — trying Apify")
 
     # Secondary: Apify Google Search Scraper
     if APIFY_KEY:

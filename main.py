@@ -431,18 +431,24 @@ async def debug_enrich():
         except Exception as e:
             out["claude_test"] = f"ERROR: {e}"
 
-    # Test DuckDuckGo HTML search (no API key needed)
-    import httpx as _httpx, re as _re
-    from urllib.parse import unquote as _unquote
-    try:
-        async with _httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            r = await client.get("https://html.duckduckgo.com/html/", params={"q": '"HDFC Bank" IBM deal 2023'},
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-        uddg = _re.findall(r'uddg=(https?%3A[^&"]+)', r.text)
-        urls = [_unquote(u) for u in uddg if "duckduckgo.com" not in _unquote(u)][:3]
-        out["ddg_test"] = {"status_code": r.status_code, "ok": r.is_success, "urls_found": len(urls), "sample_urls": urls}
-    except Exception as e:
-        out["ddg_test"] = {"error": str(e)}
+    # Test Bing search via custom scraper
+    if scraper_base_url:
+        import httpx as _httpx
+        from urllib.parse import quote_plus as _qp, urlparse as _up
+        try:
+            bing_url = f"https://www.bing.com/search?q={_qp('HDFC Bank IBM deal 2023')}&count=10&setlang=en"
+            _hdrs = {"x-api-key": scraper_api_key} if scraper_api_key else {}
+            async with _httpx.AsyncClient(timeout=25) as client:
+                r = await client.get(f"{scraper_base_url.rstrip('/')}/scrape/web", params={"url": bing_url}, headers=_hdrs)
+            body = r.json() if r.is_success else {}
+            links = (body.get("data") or {}).get("links", [])
+            skip = {"bing.com", "microsoft.com", "msn.com"}
+            urls = [lnk["href"] for lnk in links if lnk.get("href","").startswith("http")
+                    and not any(s in lnk["href"] for s in skip)][:4]
+            out["bing_search_test"] = {"status_code": r.status_code, "ok": r.is_success,
+                                        "total_links": len(links), "result_urls": len(urls), "sample": urls[:3]}
+        except Exception as e:
+            out["bing_search_test"] = {"error": str(e)}
 
     # Test custom scraper API (vibhorkumar1209/scraper-api)
     if scraper_base_url:
