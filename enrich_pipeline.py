@@ -188,17 +188,7 @@ def build_search_queries(
         # No site: queries in T2 — all sources already covered in T1
 
     elif tier >= 3:
-        # Vendor + technology keyword combos
-        for vendor in vendors:
-            meta     = vendor_meta.get(vendor, {})
-            vkw_tech = meta.get("kw_technology", [])
-            if vkw_tech:
-                for kw in vkw_tech[:2]:
-                    queries_vendor.append(f'"{company_name}" "{vendor}" "{kw}" ({yr_str})')
-            else:
-                queries_vendor.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
-
-        # Remaining process + all remaining tech keywords
+        # T3: keyword catch-alls only — no vendor queries (keeps T3 fast and cheap)
         for kw in kw_process[60:]:
             queries_kw.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
         for kw in kw_technology[40:]:
@@ -279,9 +269,9 @@ APIFY_BATCH_SZ = 40   # max queries per Apify actor run (keeps each run under 18
 
 async def _apify_google_search(queries: list[str], results_per_query: int = 10) -> list[str]:
     """
-    Search Google via Apify Google Search Scraper actor.
-    Runs queries in sequential batches of APIFY_BATCH_SZ so all queries are covered.
-    Returns flat list of unique URLs from organic results.
+    Search Google via Apify Google Search Scraper.
+    Splits queries into batches of APIFY_BATCH_SZ and fires all batches in PARALLEL.
+    All batches complete in ~the same time as one batch (~180s max).
     """
     if not APIFY_KEY or not queries:
         return []
@@ -290,11 +280,9 @@ async def _apify_google_search(queries: list[str], results_per_query: int = 10) 
         "https://api.apify.com/v2/acts/apify~google-search-scraper"
         f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout=180&memory=512"
     )
-    urls: list[str] = []
-    seen: set[str] = set()
+    batches = [queries[i: i + APIFY_BATCH_SZ] for i in range(0, len(queries), APIFY_BATCH_SZ)]
 
-    for batch_start in range(0, len(queries), APIFY_BATCH_SZ):
-        batch = queries[batch_start: batch_start + APIFY_BATCH_SZ]
+    async def _run_batch(batch: list[str]) -> list[str]:
         try:
             payload = {
                 "queries": "\n".join(batch),
@@ -306,19 +294,30 @@ async def _apify_google_search(queries: list[str], results_per_query: int = 10) 
             async with httpx.AsyncClient(timeout=200) as client:
                 r = await client.post(actor_url, json=payload)
             if not r.is_success:
-                logger.warning(f"Apify Google Search batch {batch_start} → {r.status_code}: {r.text[:200]}")
-                continue
+                logger.warning(f"Apify batch failed {r.status_code}: {r.text[:200]}")
+                return []
+            batch_urls = []
             for item in r.json():
                 for result in item.get("organicResults", []):
                     url = result.get("url", "")
-                    if url and url not in seen:
-                        seen.add(url)
-                        urls.append(url)
+                    if url:
+                        batch_urls.append(url)
+            return batch_urls
         except Exception as e:
-            logger.warning(f"Apify Google Search batch {batch_start} error: {e}")
-            continue
+            logger.warning(f"Apify batch error: {e}")
+            return []
 
-    logger.info(f"Apify Google Search: {len(urls)} URLs from {len(queries)} queries ({(len(queries)-1)//APIFY_BATCH_SZ+1} batches)")
+    results = await asyncio.gather(*[_run_batch(b) for b in batches])
+
+    seen: set[str] = set()
+    urls: list[str] = []
+    for batch_urls in results:
+        for url in batch_urls:
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+
+    logger.info(f"Apify Google Search: {len(urls)} URLs from {len(queries)} queries ({len(batches)} parallel batches)")
     return urls
 
 
