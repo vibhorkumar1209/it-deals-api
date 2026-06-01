@@ -23,44 +23,26 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # ── Top vendors to combine in searches ───────────────────────────────────────
+# A curated shortlist covering the most commonly found IT deal vendors.
+# Used to build targeted "company + vendor" search queries.
 TOP_VENDORS = [
     # Global SIs
     "TCS", "Infosys", "Wipro", "HCLTech", "Accenture", "IBM", "Cognizant",
-    "Capgemini", "DXC Technology", "Tech Mahindra", "Hexaware", "Mphasis",
-    "L&T Technology", "NIIT Technologies", "Birlasoft",
+    "Capgemini", "DXC Technology", "Tech Mahindra",
     # ERP / Cloud platforms
     "SAP", "Oracle", "Microsoft", "AWS", "Google Cloud", "Salesforce",
-    "ServiceNow", "Workday", "SAP S/4HANA", "Microsoft Azure", "NetSuite",
-    "Infor", "IFS", "Epicor",
+    "ServiceNow", "Workday", "SAP S/4HANA",
     # Cybersecurity
-    "Palo Alto Networks", "CrowdStrike", "Fortinet", "Zscaler", "Check Point",
-    "Sophos", "Darktrace", "SentinelOne",
-    # Analytics / Data / AI
-    "Snowflake", "Databricks", "SAS", "Tableau", "Qlik", "MicroStrategy",
-    "IBM Watson", "OpenAI", "DataRobot",
+    "Palo Alto Networks", "CrowdStrike", "Fortinet", "Zscaler",
+    # Analytics / Data
+    "Snowflake", "Databricks", "SAS",
     # Banking / Fintech
     "Temenos", "Finacle", "Newgen", "FIS", "Fiserv", "Finastra",
-    "Mambu", "Thought Machine", "Intellect Design",
-    # Managed / Infra Services
-    "Atos", "NTT", "Unisys", "CGI", "Fujitsu", "HPE", "Dell Technologies",
-    "Cisco", "VMware",
+    # Managed Services
+    "Atos", "NTT", "Unisys",
 ]
 
-# ── Broad query templates to maximise coverage ────────────────────────────────
-BROAD_QUERY_TEMPLATES = [
-    '"{company}" IT outsourcing deal {year}',
-    '"{company}" technology contract signed {year}',
-    '"{company}" digital transformation vendor {year}',
-    '"{company}" cloud migration deal {year}',
-    '"{company}" ERP implementation {year}',
-    '"{company}" managed services contract {year}',
-    '"{company}" cybersecurity deal {year}',
-    '"{company}" software agreement {year}',
-    '"{company}" IT partnership announcement {year}',
-    '"{company}" systems integrator selected {year}',
-]
-
-# ── Domains to skip ───────────────────────────────────────────────────────────
+# ── Deal search keywords ──────────────────────────────────────────────────────
 DEAL_KEYWORDS = [
     "deal", "contract", "signed", "awarded", "selected", "partnership",
     "outsourcing", "implementation", "agreement", "go-live", "digital transformation",
@@ -80,37 +62,22 @@ APIFY_KEY = os.getenv("APIFY_API_KEY", "")
 
 # ── Step 1: Generate search queries ──────────────────────────────────────────
 
-def build_search_queries(company_name: str, goal: str, year_range: tuple[int, int] = (2021, 2025)) -> list[str]:
-    """
-    Generate a comprehensive set of search queries covering:
-    - Broad deal templates × every year in range
-    - Company × every top vendor (year-agnostic)
-    - Press-release / announcement site-specific searches
-    """
+def build_search_queries(company_name: str, goal: str, year_range: tuple[int, int] = (2022, 2025)) -> list[str]:
+    """Generate search queries: company-only + company×vendor combinations."""
     queries: list[str] = []
-    years = list(range(year_range[0], year_range[1] + 1))
+    years = list(range(year_range[0], year_range[1] + 1))  # full 5-year range
 
-    yr_str = " OR ".join(str(y) for y in years)
-
-    # 1. High-value catch-alls (run first — fastest signal)
-    queries.append(f'"{company_name}" IT deal contract signed awarded ({yr_str})')
-    queries.append(f'"{company_name}" vendor selected outsourcing managed services ({yr_str})')
-    queries.append(f'"{company_name}" digital transformation technology partnership ({yr_str})')
-    queries.append(f'"{company_name}" ERP CRM cloud implementation agreement ({yr_str})')
-
-    # 2. Press-release wires — very high signal, one per year
+    # Generic deal queries — one per year
     for year in years:
-        queries.append(f'site:businesswire.com OR site:prnewswire.com "{company_name}" IT deal {year}')
-        queries.append(f'site:economictimes.indiatimes.com OR site:financialexpress.com "{company_name}" technology contract {year}')
+        queries.append(f'"{company_name}" IT deal contract signed {year}')
+        queries.append(f'"{company_name}" technology outsourcing agreement {year}')
 
-    # 3. Broad template × year (capped at 6 templates to keep total manageable)
-    for year in years:
-        for tmpl in BROAD_QUERY_TEMPLATES[:6]:
-            queries.append(tmpl.format(company=company_name, year=year))
+    # Company + vendor pairs — top vendors, year-agnostic (broad)
+    for vendor in TOP_VENDORS[:10]:
+        queries.append(f'"{company_name}" "{vendor}" deal contract agreement')
 
-    # 4. Company × top vendors (year-agnostic — catches undated / evergreen articles)
-    for vendor in TOP_VENDORS[:20]:
-        queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement OR partnership')
+    # Broad catch-all
+    queries.append(f'"{company_name}" digital transformation IT vendor selected 2020 2021 2022 2023 2024')
 
     return queries
 
@@ -120,48 +87,42 @@ def build_search_queries(company_name: str, goal: str, year_range: tuple[int, in
 async def _apify_google_search(queries: list[str], results_per_query: int = 10) -> list[str]:
     """
     Search Google via Apify Google Search Scraper actor.
-    Batches queries in chunks of APIFY_BATCH_SIZE to avoid timeouts.
+    Sends all queries in one actor run — much faster than serial searches.
     Returns flat list of unique URLs from organic results.
     """
-    APIFY_BATCH_SIZE = 20
     if not APIFY_KEY or not queries:
         return []
-
-    seen: set[str] = set()
-    urls: list[str] = []
-
-    for batch_start in range(0, len(queries), APIFY_BATCH_SIZE):
-        batch = queries[batch_start: batch_start + APIFY_BATCH_SIZE]
-        try:
-            actor_url = (
-                "https://api.apify.com/v2/acts/apify~google-search-scraper"
-                f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout=90&memory=512"
-            )
-            payload = {
-                "queries": "\n".join(batch),
-                "maxPagesPerQuery": 1,
-                "resultsPerPage": results_per_query,
-                "countryCode": "us",
-                "languageCode": "en",
-            }
-            async with httpx.AsyncClient(timeout=100) as client:
-                r = await client.post(actor_url, json=payload)
+    try:
+        actor_url = (
+            "https://api.apify.com/v2/acts/apify~google-search-scraper"
+            f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout=60&memory=256"
+        )
+        payload = {
+            "queries": "\n".join(queries),   # one query per line
+            "maxPagesPerQuery": 1,
+            "resultsPerPage": results_per_query,
+            "countryCode": "us",
+            "languageCode": "en",
+        }
+        async with httpx.AsyncClient(timeout=70) as client:
+            r = await client.post(actor_url, json=payload)
             if not r.is_success:
-                logger.warning(f"Apify Google Search batch {batch_start}: {r.status_code} {r.text[:150]}")
-                continue
-            for item in r.json():
+                logger.warning(f"Apify Google Search {r.status_code}: {r.text[:200]}")
+                return []
+            items = r.json()
+            urls: list[str] = []
+            seen: set[str] = set()
+            for item in items:
                 for result in item.get("organicResults", []):
                     url = result.get("url", "")
                     if url and url not in seen:
                         seen.add(url)
                         urls.append(url)
-            logger.info(f"Apify batch {batch_start//APIFY_BATCH_SIZE+1}: +{len(urls)} URLs so far")
-        except Exception as e:
-            logger.warning(f"Apify Google Search batch {batch_start} error: {e}")
-            continue
-
-    logger.info(f"Apify Google Search total: {len(urls)} URLs from {len(queries)} queries")
-    return urls
+            logger.info(f"Apify Google Search: {len(urls)} URLs from {len(queries)} queries")
+            return urls
+    except Exception as e:
+        logger.warning(f"Apify Google Search error: {e}")
+        return []
 
 
 async def _jina_search_fallback(query: str) -> list[str]:
@@ -188,7 +149,7 @@ async def _jina_search_fallback(query: str) -> list[str]:
         return []
 
 
-async def collect_urls(queries: list[str], max_urls: int = 60) -> list[str]:
+async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
     """
     Collect URLs via Apify Google Search (primary) or Jina (fallback).
     Runs all queries in one Apify call for speed.
@@ -213,7 +174,7 @@ async def collect_urls(queries: list[str], max_urls: int = 60) -> list[str]:
 
     # Primary: Apify Google Search (all queries in one call)
     if APIFY_KEY:
-        raw = await _apify_google_search(queries, results_per_query=15)
+        raw = await _apify_google_search(queries, results_per_query=10)
         urls = _filter(raw)
         if urls:
             return urls
@@ -403,151 +364,110 @@ def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schem
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
-MIN_DEALS_BEFORE_EXTEND = 10   # if fewer deals found, search previous 5-year window too
-
-
-async def _search_window(
-    company_name: str,
-    goal: str,
-    schema_fields: list[dict],
-    year_range: tuple[int, int],
-    max_urls: int,
-    seen_urls: set,
-) -> tuple[list[dict], list[dict], list[str]]:
-    """
-    Run one search window: build queries → collect URLs → scrape → filter → return.
-    Returns (deals, relevant_pages, urls_found).
-    seen_urls is mutated to track already-scraped URLs across windows.
-    """
-    queries = build_search_queries(company_name, goal, year_range)
-    raw_urls = await collect_urls(queries, max_urls=max_urls)
-    # Deduplicate against already-seen URLs
-    urls = [u for u in raw_urls if u not in seen_urls]
-    seen_urls.update(urls)
-
-    if not urls:
-        return [], [], []
-
-    # Scrape
-    if APIFY_KEY:
-        scraped: list[dict] = []
-        for i in range(0, len(urls), 10):
-            batch_result = await scrape_urls_apify(urls[i: i + 10])
-            scraped.extend(batch_result)
-    else:
-        scraped = await scrape_urls_jina_fallback(urls[:15])
-
-    # Filter
-    relevant = [p for p in scraped if is_deal_page(p["text"], company_name)]
-    pages_to_use = relevant if relevant else scraped[:5]
-    deals = await asyncio.to_thread(_claude_extract_deals, pages_to_use, company_name, goal, schema_fields)
-    return deals, relevant, urls
-
-
 async def enrich_company(
     company_name: str,
     domain: str,
     goal: str,
     schema_fields: list[dict],
-    year_range: tuple[int, int] = (2021, 2025),
-    max_urls: int = 40,
+    year_range: tuple[int, int] = (2022, 2025),
+    max_urls: int = 20,
 ) -> AsyncGenerator[dict, None]:
     """
-    Full enrichment pipeline. Automatically extends to the previous 5-year
-    window if fewer than MIN_DEALS_BEFORE_EXTEND deals are found in the first pass.
+    Full enrichment pipeline for one company. Yields progress events then final row.
     """
-    seen_urls: set = set()
-    all_deals: list[dict] = []
 
-    # ── Window 1: primary year range ─────────────────────────────────────────
-    w1_label = f"{year_range[0]}–{year_range[1]}"
-    yield {"type": "heartbeat", "message": f"🔍 Searching {company_name} deals ({w1_label})…"}
+    yield {"type": "heartbeat", "message": f"🔍 Building search queries for {company_name}…"}
 
-    w1_task = asyncio.ensure_future(
-        _search_window(company_name, goal, schema_fields, year_range, max_urls, seen_urls)
-    )
+    # Step 1: Generate queries
+    queries = build_search_queries(company_name, goal, year_range)
+    yield {"type": "heartbeat", "message": f"🔍 Running {len(queries)} searches for {company_name}…"}
+
+    # Step 2: Collect URLs (run in batches, yield heartbeat between)
+    url_collect_task = asyncio.ensure_future(collect_urls(queries, max_urls=max_urls))
     elapsed = 0
-    while not w1_task.done() and elapsed < 180:
-        done, _ = await asyncio.wait({w1_task}, timeout=8)
+    while not url_collect_task.done() and elapsed < 90:
+        done, _ = await asyncio.wait({url_collect_task}, timeout=8)
         elapsed += 8
         if done:
             break
-        batch_num = (elapsed // 100) + 1
-        yield {"type": "heartbeat", "message": f"🔍 Searching {w1_label}… batch {batch_num} ({elapsed}s)"}
-
-    if not w1_task.done():
-        w1_task.cancel()
-        logger.warning("Window 1 search timed out after 180s")
-        w1_deals, w1_relevant, w1_urls = [], [], []
+        yield {"type": "heartbeat", "message": f"🔍 Searching… ({elapsed}s)"}
+    if not url_collect_task.done():
+        url_collect_task.cancel()
+        urls: list[str] = []
     else:
         try:
-            w1_deals, w1_relevant, w1_urls = w1_task.result()
-        except Exception as e:
-            logger.warning(f"Window 1 error: {e}")
-            yield {"type": "heartbeat", "message": f"⚠️ Search error: {e}"}
-            w1_deals, w1_relevant, w1_urls = [], [], []
+            urls = url_collect_task.result()
+        except Exception:
+            urls = []
 
-    yield {"type": "heartbeat", "message": f"📋 Window {w1_label}: {len(w1_deals)} deals from {len(w1_relevant)} relevant pages"}
-
-    # Stream window-1 deals immediately
-    for deal in w1_deals:
-        row = {"company_name": company_name, "domain": domain, "_status": "ok", "_sources": len(w1_relevant)}
-        row.update(deal)
-        all_deals.append(deal)
-        yield {"type": "row_done", "row": row}
-
-    # ── Window 2: extend back 5 years if not enough deals ────────────────────
-    if len(all_deals) < MIN_DEALS_BEFORE_EXTEND:
-        w2_range = (year_range[0] - 5, year_range[0] - 1)
-        w2_label = f"{w2_range[0]}–{w2_range[1]}"
-        yield {"type": "heartbeat", "message": f"📅 Only {len(all_deals)} deals found — extending search to {w2_label}…"}
-
-        w2_task = asyncio.ensure_future(
-            _search_window(company_name, goal, schema_fields, w2_range, max_urls, seen_urls)
+    if not urls:
+        yield {"type": "heartbeat", "message": f"⚠️ No URLs found — using Claude knowledge for {company_name}…"}
+        deals: list[dict] = await asyncio.to_thread(
+            _claude_extract_deals, [], company_name, goal, schema_fields
         )
-        elapsed = 0
-        while not w2_task.done() and elapsed < 180:
-            done, _ = await asyncio.wait({w2_task}, timeout=8)
-            elapsed += 8
-            if done:
-                break
-            batch_num = (elapsed // 100) + 1
-            yield {"type": "heartbeat", "message": f"🔍 Searching {w2_label}… batch {batch_num} ({elapsed}s)"}
-
-        if not w2_task.done():
-            w2_task.cancel()
-            logger.warning("Window 2 search timed out after 180s")
-            w2_deals, w2_relevant = [], []
-        else:
-            try:
-                w2_deals, w2_relevant, _ = w2_task.result()
-            except Exception as e:
-                logger.warning(f"Window 2 error: {e}")
-                yield {"type": "heartbeat", "message": f"⚠️ Window 2 error: {e}"}
-                w2_deals, w2_relevant = [], []
-
-        yield {"type": "heartbeat", "message": f"📋 Window {w2_label}: {len(w2_deals)} deals from {len(w2_relevant)} relevant pages"}
-
-        for deal in w2_deals:
-            row = {"company_name": company_name, "domain": domain, "_status": "ok", "_sources": len(w2_relevant)}
-            row.update(deal)
-            all_deals.append(deal)
-            yield {"type": "row_done", "row": row}
-
-    # ── Fallback: Claude knowledge if nothing scraped ─────────────────────────
-    if not all_deals:
-        yield {"type": "heartbeat", "message": f"⚠️ No scraped deals — using Claude knowledge for {company_name}…"}
-        kb_deals = await asyncio.to_thread(_claude_extract_deals, [], company_name, goal, schema_fields)
-        if not kb_deals:
+        if not deals:
             row = {"company_name": company_name, "domain": domain, "_status": "no_result", "_sources": 0}
             for f in schema_fields:
                 row[f["key"]] = ""
             yield {"type": "row_done", "row": row}
             return
-        for deal in kb_deals:
+        yield {"type": "heartbeat", "message": f"✅ Found {len(deals)} deals for {company_name} (from knowledge)"}
+        for deal in deals:
             row = {"company_name": company_name, "domain": domain, "_status": "ok", "_sources": 0}
             row.update(deal)
             yield {"type": "row_done", "row": row}
         return
 
-    yield {"type": "heartbeat", "message": f"✅ {company_name}: {len(all_deals)} total deals found"}
+    yield {"type": "heartbeat", "message": f"🕸️ Scraping {len(urls)} URLs for {company_name}…"}
+
+    # Step 3: Scrape via Apify (or Jina fallback)
+    if APIFY_KEY:
+        # Scrape in batches of 10 to stay within Apify timeout
+        scraped: list[dict] = []
+        for i in range(0, len(urls), 10):
+            batch = urls[i: i + 10]
+            batch_result = await scrape_urls_apify(batch)
+            scraped.extend(batch_result)
+            if i + 10 < len(urls):
+                yield {"type": "heartbeat", "message": f"🕸️ Scraped {len(scraped)} pages… ({i+10}/{len(urls)})"}
+    else:
+        yield {"type": "heartbeat", "message": f"🕸️ Scraping via Jina (no Apify key)…"}
+        scraped = await scrape_urls_jina_fallback(urls[:10])
+
+    yield {"type": "heartbeat", "message": f"✅ Scraped {len(scraped)} pages — identifying deals…"}
+
+    # Step 4: Filter deal-relevant pages
+    relevant = [p for p in scraped if is_deal_page(p["text"], company_name)]
+    yield {"type": "heartbeat", "message": f"📋 {len(relevant)}/{len(scraped)} pages are deal-relevant — extracting…"}
+
+    # Step 5: Extract multiple deals with Claude
+    pages_to_use = relevant if relevant else scraped[:5]
+    deals: list[dict] = await asyncio.to_thread(
+        _claude_extract_deals, pages_to_use, company_name, goal, schema_fields
+    )
+
+    if not deals:
+        # No deals extracted — yield a no_result row
+        row: dict = {
+            "company_name": company_name,
+            "domain": domain,
+            "_status": "no_result",
+            "_sources": len(relevant),
+        }
+        for f in schema_fields:
+            row[f["key"]] = ""
+        yield {"type": "row_done", "row": row}
+        return
+
+    yield {"type": "heartbeat", "message": f"✅ Found {len(deals)} deals for {company_name}"}
+
+    # Yield one row per deal
+    for deal in deals:
+        row = {
+            "company_name": company_name,
+            "domain": domain,
+            "_status": "ok",
+            "_sources": len(relevant),
+        }
+        row.update(deal)
+        yield {"type": "row_done", "row": row}
