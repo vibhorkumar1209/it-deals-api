@@ -72,13 +72,12 @@ SKIP_DOMAINS = {
 }
 
 # ── Tiered query budget ───────────────────────────────────────────────────────
-# Tier 1 (always): sources + top-N keywords → ~30 queries, fast + cheap
-# Tier 2 (if < MIN_DEALS): vendor pairs + more keywords → +25 queries
-# Tier 3 (if still thin): broader catch-alls → +15 queries
-TIER1_KEYWORDS   = 8    # top keywords by vendor-coverage frequency
-TIER1_VENDORS    = 10   # top vendors from lists (or fallback)
-TIER2_KEYWORDS   = 15
-TIER2_VENDORS    = 20
+# Tier 1: all 32 sources + top-30 vendors + top product/process keywords
+# Tier 2: top-100 vendors + broader keyword combos     (if < 25 deals)
+# Tier 3: top-300 vendors + tech keyword combos        (if still < 25 deals)
+TIER1_VENDORS    = 30
+TIER2_VENDORS    = 100
+TIER3_VENDORS    = 300
 SOURCE_GROUP_SZ  = 3    # domains per site: query
 
 
@@ -87,7 +86,7 @@ SOURCE_GROUP_SZ  = 3    # domains per site: query
 def build_search_queries(
     company_name: str,
     goal: str,
-    year_range: tuple[int, int] = (2022, 2025),
+    year_range: tuple[int, int] = (2016, 2025),
     tier: int = 1,
     extra_vendors: list[str] | None = None,
     extra_sources: list[str] | None = None,
@@ -118,7 +117,7 @@ def build_search_queries(
     sources      = list(dict.fromkeys((extra_sources  or []) + lists.get("all_sources",  [])))
 
     # Tier-based slice sizes
-    n_vendors  = {1: TIER1_VENDORS,  2: TIER2_VENDORS,  3: len(all_vendors)}.get(tier, TIER1_VENDORS)
+    n_vendors  = {1: TIER1_VENDORS,  2: TIER2_VENDORS,  3: TIER3_VENDORS}.get(tier, TIER1_VENDORS)
     vendors    = all_vendors[:n_vendors]
 
     # ── Per-vendor metadata ───────────────────────────────────────────────────
@@ -152,8 +151,8 @@ def build_search_queries(
         for kw in kw_process[:10]:
             queries_kw.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
 
-        # Site: queries — top 3 groups only
-        for i in range(0, min(len(sources), SOURCE_GROUP_SZ * 3), SOURCE_GROUP_SZ):
+        # Site: queries — all 32 sources (every group) in T1
+        for i in range(0, len(sources), SOURCE_GROUP_SZ):
             grp = sources[i: i + SOURCE_GROUP_SZ]
             site_expr = " OR ".join(f"site:{s}" for s in grp)
             queries_site.append(f'({site_expr}) "{company_name}" deal OR contract OR agreement ({yr_str})')
@@ -186,11 +185,7 @@ def build_search_queries(
         for kw in kw_technology[:40]:
             queries_kw.append(f'"{company_name}" "{kw}" deal OR contract OR selected ({yr_str})')
 
-        # Remaining site: groups
-        for i in range(SOURCE_GROUP_SZ * 3, min(len(sources), 36), SOURCE_GROUP_SZ):
-            grp = sources[i: i + SOURCE_GROUP_SZ]
-            site_expr = " OR ".join(f"site:{s}" for s in grp)
-            queries_site.append(f'({site_expr}) "{company_name}" deal OR contract OR agreement ({yr_str})')
+        # No site: queries in T2 — all sources already covered in T1
 
     elif tier >= 3:
         # Vendor + technology keyword combos
@@ -265,7 +260,7 @@ async def _google_news_rss_search(queries: list[str], results_per_query: int = 1
 
     urls: list[str] = []
     seen: set[str] = set()
-    for i in range(0, len(queries[:40]), 5):
+    for i in range(0, len(queries), 5):
         batch = queries[i: i + 5]
         results = await asyncio.gather(*[_one(q) for q in batch], return_exceptions=True)
         for result in results:
@@ -276,51 +271,55 @@ async def _google_news_rss_search(queries: list[str], results_per_query: int = 1
                     seen.add(url)
                     urls.append(url)
 
-    logger.info(f"Google News RSS: {len(urls)} URLs from {len(queries[:40])} queries")
+    logger.info(f"Google News RSS: {len(urls)} URLs from {len(queries)} queries")
     return urls
 
+
+APIFY_BATCH_SZ = 40   # max queries per Apify actor run (keeps each run under 180s)
 
 async def _apify_google_search(queries: list[str], results_per_query: int = 10) -> list[str]:
     """
     Search Google via Apify Google Search Scraper actor.
-    Sends all queries in one actor run — much faster than serial searches.
+    Runs queries in sequential batches of APIFY_BATCH_SZ so all queries are covered.
     Returns flat list of unique URLs from organic results.
     """
     if not APIFY_KEY or not queries:
         return []
-    try:
-        # Cap queries to 40 max per call so Apify finishes within timeout
-        capped = queries[:40]
-        actor_url = (
-            "https://api.apify.com/v2/acts/apify~google-search-scraper"
-            f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout=180&memory=512"
-        )
-        payload = {
-            "queries": "\n".join(capped),    # one query per line
-            "maxPagesPerQuery": 1,
-            "resultsPerPage": results_per_query,
-            "countryCode": "us",
-            "languageCode": "en",
-        }
-        async with httpx.AsyncClient(timeout=200) as client:
-            r = await client.post(actor_url, json=payload)
+
+    actor_url = (
+        "https://api.apify.com/v2/acts/apify~google-search-scraper"
+        f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout=180&memory=512"
+    )
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    for batch_start in range(0, len(queries), APIFY_BATCH_SZ):
+        batch = queries[batch_start: batch_start + APIFY_BATCH_SZ]
+        try:
+            payload = {
+                "queries": "\n".join(batch),
+                "maxPagesPerQuery": 1,
+                "resultsPerPage": results_per_query,
+                "countryCode": "us",
+                "languageCode": "en",
+            }
+            async with httpx.AsyncClient(timeout=200) as client:
+                r = await client.post(actor_url, json=payload)
             if not r.is_success:
-                logger.warning(f"Apify Google Search {r.status_code}: {r.text[:200]}")
-                return []
-            items = r.json()
-            urls: list[str] = []
-            seen: set[str] = set()
-            for item in items:
+                logger.warning(f"Apify Google Search batch {batch_start} → {r.status_code}: {r.text[:200]}")
+                continue
+            for item in r.json():
                 for result in item.get("organicResults", []):
                     url = result.get("url", "")
                     if url and url not in seen:
                         seen.add(url)
                         urls.append(url)
-            logger.info(f"Apify Google Search: {len(urls)} URLs from {len(queries)} queries")
-            return urls
-    except Exception as e:
-        logger.warning(f"Apify Google Search error: {e}")
-        return []
+        except Exception as e:
+            logger.warning(f"Apify Google Search batch {batch_start} error: {e}")
+            continue
+
+    logger.info(f"Apify Google Search: {len(urls)} URLs from {len(queries)} queries ({(len(queries)-1)//APIFY_BATCH_SZ+1} batches)")
+    return urls
 
 
 async def _scraperapi_google_search(queries: list[str], results_per_query: int = 10) -> list[str]:
@@ -334,8 +333,6 @@ async def _scraperapi_google_search(queries: list[str], results_per_query: int =
 
     from urllib.parse import quote_plus
     import re as _re
-
-    capped = queries[:40]
 
     async def _one(query: str) -> list[str]:
         try:
@@ -367,7 +364,7 @@ async def _scraperapi_google_search(queries: list[str], results_per_query: int =
     urls: list[str] = []
     seen: set[str] = set()
     # Run in batches of 5 parallel requests
-    for i in range(0, len(capped), 5):
+    for i in range(0, len(queries), 5):
         batch = capped[i: i + 5]
         results = await asyncio.gather(*[_one(q) for q in batch], return_exceptions=True)
         for result in results:
@@ -677,7 +674,7 @@ def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schem
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
-MIN_DEALS_THRESHOLD = 10   # escalate to next tier if below this
+MIN_DEALS_THRESHOLD = 25   # escalate to next tier if below this
 
 async def _run_tier(
     company_name: str, goal: str, schema_fields: list[dict],
@@ -721,7 +718,7 @@ async def enrich_company(
     domain: str,
     goal: str,
     schema_fields: list[dict],
-    year_range: tuple[int, int] = (2022, 2025),
+    year_range: tuple[int, int] = (2016, 2025),
     max_urls: int = 30,
     extra_vendors: list[str] | None = None,
     extra_sources: list[str] | None = None,
@@ -759,7 +756,7 @@ async def enrich_company(
             seen_urls, extra_vendors, extra_sources, extra_keywords,
         ))
         elapsed = 0
-        while not task.done() and elapsed < 240:
+        while not task.done() and elapsed < 1200:
             done, _ = await asyncio.wait({task}, timeout=8)
             elapsed += 8
             if done:

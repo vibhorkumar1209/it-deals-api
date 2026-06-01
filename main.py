@@ -254,6 +254,7 @@ async def enrich_task(req: EnrichTaskRequest):
                     domain=inp.domain,
                     goal=req.goal,
                     schema_fields=schema_fields,
+                    year_range=(2016, 2025),
                     extra_vendors=req.vendors,
                     extra_sources=req.sources,
                     extra_keywords=req.keywords,
