@@ -129,29 +129,33 @@ def build_search_queries(
         site_expr = " OR ".join(f"site:{s}" for s in grp)
         queries.append(f'({site_expr}) "{company_name}" deal OR contract OR agreement ({yr_str})')
 
-    # ── Categorised vendor pairs (highest precision — vendor + its category) ──
-    vendor_cat_map = lists.get("vendor_cat_map", {})
+    # ── Per-vendor metadata (sub_industry, primary_market, own keywords) ────────
+    vendor_meta    = lists.get("vendor_meta", {})
+    vendor_cat_map = lists.get("vendor_cat_map", {})   # from Frameworks file
 
     if tier == 1:
-        # ── 3T1. Product keywords ─────────────────────────────────────────────
+        # ── 3T1. Product keywords (33) — what platforms were bought ───────────
         for kw in kw_product:
             queries.append(f'"{company_name}" "{kw}" deal OR contract OR implementation ({yr_str})')
 
-        # ── 4T1. Process keywords (first 20) ─────────────────────────────────
+        # ── 4T1. Process keywords (first 20) — business area outsourced ───────
         for kw in kw_process[:20]:
             queries.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
 
-        # ── 5T1. Categorised vendor+category pairs (top vendors) ──────────────
+        # ── 5T1. Vendor + market context (most precise signal) ────────────────
         for vendor in vendors:
-            cats = vendor_cat_map.get(vendor, [])
-            if cats:
-                # Use first category as context — most precise query possible
-                queries.append(f'"{company_name}" "{vendor}" "{cats[0]}" OR deal OR contract')
+            meta  = vendor_meta.get(vendor, {})
+            market = meta.get("primary_market", "")
+            cats   = vendor_cat_map.get(vendor, [])
+            if market:
+                queries.append(f'"{company_name}" "{vendor}" "{market}" deal OR contract ({yr_str})')
+            elif cats:
+                queries.append(f'"{company_name}" "{vendor}" "{cats[0]}" deal OR contract')
             else:
                 queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
 
     elif tier == 2:
-        # ── 3T2. Remaining process keywords ──────────────────────────────────
+        # ── 3T2. Remaining process keywords (21–120) ─────────────────────────
         for kw in kw_process[20:]:
             queries.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
 
@@ -159,12 +163,18 @@ def build_search_queries(
         for kw in kw_technology[:50]:
             queries.append(f'"{company_name}" "{kw}" deal OR contract OR selected ({yr_str})')
 
-        # ── 5T2. More vendors with all their categories ───────────────────────
+        # ── 5T2. Vendor + sub-industry + process keyword combos ───────────────
         for vendor in vendors:
-            cats = vendor_cat_map.get(vendor, [])
-            for cat in cats[:2]:   # up to 2 category queries per vendor
-                queries.append(f'"{company_name}" "{vendor}" "{cat}" contract OR selected')
-            if not cats:
+            meta    = vendor_meta.get(vendor, {})
+            sub_ind = meta.get("sub_industry", "")
+            vkw_pr  = meta.get("kw_process", [])
+            if vkw_pr:
+                # vendor's own process keywords — hyper-targeted
+                for kw in vkw_pr[:2]:
+                    queries.append(f'"{company_name}" "{vendor}" "{kw}" ({yr_str})')
+            elif sub_ind:
+                queries.append(f'"{company_name}" "{vendor}" "{sub_ind}" contract OR deal')
+            else:
                 queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
 
     elif tier >= 3:
@@ -172,9 +182,15 @@ def build_search_queries(
         for kw in kw_technology[50:]:
             queries.append(f'"{company_name}" "{kw}" deal OR contract OR selected ({yr_str})')
 
-        # ── 4T3. Remaining vendors + catch-alls ──────────────────────────────
+        # ── 4T3. Vendor + technology keyword combos ───────────────────────────
         for vendor in vendors:
-            queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+            meta    = vendor_meta.get(vendor, {})
+            vkw_tech = meta.get("kw_technology", [])
+            if vkw_tech:
+                for kw in vkw_tech[:2]:
+                    queries.append(f'"{company_name}" "{vendor}" "{kw}" ({yr_str})')
+            else:
+                queries.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
         queries.append(f'"{company_name}" vendor selected partnership announcement ({yr_str})')
         queries.append(f'"{company_name}" outsourcing managed services digital transformation ({yr_str})')
 
