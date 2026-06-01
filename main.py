@@ -400,15 +400,17 @@ async def debug_enrich():
     apify_key       = os.getenv("APIFY_API_KEY", "")
     parallel_key    = os.getenv("PARALLEL_API_KEY", "")
     jina_key        = os.getenv("JINA_KEY", "")
-    scraper_api_key = os.getenv("SCRAPER_API_KEY", "")
+    scraper_api_key  = os.getenv("SCRAPER_API_KEY", "")
+    scraper_base_url = os.getenv("SCRAPER_BASE_URL", "")
 
     out: dict = {
         "env": {
-            "ANTHROPIC_API_KEY": "set" if anthropic_key   else "MISSING",
-            "APIFY_API_KEY":     "set" if apify_key       else "MISSING",
-            "PARALLEL_API_KEY":  "set" if parallel_key    else "MISSING",
-            "JINA_KEY":          "set" if jina_key        else "MISSING",
-            "SCRAPER_API_KEY":   "set" if scraper_api_key else "MISSING",
+            "ANTHROPIC_API_KEY": "set" if anthropic_key    else "MISSING",
+            "APIFY_API_KEY":     "set" if apify_key        else "MISSING",
+            "PARALLEL_API_KEY":  "set" if parallel_key     else "MISSING",
+            "JINA_KEY":          "set" if jina_key         else "MISSING",
+            "SCRAPER_API_KEY":   "set" if scraper_api_key  else "MISSING",
+            "SCRAPER_BASE_URL":  scraper_base_url          if scraper_base_url else "MISSING",
         },
         "claude_test": "skipped — key missing",
         "anthropic_version": _anthropic.__version__,
@@ -429,38 +431,28 @@ async def debug_enrich():
         except Exception as e:
             out["claude_test"] = f"ERROR: {e}"
 
-    # Test ScraperAPI — standard scraping endpoint (works on all plans)
-    out["scraperapi_key_debug"] = {
-        "length": len(scraper_api_key),
-        "prefix": scraper_api_key[:6] + "..." if scraper_api_key else "",
-        "has_spaces": " " in scraper_api_key,
-        "has_newline": "\n" in scraper_api_key or "\r" in scraper_api_key,
-        "has_quotes": '"' in scraper_api_key or "'" in scraper_api_key,
-    }
-    if scraper_api_key:
-        import httpx as _httpx, re as _re
-        from urllib.parse import quote_plus, unquote
+    # Test custom scraper API (vibhorkumar1209/scraper-api)
+    if scraper_base_url:
+        import httpx as _httpx
         try:
-            google_url = f"https://www.google.com/search?q={quote_plus('HDFC Bank IBM deal 2023')}&num=5&hl=en"
-            async with _httpx.AsyncClient(timeout=30) as client:
+            headers = {"x-api-key": scraper_api_key} if scraper_api_key else {}
+            async with _httpx.AsyncClient(timeout=25) as client:
                 r = await client.get(
-                    "https://api.scraperapi.com/",
-                    params={"api_key": scraper_api_key, "url": google_url, "render": "false"},
+                    f"{scraper_base_url.rstrip('/')}/scrape/web",
+                    params={"url": "https://economictimes.indiatimes.com/industry/banking/finance/banking/hdfc-bank-signs-multi-year-data-deal/articleshow/94349454.cms"},
+                    headers=headers,
                 )
-            if r.is_success:
-                raw = _re.findall(r'/url\?q=(https?://[^&"]+)', r.text)
-                urls = [unquote(l) for l in raw if "google.com" not in l][:3]
-            else:
-                urls = []
-            out["scraperapi_test"] = {
+            body = r.json() if r.is_success else {}
+            text = (body.get("data") or {}).get("bodyText", "")
+            out["custom_scraper_test"] = {
                 "status_code": r.status_code,
                 "ok": r.is_success,
-                "urls_found": len(urls),
-                "sample_urls": urls,
-                "error": r.text[:200] if not r.is_success else None,
+                "words_scraped": len(text.split()) if text else 0,
+                "preview": text[:200] if text else None,
+                "error": body.get("error") if not r.is_success else None,
             }
         except Exception as e:
-            out["scraperapi_test"] = {"error": str(e)}
+            out["custom_scraper_test"] = {"error": str(e)}
 
     # Test Apify Google Search with 1 query
     if apify_key:

@@ -22,10 +22,11 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-JINA_KEY       = os.getenv("JINA_KEY", "")
-ANTHROPIC_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
-APIFY_KEY      = os.getenv("APIFY_API_KEY", "")
-SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
+JINA_KEY          = os.getenv("JINA_KEY", "")
+ANTHROPIC_KEY     = os.getenv("ANTHROPIC_API_KEY", "")
+APIFY_KEY         = os.getenv("APIFY_API_KEY", "")
+SCRAPER_API_KEY   = os.getenv("SCRAPER_API_KEY", "")
+SCRAPER_BASE_URL  = os.getenv("SCRAPER_BASE_URL", "")   # e.g. https://scraper-api-xxxx.onrender.com
 
 # ── Load pre-built lists.json (vendors + keywords + sources) ─────────────────
 _LISTS: dict = {}
@@ -452,6 +453,55 @@ async def scrape_urls_apify(urls: list[str]) -> list[dict]:
         return []
 
 
+async def scrape_urls_custom(urls: list[str]) -> list[dict]:
+    """
+    Scrape URLs via the custom scraper API (vibhorkumar1209/scraper-api).
+    Endpoint: GET {SCRAPER_BASE_URL}/scrape/web?url=...
+    Auth:      x-api-key header (SCRAPER_API_KEY)
+    Runs in parallel batches of 5.
+    """
+    if not SCRAPER_BASE_URL or not urls:
+        return []
+
+    headers = {}
+    if SCRAPER_API_KEY:
+        headers["x-api-key"] = SCRAPER_API_KEY
+
+    async def _one(url: str) -> dict | None:
+        try:
+            async with httpx.AsyncClient(timeout=25) as client:
+                r = await client.get(
+                    f"{SCRAPER_BASE_URL.rstrip('/')}/scrape/web",
+                    params={"url": url},
+                    headers=headers,
+                )
+                if not r.is_success:
+                    logger.debug(f"Custom scraper {r.status_code} for {url[:60]}")
+                    return None
+                data = r.json()
+                if not data.get("success"):
+                    return None
+                page = data.get("data", {})
+                # Returns: title, bodyText, links, metaTags, statusCode
+                text = page.get("bodyText") or page.get("text") or ""
+                if text and len(text.split()) >= 80:
+                    return {"url": url, "text": text}
+        except Exception as e:
+            logger.debug(f"Custom scraper error for {url[:60]}: {e}")
+        return None
+
+    results = []
+    for i in range(0, len(urls), 5):
+        batch = urls[i: i + 5]
+        items = await asyncio.gather(*[_one(u) for u in batch], return_exceptions=True)
+        for item in items:
+            if item and not isinstance(item, Exception):
+                results.append(item)
+
+    logger.info(f"Custom scraper: {len(results)}/{len(urls)} URLs with content")
+    return results
+
+
 async def scrape_urls_jina_fallback(urls: list[str]) -> list[dict]:
     """Fallback scraper using Jina Reader when Apify is not configured."""
     from website_router import fetch_via_jina_reader
@@ -604,12 +654,14 @@ async def _run_tier(
     if not urls:
         return [], 0
 
-    # Scrape
-    if APIFY_KEY:
-        scraped: list[dict] = []
+    # Scrape: custom scraper → Apify → Jina (in priority order)
+    scraped: list[dict] = []
+    if SCRAPER_BASE_URL:
+        scraped = await scrape_urls_custom(urls[:20])
+    if not scraped and APIFY_KEY:
         for i in range(0, len(urls), 10):
             scraped.extend(await scrape_urls_apify(urls[i: i + 10]))
-    else:
+    if not scraped:
         scraped = await scrape_urls_jina_fallback(urls[:15])
 
     relevant = [p for p in scraped if is_deal_page(p["text"], company_name)]
