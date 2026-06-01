@@ -222,55 +222,44 @@ def build_search_queries(
 
 # ── Step 2: Search via Bing (custom scraper) / Apify / Jina → collect URLs ────
 
-async def _bing_via_custom_scraper(queries: list[str], results_per_query: int = 10) -> list[str]:
+async def _google_news_rss_search(queries: list[str], results_per_query: int = 10) -> list[str]:
     """
-    Search Bing by routing through the custom scraper API.
-    The custom scraper runs on its own IP (avoids blocks), returns a links array.
+    Search via Google News RSS feed — returns clean XML with real article URLs.
+    No API key, no anti-bot issues, no tracking redirects.
     Runs queries in parallel batches of 5.
     """
-    if not SCRAPER_BASE_URL or not queries:
-        return []
-
     from urllib.parse import quote_plus, urlparse
-
-    headers = {"x-api-key": SCRAPER_API_KEY} if SCRAPER_API_KEY else {}
-    SKIP_BING = {"bing.com", "microsoft.com", "msn.com", "live.com", "microsofttranslator.com"}
 
     async def _one(query: str) -> list[str]:
         try:
-            bing_url = f"https://www.bing.com/search?q={quote_plus(query)}&count={results_per_query}&setlang=en&cc=US"
-            async with httpx.AsyncClient(timeout=25) as client:
-                r = await client.get(
-                    f"{SCRAPER_BASE_URL.rstrip('/')}/scrape/web",
-                    params={"url": bing_url},
-                    headers=headers,
-                )
-                if not r.is_success:
-                    return []
-                data = r.json()
-                if not data.get("success"):
-                    return []
-                page_data = data.get("data", {})
-                # Bing wraps result hrefs in bing.com/ck/a tracking URLs.
-                # Real URLs appear as plain text citations in bodyText.
-                body_text = page_data.get("bodyText", "")
-                # Extract http(s) URLs from bodyText
-                raw_urls = re.findall(r'https?://[^\s\'"<>]+', body_text)
-                urls = []
-                seen_u: set = set()
-                for href in raw_urls:
-                    href = href.rstrip(".,;)")
-                    if not href.startswith("http"):
-                        continue
-                    domain = urlparse(href).netloc.lstrip("www.")
-                    if any(domain == s or domain.endswith("." + s) for s in SKIP_BING | SKIP_DOMAINS):
-                        continue
-                    if href not in seen_u:
-                        seen_u.add(href)
-                        urls.append(href)
-                return urls[:results_per_query]
+            rss_url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                r = await client.get(rss_url, headers={"User-Agent": "Mozilla/5.0 (compatible; RSS reader)"})
+            if not r.is_success:
+                return []
+            # Parse <link> tags from RSS XML (article URLs)
+            # Google News RSS <item><link>URL</link> pattern
+            urls = re.findall(r'<link>([^<]+)</link>', r.text)
+            # Also catch <guid> which sometimes has the real URL
+            guids = re.findall(r'<guid[^>]*>([^<]+)</guid>', r.text)
+            all_urls = urls + guids
+            out = []
+            seen_u: set = set()
+            for u in all_urls:
+                u = u.strip()
+                if not u.startswith("http"):
+                    continue
+                domain = urlparse(u).netloc.lstrip("www.")
+                if any(domain == s or domain.endswith("." + s) for s in SKIP_DOMAINS):
+                    continue
+                if "news.google.com" in u:
+                    continue
+                if u not in seen_u:
+                    seen_u.add(u)
+                    out.append(u)
+            return out[:results_per_query]
         except Exception as e:
-            logger.debug(f"Bing/custom scraper error: {e}")
+            logger.debug(f"Google News RSS error: {e}")
             return []
 
     urls: list[str] = []
@@ -286,7 +275,7 @@ async def _bing_via_custom_scraper(queries: list[str], results_per_query: int = 
                     seen.add(url)
                     urls.append(url)
 
-    logger.info(f"Bing/custom scraper: {len(urls)} URLs from {len(queries[:40])} queries")
+    logger.info(f"Google News RSS: {len(urls)} URLs from {len(queries[:40])} queries")
     return urls
 
 
@@ -439,13 +428,13 @@ async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
                     break
         return out
 
-    # Primary: Bing via custom scraper (own IP, no API cost)
-    raw = await _bing_via_custom_scraper(queries, results_per_query=10)
+    # Primary: Google News RSS (free, clean real URLs, no anti-bot)
+    raw = await _google_news_rss_search(queries, results_per_query=10)
     urls = _filter(raw)
     if urls:
-        logger.info(f"Bing/custom scraper returned {len(urls)} filtered URLs")
+        logger.info(f"Google News RSS returned {len(urls)} filtered URLs")
         return urls
-    logger.warning("Bing/custom scraper returned no URLs — trying Apify")
+    logger.warning("Google News RSS returned no URLs — trying Apify")
 
     # Secondary: Apify Google Search Scraper
     if APIFY_KEY:

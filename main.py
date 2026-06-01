@@ -431,29 +431,18 @@ async def debug_enrich():
         except Exception as e:
             out["claude_test"] = f"ERROR: {e}"
 
-    # Test Bing search via custom scraper
-    if scraper_base_url:
-        import httpx as _httpx
-        from urllib.parse import quote_plus as _qp, urlparse as _up
-        try:
-            bing_url = f"https://www.bing.com/search?q={_qp('HDFC Bank IBM deal 2023')}&count=10&setlang=en"
-            _hdrs = {"x-api-key": scraper_api_key} if scraper_api_key else {}
-            async with _httpx.AsyncClient(timeout=25) as client:
-                r = await client.get(f"{scraper_base_url.rstrip('/')}/scrape/web", params={"url": bing_url}, headers=_hdrs)
-            body = r.json() if r.is_success else {}
-            links = (body.get("data") or {}).get("links", [])
-            skip = {"bing.com", "microsoft.com", "msn.com"}
-            urls = [lnk["href"] for lnk in links if lnk.get("href","").startswith("http")
-                    and not any(s in lnk["href"] for s in skip)][:4]
-            import re as _re2
-            body = (body.get("data") or {}).get("bodyText", "") if not r.is_success else (r.json().get("data") or {}).get("bodyText", "")
-            raw = _re2.findall(r'https?://[^\s\'"<>]+', body)
-            result_urls = [u.rstrip(".,;)") for u in raw if not any(s in u for s in skip)][:4]
-            out["bing_search_test"] = {"status_code": r.status_code, "ok": r.is_success,
-                                        "body_words": len(body.split()), "result_urls": len(result_urls),
-                                        "sample": result_urls[:3]}
-        except Exception as e:
-            out["bing_search_test"] = {"error": str(e)}
+    # Test Google News RSS search
+    import httpx as _httpx, re as _re2
+    from urllib.parse import quote_plus as _qp
+    try:
+        rss_url = f"https://news.google.com/rss/search?q={_qp('HDFC Bank IBM deal 2023')}&hl=en-US&gl=US&ceid=US:en"
+        async with _httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            r = await client.get(rss_url, headers={"User-Agent": "Mozilla/5.0 (compatible; RSS reader)"})
+        urls = [u for u in _re2.findall(r'<link>([^<]+)</link>', r.text) if u.startswith("http") and "google.com" not in u][:4]
+        out["gnews_rss_test"] = {"status_code": r.status_code, "ok": r.is_success,
+                                  "urls_found": len(urls), "sample": urls}
+    except Exception as e:
+        out["gnews_rss_test"] = {"error": str(e)}
 
     # Test custom scraper API (vibhorkumar1209/scraper-api)
     if scraper_base_url:
