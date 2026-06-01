@@ -220,7 +220,65 @@ def build_search_queries(
     return queries
 
 
-# ── Step 2: Search via Jina → collect URLs ────────────────────────────────────
+# ── Step 2: Search via DuckDuckGo / Apify / Jina → collect URLs ──────────────
+
+async def _ddg_search(queries: list[str], results_per_query: int = 10) -> list[str]:
+    """
+    Search via DuckDuckGo HTML endpoint — free, no API key, no rate limits.
+    Runs queries in parallel batches of 5.
+    """
+    from urllib.parse import quote_plus, unquote
+
+    async def _one(query: str) -> list[str]:
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                r = await client.get(
+                    "https://html.duckduckgo.com/html/",
+                    params={"q": query},
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.5",
+                    },
+                )
+                if not r.is_success:
+                    return []
+                # DDG HTML result links appear as /l/?uddg=URL or result__a hrefs
+                # Extract redirect URLs from uddg= parameter
+                import re
+                uddg = re.findall(r'uddg=(https?%3A[^&"]+)', r.text)
+                urls = [unquote(u) for u in uddg]
+                # Also extract direct href links from result anchors
+                direct = re.findall(r'class="result__url"[^>]*>([^<]+)<', r.text)
+                # Combine and return unique non-DDG URLs
+                all_urls = urls + [f"https://{d.strip()}" for d in direct if d.strip()]
+                seen: set = set()
+                out = []
+                for u in all_urls:
+                    if u not in seen and "duckduckgo.com" not in u:
+                        seen.add(u)
+                        out.append(u)
+                return out[:results_per_query]
+        except Exception as e:
+            logger.debug(f"DDG search error: {e}")
+            return []
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for i in range(0, len(queries[:40]), 5):
+        batch = queries[i: i + 5]
+        results = await asyncio.gather(*[_one(q) for q in batch], return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                continue
+            for url in (result or []):
+                if url and url not in seen:
+                    seen.add(url)
+                    urls.append(url)
+
+    logger.info(f"DDG search: {len(urls)} URLs from {len(queries[:40])} queries")
+    return urls
+
 
 async def _apify_google_search(queries: list[str], results_per_query: int = 10) -> list[str]:
     """
@@ -371,14 +429,13 @@ async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
                     break
         return out
 
-    # Primary: ScraperAPI (parallel, no per-run overhead)
-    if SCRAPER_API_KEY:
-        raw = await _scraperapi_google_search(queries, results_per_query=10)
-        urls = _filter(raw)
-        if urls:
-            logger.info(f"ScraperAPI returned {len(urls)} filtered URLs")
-            return urls
-        logger.warning("ScraperAPI returned no URLs — trying Apify")
+    # Primary: DuckDuckGo HTML (free, no API key needed)
+    raw = await _ddg_search(queries, results_per_query=10)
+    urls = _filter(raw)
+    if urls:
+        logger.info(f"DDG returned {len(urls)} filtered URLs")
+        return urls
+    logger.warning("DDG returned no URLs — trying Apify")
 
     # Secondary: Apify Google Search Scraper
     if APIFY_KEY:
@@ -386,7 +443,7 @@ async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
         urls = _filter(raw)
         if urls:
             return urls
-        logger.warning("Apify Google Search returned no URLs — falling back to Jina")
+        logger.warning("Apify returned no URLs — falling back to Jina")
 
     # Fallback: Jina (batched)
     seen: set[str] = set()

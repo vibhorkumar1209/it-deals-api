@@ -431,6 +431,19 @@ async def debug_enrich():
         except Exception as e:
             out["claude_test"] = f"ERROR: {e}"
 
+    # Test DuckDuckGo HTML search (no API key needed)
+    import httpx as _httpx, re as _re
+    from urllib.parse import unquote as _unquote
+    try:
+        async with _httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            r = await client.get("https://html.duckduckgo.com/html/", params={"q": '"HDFC Bank" IBM deal 2023'},
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        uddg = _re.findall(r'uddg=(https?%3A[^&"]+)', r.text)
+        urls = [_unquote(u) for u in uddg if "duckduckgo.com" not in _unquote(u)][:3]
+        out["ddg_test"] = {"status_code": r.status_code, "ok": r.is_success, "urls_found": len(urls), "sample_urls": urls}
+    except Exception as e:
+        out["ddg_test"] = {"error": str(e)}
+
     # Test custom scraper API (vibhorkumar1209/scraper-api)
     if scraper_base_url:
         import httpx as _httpx
