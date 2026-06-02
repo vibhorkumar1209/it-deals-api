@@ -109,30 +109,34 @@ def build_search_queries(
     yr_str = " OR ".join(str(y) for y in years)
 
     # ── Independent lists ─────────────────────────────────────────────────────
-    # Put fallback (high-signal) vendors first, then full list — prevents obscure vendors in top-N
-    _full_vendors = lists.get("vendors", _FALLBACK_VENDORS)
-    vendor_meta    = lists.get("vendor_meta", {})
-    vendor_cat_map = lists.get("vendor_cat_map", {})
+    _full_vendors      = lists.get("vendors", _FALLBACK_VENDORS)
+    vendor_meta        = lists.get("vendor_meta", {})
+    vendor_cat_map     = lists.get("vendor_cat_map", {})
+    industry_vendor_map = lists.get("industry_vendor_map", {})  # industry → [vendors] from Customer Industry file
 
-    # Industry filtering: if industry provided, prefer vendors whose sub_industry or
-    # primary_market contains a keyword from the industry string (case-insensitive)
+    # Industry filtering: use industry_vendor_map (customer-industry→vendor mapping)
+    # Match user's industry string against the 18 known industry keys (case-insensitive, partial)
     if industry:
         ind_lower = industry.lower()
-        ind_tokens = [t.strip() for t in ind_lower.replace(",", " ").split() if len(t.strip()) > 3]
-        def _industry_match(v: str) -> bool:
-            meta = vendor_meta.get(v, {})
-            haystack = (
-                meta.get("sub_industry", "") + " " +
-                meta.get("primary_market", "") + " " +
-                " ".join(vendor_cat_map.get(v, []))
-            ).lower()
-            return any(tok in haystack for tok in ind_tokens)
-        industry_vendors = [v for v in _full_vendors if _industry_match(v)]
-        # Industry-matched vendors first, then fallback list, then rest
+        industry_vendors: list[str] = []
+        for ind_key, ind_vendors in industry_vendor_map.items():
+            # Match if user string contains the industry key or vice versa
+            if ind_lower in ind_key.lower() or ind_key.lower() in ind_lower:
+                industry_vendors.extend(ind_vendors)
+        # Deduplicate while preserving order
+        seen_iv: set = set()
+        industry_vendors = [v for v in industry_vendors if not (v in seen_iv or seen_iv.add(v))]
+        # Put fallback (high-signal) vendors that also serve this industry first,
+        # then remaining industry vendors, then fallback vendors not in industry, then rest
+        industry_set = set(industry_vendors)
+        fallback_in_industry = [v for v in _FALLBACK_VENDORS if v in industry_set]
+        fallback_not_in_industry = [v for v in _FALLBACK_VENDORS if v not in industry_set]
+        remaining_industry = [v for v in industry_vendors if v not in set(_FALLBACK_VENDORS)]
         all_vendors = list(dict.fromkeys(
-            (extra_vendors or []) + industry_vendors + _FALLBACK_VENDORS + _full_vendors
+            (extra_vendors or []) + fallback_in_industry + remaining_industry
+            + fallback_not_in_industry + _full_vendors
         ))
-        logger.info(f"Industry filter '{industry}': {len(industry_vendors)} matched vendors prioritised")
+        logger.info(f"Industry filter '{industry}': {len(industry_vendors)} vendors ({len(fallback_in_industry)} high-signal)")
     else:
         all_vendors = list(dict.fromkeys((extra_vendors or []) + _FALLBACK_VENDORS + _full_vendors))
 
