@@ -205,6 +205,7 @@ class EnrichInput(BaseModel):
     company_name: str
     domain: str
     industry: str = ""   # e.g. "banking", "retail", "manufacturing" — filters vendor list
+    vendor: str = ""     # specific vendor to track for this company — prepended to T1 search
 
 class SchemaField(BaseModel):
     key: str
@@ -252,13 +253,16 @@ async def enrich_task(req: EnrichTaskRequest):
             company_deals: list[dict] = []
 
             try:
+                # Per-company vendor goes first in T1 extra_vendors
+                company_vendors = ([inp.vendor.strip()] if inp.vendor.strip() else []) + list(req.vendors)
+
                 async for event in enrich_company(
                     company_name=inp.company_name,
                     domain=inp.domain,
                     goal=req.goal,
                     schema_fields=schema_fields,
                     year_range=(2016, 2025),
-                    extra_vendors=req.vendors,
+                    extra_vendors=company_vendors or None,
                     extra_sources=req.sources,
                     extra_keywords=req.keywords,
                     industry=inp.industry,
