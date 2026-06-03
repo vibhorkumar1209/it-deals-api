@@ -217,10 +217,11 @@ class EnrichTaskRequest(BaseModel):
     schema_fields: list[SchemaField] = Field(..., min_length=1)
     inputs: list[EnrichInput] = Field(..., min_length=1, max_length=50)
     # Optional enrichment boosters — merged with pipeline defaults when provided
-    vendors: list[str] = Field(default_factory=list)    # extra vendor names to search
-    sources: list[str] = Field(default_factory=list)    # domains for site: queries
-    keywords: list[str] = Field(default_factory=list)   # extra deal signal keywords
-    run_t3: bool = Field(default=False)                 # opt-in: run Tier 3 keyword catch-all
+    vendors: list[str] = Field(default_factory=list)              # extra vendor names to search
+    sources: list[str] = Field(default_factory=list)              # domains for site: queries
+    keywords: list[str] = Field(default_factory=list)             # extra deal signal keywords
+    run_t3: bool = Field(default=False)                           # opt-in: run Tier 3 keyword catch-all
+    competitor_vendors: list[str] = Field(default_factory=list)   # competitor vendors — injected at T2 only
 
 
 @app.post("/api/enrich-task")
@@ -262,6 +263,7 @@ async def enrich_task(req: EnrichTaskRequest):
                     extra_keywords=req.keywords,
                     industry=inp.industry,
                     run_t3=req.run_t3,
+                    t2_vendors=req.competitor_vendors or None,
                 ):
                     if event["type"] == "row_done":
                         deal_row = event["row"]
@@ -513,6 +515,61 @@ async def debug_enrich():
             out["jina_test"] = {"error": str(e)}
 
     return out
+
+
+@app.get("/api/vendor-competitors")
+async def vendor_competitors(vendor: str = ""):
+    """
+    Given a vendor name, return its top competitors based on shared customer industries.
+    Uses industry_vendor_map + vendor_industry_map from lists.json.
+    """
+    if not vendor.strip():
+        return {"vendor": vendor, "competitors": [], "industries": []}
+
+    from enrich_pipeline import _load_lists, _FALLBACK_VENDORS
+    lists = _load_lists()
+    vendor_industry_map: dict = lists.get("vendor_industry_map", {})
+    industry_vendor_map: dict = lists.get("industry_vendor_map", {})
+
+    # Find vendor's served industries (exact match first, then partial)
+    vendor_lower = vendor.strip().lower()
+    vendor_industries: list[str] = []
+    for v, inds in vendor_industry_map.items():
+        if v.lower() == vendor_lower:
+            vendor_industries = inds
+            break
+    if not vendor_industries:
+        for v, inds in vendor_industry_map.items():
+            if vendor_lower in v.lower() or v.lower() in vendor_lower:
+                vendor_industries = inds
+                break
+
+    if not vendor_industries:
+        return {"vendor": vendor, "competitors": [], "industries": [], "message": "Vendor not found in dataset"}
+
+    # Score other vendors by shared-industry count
+    competitor_counts: dict[str, int] = {}
+    for ind in vendor_industries:
+        ind_lower = ind.lower()
+        for ind_key, ind_vendors in industry_vendor_map.items():
+            if ind_lower in ind_key.lower() or ind_key.lower() in ind_lower:
+                for v in ind_vendors:
+                    if v.lower() != vendor_lower:
+                        competitor_counts[v] = competitor_counts.get(v, 0) + 1
+
+    fallback_set = set(_FALLBACK_VENDORS)
+    # Sort: high-signal vendors first, then by overlap count
+    sorted_competitors = sorted(
+        competitor_counts.keys(),
+        key=lambda v: (0 if v in fallback_set else 1, -competitor_counts[v], v)
+    )
+
+    return {
+        "vendor": vendor,
+        "industries": vendor_industries[:5],
+        "competitors": sorted_competitors[:10],
+        "total_overlap": len(sorted_competitors),
+    }
 
 
 if __name__ == "__main__":

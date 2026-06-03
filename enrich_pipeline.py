@@ -92,6 +92,7 @@ def build_search_queries(
     extra_sources: list[str] | None = None,
     extra_keywords: list[str] | None = None,
     industry: str = "",
+    t2_vendors: list[str] | None = None,  # competitor vendors — injected at T2+ only
 ) -> list[str]:
     """
     Tiered query builder using three independent lists from lists.json:
@@ -116,6 +117,11 @@ def build_search_queries(
 
     # Industry filtering: use industry_vendor_map (customer-industry→vendor mapping)
     # Match user's industry string against the 18 known industry keys (case-insensitive, partial)
+    # For T2+: prepend competitor vendors (injected by user's vendor lookup)
+    effective_extra = list(dict.fromkeys(
+        (extra_vendors or []) + (t2_vendors if tier >= 2 and t2_vendors else [])
+    ))
+
     if industry:
         ind_lower = industry.lower()
         industry_vendors: list[str] = []
@@ -133,12 +139,14 @@ def build_search_queries(
         fallback_not_in_industry = [v for v in _FALLBACK_VENDORS if v not in industry_set]
         remaining_industry = [v for v in industry_vendors if v not in set(_FALLBACK_VENDORS)]
         all_vendors = list(dict.fromkeys(
-            (extra_vendors or []) + fallback_in_industry + remaining_industry
+            effective_extra + fallback_in_industry + remaining_industry
             + fallback_not_in_industry + _full_vendors
         ))
         logger.info(f"Industry filter '{industry}': {len(industry_vendors)} vendors ({len(fallback_in_industry)} high-signal)")
     else:
-        all_vendors = list(dict.fromkeys((extra_vendors or []) + _FALLBACK_VENDORS + _full_vendors))
+        all_vendors = list(dict.fromkeys(effective_extra + _FALLBACK_VENDORS + _full_vendors))
+    if tier >= 2 and t2_vendors:
+        logger.info(f"T2 competitor vendors injected: {t2_vendors[:5]}")
 
     kw_product   = list(dict.fromkeys((extra_keywords or []) + lists.get("kw_product",    [])))
     kw_process   = list(dict.fromkeys(                         lists.get("kw_process",   [])))
@@ -721,6 +729,7 @@ async def _run_tier(
     extra_sources: list[str] | None,
     extra_keywords: list[str] | None,
     industry: str = "",
+    t2_vendors: list[str] | None = None,
 ) -> tuple[list[dict], int]:
     """Run one search tier. Returns (deals, relevant_page_count)."""
     queries = build_search_queries(
@@ -729,6 +738,7 @@ async def _run_tier(
         extra_sources=extra_sources,
         extra_keywords=extra_keywords,
         industry=industry,
+        t2_vendors=t2_vendors,
     )
     raw_urls = await collect_urls(queries, max_urls=max_urls)
     urls = _dedup_by_domain([u for u in raw_urls if u not in seen_urls])
@@ -764,6 +774,7 @@ async def enrich_company(
     extra_keywords: list[str] | None = None,
     industry: str = "",
     run_t3: bool = False,
+    t2_vendors: list[str] | None = None,  # competitor vendors — T2 only
 ) -> AsyncGenerator[dict, None]:
     """
     Tiered enrichment pipeline powered by lists.json.
@@ -799,6 +810,7 @@ async def enrich_company(
         task = asyncio.ensure_future(_run_tier(
             company_name, goal, schema_fields, year_range, tier, max_urls,
             seen_urls, extra_vendors, extra_sources, extra_keywords, industry,
+            t2_vendors=t2_vendors,
         ))
         elapsed = 0
         while not task.done() and elapsed < 1200:
