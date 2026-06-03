@@ -208,10 +208,11 @@ def build_search_queries(
     def _vendor_domain(v: str) -> str:
         return re.sub(r'[^a-z0-9]', '', v.lower()) + ".com"
 
-    # Vendor-site queries: for each explicitly-specified vendor, search vendor's own website
-    # These are HIGH-signal — press releases like tavant.com/news/daimler-truck-partners-with-tavant
+    # Vendor-site queries: search every specified vendor's own website for company mentions
+    # Covers extra_vendors (row vendor) + t2_vendors (competitors) — all may have press releases
+    _all_specified_vendors = list(dict.fromkeys((extra_vendors or []) + (t2_vendors or [])))
     queries_vendor_site: list[str] = []
-    for v in (extra_vendors or []):
+    for v in _all_specified_vendors:
         vdom = _vendor_domain(v)
         queries_vendor_site.append(f'site:{vdom} {co}')
 
@@ -237,8 +238,8 @@ def build_search_queries(
         for kw in kw_process[:5]:
             queries_kw.append(f'{co} "{kw}" vendor OR outsourcing OR contract ({yr_str})')
 
-        # Site: queries — reduce to 5 groups when vendor-site queries present, else 8
-        n_site_groups = max(5, TIER1_MAX_SOURCES - len(queries_vendor_site))
+        # Site: queries — give back budget consumed by vendor-site queries (min 3 groups)
+        n_site_groups = max(3, TIER1_MAX_SOURCES - len(queries_vendor_site))
         for i in range(0, min(len(sources), n_site_groups * SOURCE_GROUP_SZ), SOURCE_GROUP_SZ):
             grp = sources[i: i + SOURCE_GROUP_SZ]
             site_expr = " OR ".join(f"site:{s}" for s in grp)
@@ -287,7 +288,8 @@ def build_search_queries(
         queries_broad.append(f'{co} outsourcing managed services digital transformation ({yr_str})')
 
     # Final order: vendor-site (own press releases, highest precision) → vendor → kw → site → broad
-    queries = queries_vendor_site[:3] + queries_vendor + queries_kw + queries_site + queries_broad
+    # No hard cap on vendor-site — site-group budget already shrinks to compensate
+    queries = queries_vendor_site + queries_vendor + queries_kw + queries_site + queries_broad
 
     logger.info(f"Tier {tier}: {len(queries)} queries for {company_name} "
                 f"({len(vendors)} vendors, sources={len(sources)})")
