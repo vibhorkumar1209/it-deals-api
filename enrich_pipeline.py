@@ -231,9 +231,11 @@ def build_search_queries(
             site_expr = " OR ".join(f"site:{s}" for s in grp)
             queries_site.append(f'({site_expr}) {co} deal OR contract OR agreement ({yr_str})')
 
-        # Broad anchors (2 per year range)
+        # Broad anchors — 4 queries: named deal / press release style catches anything not vendor-specific
         queries_broad.append(f'{co} IT deal contract signed ({yr_str})')
         queries_broad.append(f'{co} technology outsourcing agreement ({yr_str})')
+        queries_broad.append(f'{co} selects chooses vendor partner software platform ({yr_str})')
+        queries_broad.append(f'{co} digital transformation announcement press release ({yr_str})')
 
     elif tier == 2:
         # Vendor + sub-industry + process keyword combos
@@ -643,10 +645,14 @@ async def scrape_urls_jina_fallback(urls: list[str]) -> list[dict]:
 # ── Step 4: Identify deal-relevant pages ─────────────────────────────────────
 
 def is_deal_page(text: str, company_name: str) -> bool:
-    """Quick relevance filter — must mention company + at least one deal signal."""
+    """Quick relevance filter — must mention company (or short alias) + at least one deal signal."""
     tl = text.lower()
-    cn = company_name.lower()
-    if cn not in tl:
+    # Check full name AND short alias (e.g. "Daimler Truck" for "Daimler Truck North America")
+    names_to_check = [company_name.lower()]
+    short = _short_name(company_name)
+    if short:
+        names_to_check.append(short.lower())
+    if not any(n in tl for n in names_to_check):
         return False
     deal_signals = [
         "deal", "contract", "signed", "awarded", "selected", "partnership",
@@ -691,8 +697,10 @@ def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schem
     if not combined:
         return []
 
+    short_alias = _short_name(company_name)
+    alias_note = f" (also referred to as \"{short_alias}\" in sources)" if short_alias else ""
     prompt = (
-        f"You are extracting IT deal records for {company_name} from scraped web content.\n\n"
+        f"You are extracting IT deal records for {company_name}{alias_note} from scraped web content.\n\n"
         f"GOAL: {goal}\n\n"
         f"KNOWN VENDOR REFERENCE LIST (use for matching vendor names exactly):\n{vendor_hint}\n\n"
         f"Extract EVERY distinct deal or contract mentioned. Each deal = one JSON object.\n"
