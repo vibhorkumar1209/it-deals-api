@@ -203,9 +203,21 @@ def build_search_queries(
     queries_site: list[str] = []
     queries_broad: list[str] = []
 
+    # Derive domain guesses for explicitly-specified vendors so we can add site: queries
+    # e.g. "Tavant" → "tavant.com", "TCS" → "tcs.com", "HCLTech" → "hcltech.com"
+    def _vendor_domain(v: str) -> str:
+        return re.sub(r'[^a-z0-9]', '', v.lower()) + ".com"
+
+    # Vendor-site queries: for each explicitly-specified vendor, search vendor's own website
+    # These are HIGH-signal — press releases like tavant.com/news/daimler-truck-partners-with-tavant
+    queries_vendor_site: list[str] = []
+    for v in (extra_vendors or []):
+        vdom = _vendor_domain(v)
+        queries_vendor_site.append(f'site:{vdom} {co}')
+
     if tier == 1:
         # T1 target: ≤40 queries (1 Apify batch = 1 parallel run = ~90s max)
-        # 15 vendors + 8 product kw + 5 process kw + 8 site groups + 2 broad = 38
+        # vendor-site (up to 3) + 15 vendors + 8 product kw + 5 process kw + 5 site groups + 4 broad ≤ 40
         for vendor in vendors:
             meta   = vendor_meta.get(vendor, {})
             market = meta.get("primary_market", "")
@@ -225,17 +237,18 @@ def build_search_queries(
         for kw in kw_process[:5]:
             queries_kw.append(f'{co} "{kw}" vendor OR outsourcing OR contract ({yr_str})')
 
-        # Site: queries — top 8 source groups (24 domains) in T1
-        for i in range(0, min(len(sources), TIER1_MAX_SOURCES * SOURCE_GROUP_SZ), SOURCE_GROUP_SZ):
+        # Site: queries — reduce to 5 groups when vendor-site queries present, else 8
+        n_site_groups = max(5, TIER1_MAX_SOURCES - len(queries_vendor_site))
+        for i in range(0, min(len(sources), n_site_groups * SOURCE_GROUP_SZ), SOURCE_GROUP_SZ):
             grp = sources[i: i + SOURCE_GROUP_SZ]
             site_expr = " OR ".join(f"site:{s}" for s in grp)
             queries_site.append(f'({site_expr}) {co} deal OR contract OR agreement ({yr_str})')
 
-        # Broad anchors — 4 queries: named deal / press release style catches anything not vendor-specific
+        # Broad anchors — no year filter on last two to cast widest net
         queries_broad.append(f'{co} IT deal contract signed ({yr_str})')
         queries_broad.append(f'{co} technology outsourcing agreement ({yr_str})')
-        queries_broad.append(f'{co} selects chooses vendor partner software platform ({yr_str})')
-        queries_broad.append(f'{co} digital transformation announcement press release ({yr_str})')
+        queries_broad.append(f'{co} "partners with" OR "selects" OR "chooses" announcement')
+        queries_broad.append(f'{co} "press release" deal OR contract OR implementation')
 
     elif tier == 2:
         # Vendor + sub-industry + process keyword combos
@@ -273,8 +286,8 @@ def build_search_queries(
         queries_broad.append(f'{co} vendor selected partnership announcement ({yr_str})')
         queries_broad.append(f'{co} outsourcing managed services digital transformation ({yr_str})')
 
-    # Final order: vendor (most targeted) → kw → site → broad
-    queries = queries_vendor + queries_kw + queries_site + queries_broad
+    # Final order: vendor-site (own press releases, highest precision) → vendor → kw → site → broad
+    queries = queries_vendor_site[:3] + queries_vendor + queries_kw + queries_site + queries_broad
 
     logger.info(f"Tier {tier}: {len(queries)} queries for {company_name} "
                 f"({len(vendors)} vendors, sources={len(sources)})")
