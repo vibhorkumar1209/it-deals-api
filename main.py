@@ -558,41 +558,39 @@ async def vendor_competitors(vendor: str = ""):
     kw_process = meta.get("kw_process", [])
 
     # ── 2. Ask Claude for segmented competitors ────────────────────────────────
+    # NOTE: We do NOT send vendor_meta (sub_industry, kw_process) to Claude —
+    # that data comes from IT-deal CRM records and is often misleading for niche
+    # vendors (e.g. Tavant's "Claims" = warranty claims, not insurance claims).
+    # Claude Sonnet's training knowledge about the vendor is more reliable.
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
     claude_segments: list[dict] = []
     if anthropic_key:
-        context_parts = []
-        if sub_industry:
-            context_parts.append(f"sub-industry: {sub_industry}")
-        if kw_process:
-            context_parts.append(f"specializes in: {', '.join(kw_process[:6])}")
-        if industries:
-            context_parts.append(f"serves: {', '.join(industries[:3])}")
-        context = f" ({'; '.join(context_parts)})" if context_parts else ""
-
         prompt = (
-            f"Analyze {vendor_clean}{context} and identify its main business segments and the top competitors in each segment.\n\n"
-            f"Return ONLY a JSON object — no explanation, no markdown — in this exact format:\n"
-            f'{{"segments": [{{"name": "Segment Name", "description": "one-line description of what this segment covers", "competitors": ["Vendor A", "Vendor B", "Vendor C"]}}, ...]}}\n\n'
+            f"You are an IT market intelligence analyst with deep knowledge of enterprise software vendors.\n\n"
+            f"Task: Identify the main business segments of **{vendor_clean}** and the top direct competitors in each segment.\n\n"
+            f"Use ONLY your own knowledge about {vendor_clean}'s actual products, solutions, and market positioning. "
+            f"Do not infer from generic category labels.\n\n"
+            f"Return ONLY a valid JSON object — no explanation, no markdown, no code fences:\n"
+            f'{{"segments": [{{"name": "Segment Name", "description": "one-line description of the product/solution area", "competitors": ["Vendor A", "Vendor B", "Vendor C", "Vendor D"]}}, ...]}}\n\n'
             f"Rules:\n"
-            f"- Identify 2-4 distinct product/service segments that {vendor_clean} actually operates in\n"
-            f"- List 3-5 direct competitors per segment (vendors competing for the same customer contracts)\n"
-            f"- Use the official/full company name for each competitor\n"
-            f"- Do NOT include generic IT services firms (Infosys, TCS, Accenture) unless {vendor_clean} itself is a generic SI"
+            f"- Identify 2-4 distinct product/solution segments that {vendor_clean} actually competes in\n"
+            f"- List 4-6 direct competitors per segment — vendors actively competing for the same customer RFPs\n"
+            f"- Use the official company name (e.g. 'Black Knight' not 'blackknight.com')\n"
+            f"- Exclude generic IT services giants (TCS, Infosys, Accenture, Wipro, Cognizant) unless {vendor_clean} is itself a generic IT services firm\n"
+            f"- If you are not confident about {vendor_clean}'s specific products, say so in the description rather than guessing"
         )
         try:
             def _ask_claude():
                 ac = _anthropic.Anthropic(api_key=anthropic_key)
                 msg = ac.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=600,
+                    model="claude-sonnet-4-5",
+                    max_tokens=800,
                     messages=[{"role": "user", "content": prompt}],
                 )
                 return msg.content[0].text.strip()
 
             raw = await asyncio.to_thread(_ask_claude)
             import re as _re
-            # Extract JSON object from response
             m = _re.search(r'\{.*\}', raw, _re.DOTALL)
             if m:
                 parsed = json.loads(m.group())
