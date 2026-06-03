@@ -520,55 +520,115 @@ async def debug_enrich():
 @app.get("/api/vendor-competitors")
 async def vendor_competitors(vendor: str = ""):
     """
-    Given a vendor name, return its top competitors based on shared customer industries.
-    Uses industry_vendor_map + vendor_industry_map from lists.json.
+    Given a vendor name, return its top 8-10 direct competitors.
+    Primary: Claude (targeted, knows IT vendor landscape).
+    Fallback: kw_process/sub_industry overlap scoring from lists.json.
     """
     if not vendor.strip():
         return {"vendor": vendor, "competitors": [], "industries": []}
 
     from enrich_pipeline import _load_lists, _FALLBACK_VENDORS
-    lists = _load_lists()
-    vendor_industry_map: dict = lists.get("vendor_industry_map", {})
-    industry_vendor_map: dict = lists.get("industry_vendor_map", {})
+    import anthropic as _anthropic
 
-    # Find vendor's served industries (exact match first, then partial)
-    vendor_lower = vendor.strip().lower()
-    vendor_industries: list[str] = []
-    for v, inds in vendor_industry_map.items():
+    vendor_clean = vendor.strip()
+    vendor_lower = vendor_clean.lower()
+    lists = _load_lists()
+    vendor_meta: dict = lists.get("vendor_meta", {})
+    vendor_industry_map: dict = lists.get("vendor_industry_map", {})
+
+    # ── 1. Find vendor record (exact → partial match) ──────────────────────────
+    matched_name = ""
+    for v in vendor_meta:
         if v.lower() == vendor_lower:
-            vendor_industries = inds
+            matched_name = v
             break
-    if not vendor_industries:
-        for v, inds in vendor_industry_map.items():
+    if not matched_name:
+        for v in vendor_meta:
             if vendor_lower in v.lower() or v.lower() in vendor_lower:
-                vendor_industries = inds
+                matched_name = v
                 break
 
-    if not vendor_industries:
-        return {"vendor": vendor, "competitors": [], "industries": [], "message": "Vendor not found in dataset"}
+    meta = vendor_meta.get(matched_name, {})
+    industries = vendor_industry_map.get(matched_name, [])
+    sub_industry = meta.get("sub_industry", "")
+    kw_process = meta.get("kw_process", [])
 
-    # Score other vendors by shared-industry count
-    competitor_counts: dict[str, int] = {}
-    for ind in vendor_industries:
-        ind_lower = ind.lower()
-        for ind_key, ind_vendors in industry_vendor_map.items():
-            if ind_lower in ind_key.lower() or ind_key.lower() in ind_lower:
-                for v in ind_vendors:
-                    if v.lower() != vendor_lower:
-                        competitor_counts[v] = competitor_counts.get(v, 0) + 1
+    # ── 2. Ask Claude for targeted competitors ─────────────────────────────────
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    claude_competitors: list[str] = []
+    if anthropic_key:
+        # Build context from known metadata to help Claude be precise
+        context_parts = []
+        if sub_industry:
+            context_parts.append(f"sub-industry: {sub_industry}")
+        if kw_process:
+            context_parts.append(f"specializes in: {', '.join(kw_process[:6])}")
+        if industries:
+            context_parts.append(f"serves: {', '.join(industries[:3])}")
+        context = f" ({'; '.join(context_parts)})" if context_parts else ""
 
-    fallback_set = set(_FALLBACK_VENDORS)
-    # Sort: high-signal vendors first, then by overlap count
-    sorted_competitors = sorted(
-        competitor_counts.keys(),
-        key=lambda v: (0 if v in fallback_set else 1, -competitor_counts[v], v)
-    )
+        prompt = (
+            f"List the top 8 direct competitors of {vendor_clean}{context} in the IT services / enterprise software space. "
+            f"Return ONLY a JSON array of vendor/company names, no explanation. "
+            f"Focus on vendors competing for the same customer deals, not adjacent markets. "
+            f"Example format: [\"Vendor A\", \"Vendor B\", ...]"
+        )
+        try:
+            def _ask_claude():
+                ac = _anthropic.Anthropic(api_key=anthropic_key)
+                msg = ac.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=200,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return msg.content[0].text.strip()
 
+            raw = await asyncio.to_thread(_ask_claude)
+            # Parse JSON array from response
+            import re as _re
+            m = _re.search(r'\[.*?\]', raw, _re.DOTALL)
+            if m:
+                parsed = json.loads(m.group())
+                claude_competitors = [str(c).strip() for c in parsed if c][:10]
+        except Exception as e:
+            logger.warning(f"Claude competitor lookup failed: {e}")
+
+    if claude_competitors:
+        return {
+            "vendor": vendor_clean,
+            "matched_name": matched_name or vendor_clean,
+            "industries": industries[:5],
+            "competitors": claude_competitors,
+            "source": "claude",
+        }
+
+    # ── 3. Fallback: kw_process specificity scoring ───────────────────────────
+    target_proc = set(kw_process)
+    target_tech = set(meta.get("kw_technology", []))
+    scores: dict[str, float] = {}
+    for vname, vmeta in vendor_meta.items():
+        if vendor_lower in vname.lower():
+            continue
+        vproc = vmeta.get("kw_process", [])
+        vtech = vmeta.get("kw_technology", [])
+        proc_overlap = len(target_proc & set(vproc))
+        tech_overlap = len(target_tech & set(vtech))
+        sub_match = 1 if vmeta.get("sub_industry") == sub_industry and sub_industry else 0
+        # Specificity weight: penalise vendors with huge process lists (generic SI)
+        proc_spec = (proc_overlap / max(len(vproc), 1)) * proc_overlap * 3
+        tech_spec = (tech_overlap / max(len(vtech), 1)) * tech_overlap
+        score = proc_spec + tech_spec + sub_match * 2
+        if score > 0:
+            scores[vname] = score
+
+    sorted_fallback = sorted(scores, key=lambda v: -scores[v])[:10]
     return {
-        "vendor": vendor,
-        "industries": vendor_industries[:5],
-        "competitors": sorted_competitors[:10],
-        "total_overlap": len(sorted_competitors),
+        "vendor": vendor_clean,
+        "matched_name": matched_name or vendor_clean,
+        "industries": industries[:5],
+        "competitors": sorted_fallback,
+        "source": "dataset",
+        "message": "Claude unavailable — using dataset scoring" if not anthropic_key else "Claude failed — using dataset scoring",
     }
 
 
