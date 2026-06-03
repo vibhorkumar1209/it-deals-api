@@ -204,8 +204,9 @@ async def extract(req: ReExtractRequest):
 class EnrichInput(BaseModel):
     company_name: str
     domain: str
-    industry: str = ""   # e.g. "banking", "retail", "manufacturing" — filters vendor list
-    vendor: str = ""     # specific vendor to track for this company — prepended to T1 search
+    industry: str = ""              # filters vendor list to industry-relevant vendors
+    vendor: str = ""                # primary vendor for this company — T1 priority
+    competitor_vendors: list[str] = []  # competitors of vendor — injected at T2
 
 class SchemaField(BaseModel):
     key: str
@@ -218,11 +219,10 @@ class EnrichTaskRequest(BaseModel):
     schema_fields: list[SchemaField] = Field(..., min_length=1)
     inputs: list[EnrichInput] = Field(..., min_length=1, max_length=50)
     # Optional enrichment boosters — merged with pipeline defaults when provided
-    vendors: list[str] = Field(default_factory=list)              # extra vendor names to search
-    sources: list[str] = Field(default_factory=list)              # domains for site: queries
-    keywords: list[str] = Field(default_factory=list)             # extra deal signal keywords
-    run_t3: bool = Field(default=False)                           # opt-in: run Tier 3 keyword catch-all
-    competitor_vendors: list[str] = Field(default_factory=list)   # competitor vendors — injected at T2 only
+    vendors: list[str] = Field(default_factory=list)   # global extra vendors for all companies
+    sources: list[str] = Field(default_factory=list)   # domains for site: queries
+    keywords: list[str] = Field(default_factory=list)  # extra deal signal keywords
+    run_t3: bool = Field(default=False)                # opt-in: run Tier 3 keyword catch-all
 
 
 @app.post("/api/enrich-task")
@@ -253,8 +253,10 @@ async def enrich_task(req: EnrichTaskRequest):
             company_deals: list[dict] = []
 
             try:
-                # Per-company vendor goes first in T1 extra_vendors
+                # Per-company vendor goes first in T1; global vendors follow
                 company_vendors = ([inp.vendor.strip()] if inp.vendor.strip() else []) + list(req.vendors)
+                # Per-company competitor_vendors injected at T2
+                t2 = inp.competitor_vendors or None
 
                 async for event in enrich_company(
                     company_name=inp.company_name,
@@ -267,7 +269,7 @@ async def enrich_task(req: EnrichTaskRequest):
                     extra_keywords=req.keywords,
                     industry=inp.industry,
                     run_t3=req.run_t3,
-                    t2_vendors=req.competitor_vendors or None,
+                    t2_vendors=t2,
                 ):
                     if event["type"] == "row_done":
                         deal_row = event["row"]
@@ -524,127 +526,94 @@ async def debug_enrich():
 @app.get("/api/vendor-competitors")
 async def vendor_competitors(vendor: str = ""):
     """
-    Given a vendor name, return its top 8-10 direct competitors.
-    Primary: Claude (targeted, knows IT vendor landscape).
-    Fallback: kw_process/sub_industry overlap scoring from lists.json.
+    Two-step competitor lookup:
+    Step 1 — Ask Claude to describe what the vendor actually does (grounds it in
+              the vendor's real products, not inferred from CRM category labels).
+    Step 2 — Ask Claude to identify segmented competitors based on that description.
+    This prevents misclassification (e.g. Tavant's 'Claims' = warranty, not insurance).
     """
     if not vendor.strip():
-        return {"vendor": vendor, "competitors": [], "industries": []}
+        return {"vendor": vendor, "competitors": [], "segments": []}
 
-    from enrich_pipeline import _load_lists, _FALLBACK_VENDORS
-    import anthropic as _anthropic
+    import anthropic as _anthropic, re as _re
 
     vendor_clean = vendor.strip()
-    vendor_lower = vendor_clean.lower()
-    lists = _load_lists()
-    vendor_meta: dict = lists.get("vendor_meta", {})
-    vendor_industry_map: dict = lists.get("vendor_industry_map", {})
-
-    # ── 1. Find vendor record (exact → partial match) ──────────────────────────
-    matched_name = ""
-    for v in vendor_meta:
-        if v.lower() == vendor_lower:
-            matched_name = v
-            break
-    if not matched_name:
-        for v in vendor_meta:
-            if vendor_lower in v.lower() or v.lower() in vendor_lower:
-                matched_name = v
-                break
-
-    meta = vendor_meta.get(matched_name, {})
-    industries = vendor_industry_map.get(matched_name, [])
-    sub_industry = meta.get("sub_industry", "")
-    kw_process = meta.get("kw_process", [])
-
-    # ── 2. Ask Claude for segmented competitors ────────────────────────────────
-    # NOTE: We do NOT send vendor_meta (sub_industry, kw_process) to Claude —
-    # that data comes from IT-deal CRM records and is often misleading for niche
-    # vendors (e.g. Tavant's "Claims" = warranty claims, not insurance claims).
-    # Claude Sonnet's training knowledge about the vendor is more reliable.
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-    claude_segments: list[dict] = []
-    if anthropic_key:
-        prompt = (
-            f"You are an IT market intelligence analyst with deep knowledge of enterprise software vendors.\n\n"
-            f"Task: Identify the main business segments of **{vendor_clean}** and the top direct competitors in each segment.\n\n"
-            f"Use ONLY your own knowledge about {vendor_clean}'s actual products, solutions, and market positioning. "
-            f"Do not infer from generic category labels.\n\n"
-            f"Return ONLY a valid JSON object — no explanation, no markdown, no code fences:\n"
-            f'{{"segments": [{{"name": "Segment Name", "description": "one-line description of the product/solution area", "competitors": ["Vendor A", "Vendor B", "Vendor C", "Vendor D"]}}, ...]}}\n\n'
-            f"Rules:\n"
-            f"- Identify 2-4 distinct product/solution segments that {vendor_clean} actually competes in\n"
-            f"- List 4-6 direct competitors per segment — vendors actively competing for the same customer RFPs\n"
-            f"- Use the official company name (e.g. 'Black Knight' not 'blackknight.com')\n"
-            f"- Exclude generic IT services giants (TCS, Infosys, Accenture, Wipro, Cognizant) unless {vendor_clean} is itself a generic IT services firm\n"
-            f"- If you are not confident about {vendor_clean}'s specific products, say so in the description rather than guessing"
+
+    if not anthropic_key:
+        return {"vendor": vendor_clean, "competitors": [], "segments": [],
+                "message": "ANTHROPIC_API_KEY not set on server"}
+
+    def _call(messages: list, max_tokens: int = 300) -> str:
+        ac = _anthropic.Anthropic(api_key=anthropic_key)
+        msg = ac.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=max_tokens,
+            messages=messages,
         )
-        try:
-            def _ask_claude():
-                ac = _anthropic.Anthropic(api_key=anthropic_key)
-                msg = ac.messages.create(
-                    model="claude-sonnet-4-5",
-                    max_tokens=800,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                return msg.content[0].text.strip()
+        return msg.content[0].text.strip()
 
-            raw = await asyncio.to_thread(_ask_claude)
-            import re as _re
-            m = _re.search(r'\{.*\}', raw, _re.DOTALL)
-            if m:
-                parsed = json.loads(m.group())
-                segs = parsed.get("segments", [])
-                for seg in segs:
-                    if isinstance(seg, dict) and seg.get("name") and isinstance(seg.get("competitors"), list):
-                        claude_segments.append({
-                            "name": str(seg["name"]),
-                            "description": str(seg.get("description", "")),
-                            "competitors": [str(c).strip() for c in seg["competitors"] if c][:6],
-                        })
-        except Exception as e:
-            logger.warning(f"Claude segmented competitor lookup failed: {e}")
+    # ── Step 1: Ground Claude in what the vendor actually does ─────────────────
+    try:
+        description = await asyncio.to_thread(_call, [{
+            "role": "user",
+            "content": (
+                f"In 3-4 sentences, describe what **{vendor_clean}** does as a company — "
+                f"their core products, key solutions, and primary target markets/industries. "
+                f"Be specific about named products if you know them. "
+                f"If you are not confident about this vendor, say so explicitly."
+            ),
+        }], 300)
+    except Exception as e:
+        logger.warning(f"Vendor description step failed: {e}")
+        description = ""
 
-    if claude_segments:
-        all_competitors = list(dict.fromkeys(
-            c for seg in claude_segments for c in seg["competitors"]
-        ))
+    if not description or "not familiar" in description.lower() or "don't have" in description.lower():
         return {
             "vendor": vendor_clean,
-            "matched_name": matched_name or vendor_clean,
-            "industries": industries[:5],
-            "segments": claude_segments,
-            "competitors": all_competitors,   # flat list for backward compat
-            "source": "claude",
+            "competitors": [],
+            "segments": [],
+            "description": description,
+            "message": f"Claude has limited knowledge of '{vendor_clean}'. Try the full company name.",
         }
 
-    # ── 3. Fallback: kw_process specificity scoring (no segments) ─────────────
-    target_proc = set(kw_process)
-    target_tech = set(meta.get("kw_technology", []))
-    scores: dict[str, float] = {}
-    for vname, vmeta in vendor_meta.items():
-        if vendor_lower in vname.lower():
-            continue
-        vproc = vmeta.get("kw_process", [])
-        vtech = vmeta.get("kw_technology", [])
-        proc_overlap = len(target_proc & set(vproc))
-        tech_overlap = len(target_tech & set(vtech))
-        sub_match = 1 if vmeta.get("sub_industry") == sub_industry and sub_industry else 0
-        proc_spec = (proc_overlap / max(len(vproc), 1)) * proc_overlap * 3
-        tech_spec = (tech_overlap / max(len(vtech), 1)) * tech_overlap
-        score = proc_spec + tech_spec + sub_match * 2
-        if score > 0:
-            scores[vname] = score
+    # ── Step 2: Find segmented competitors using the grounded description ──────
+    compete_prompt = (
+        f"Company: {vendor_clean}\n"
+        f"What they do: {description}\n\n"
+        f"Based on the above, identify {vendor_clean}'s distinct business segments and the "
+        f"top direct competitors in each segment — companies that compete for the same customer RFPs.\n\n"
+        f"Return ONLY valid JSON (no markdown, no code fences):\n"
+        f'{{"segments":[{{"name":"Segment Name","description":"one-line product/solution area","competitors":["A","B","C","D","E"]}}]}}\n\n'
+        f"Rules:\n"
+        f"- 2-4 distinct segments based on actual products described above\n"
+        f"- 4-6 direct competitors per segment (not generic SIs like TCS/Infosys/Accenture unless {vendor_clean} is a generic SI)\n"
+        f"- Official company names only\n"
+        f"- Competitors must actively compete for the same deals, not just adjacent markets"
+    )
+    claude_segments: list[dict] = []
+    try:
+        raw = await asyncio.to_thread(_call, [{"role": "user", "content": compete_prompt}], 900)
+        m = _re.search(r'\{.*\}', raw, _re.DOTALL)
+        if m:
+            parsed = json.loads(m.group())
+            for seg in parsed.get("segments", []):
+                if isinstance(seg, dict) and seg.get("name") and isinstance(seg.get("competitors"), list):
+                    claude_segments.append({
+                        "name": str(seg["name"]),
+                        "description": str(seg.get("description", "")),
+                        "competitors": [str(c).strip() for c in seg["competitors"] if c][:6],
+                    })
+    except Exception as e:
+        logger.warning(f"Competitor segment step failed: {e}")
 
-    sorted_fallback = sorted(scores, key=lambda v: -scores[v])[:10]
+    all_competitors = list(dict.fromkeys(c for seg in claude_segments for c in seg["competitors"]))
     return {
         "vendor": vendor_clean,
-        "matched_name": matched_name or vendor_clean,
-        "industries": industries[:5],
-        "segments": [{"name": "All segments", "description": "", "competitors": sorted_fallback}],
-        "competitors": sorted_fallback,
-        "source": "dataset",
-        "message": "Claude unavailable — using dataset scoring" if not anthropic_key else "Claude failed — using dataset scoring",
+        "description": description,
+        "segments": claude_segments,
+        "competitors": all_competitors,
+        "source": "claude",
     }
 
 
