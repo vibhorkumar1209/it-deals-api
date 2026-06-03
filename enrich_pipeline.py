@@ -80,6 +80,38 @@ TIER2_VENDORS    = 100
 TIER3_VENDORS    = 300
 SOURCE_GROUP_SZ  = 3    # domains per site: query
 
+# Suffixes that are geographic or legal entity markers — stripped to produce a
+# shorter canonical name used as an OR alias in every search query.
+# e.g. "Kubota USA" → "Kubota", "Apple Inc." → "Apple"
+_STRIP_SUFFIXES = re.compile(
+    r'\s*[,]?\s*\b('
+    r'USA|U\.S\.A\.?|US|U\.S\.|UK|U\.K\.|'
+    r'Inc\.?|Incorporated|Corp\.?|Corporation|'
+    r'Ltd\.?|Limited|LLC|LLP|L\.L\.C\.|'
+    r'GmbH|AG|S\.A\.|S\.A|PLC|Plc|NV|BV|'
+    r'Co\.?|Company|Group|Holdings|Holding|'
+    r'North\s+America|South\s+America|Latin\s+America|'
+    r'Asia\s+Pacific|APAC|Europe|Middle\s+East|Africa|Australia|'
+    r'Japan|China|India|Germany|France|Canada'
+    r')\b\.?\s*$',
+    re.IGNORECASE,
+)
+
+def _short_name(name: str) -> str:
+    """Strip trailing geographic/legal suffixes. Returns '' if same as input."""
+    stripped = _STRIP_SUFFIXES.sub("", name).strip(" ,.-")
+    # Only return if meaningfully shorter (at least 2 chars removed)
+    if stripped and stripped.lower() != name.lower() and len(name) - len(stripped) >= 2:
+        return stripped
+    return ""
+
+def _co_expr(company_name: str) -> str:
+    """Build the company search expression, adding short-name OR alias if applicable."""
+    short = _short_name(company_name)
+    if short:
+        return f'("{company_name}" OR "{short}")'
+    return f'"{company_name}"'
+
 
 # ── Step 1: Generate search queries ──────────────────────────────────────────
 
@@ -157,6 +189,13 @@ def build_search_queries(
     n_vendors  = {1: TIER1_VENDORS,  2: TIER2_VENDORS,  3: TIER3_VENDORS}.get(tier, TIER1_VENDORS)
     vendors    = all_vendors[:n_vendors]
 
+    # Company search expression — adds short-name OR alias for subsidiary names
+    # e.g. "Kubota USA" → ("Kubota USA" OR "Kubota")
+    co = _co_expr(company_name)
+    short = _short_name(company_name)
+    if short:
+        logger.info(f"Short-name alias: '{company_name}' → '{short}' (queries use OR alias)")
+
     # Build separate buckets — most targeted first so Apify cap hits best queries
     queries_vendor: list[str] = []
     queries_kw: list[str] = []
@@ -170,29 +209,29 @@ def build_search_queries(
             market = meta.get("primary_market", "")
             cats   = vendor_cat_map.get(vendor, [])
             if market:
-                queries_vendor.append(f'"{company_name}" "{vendor}" "{market}" deal OR contract ({yr_str})')
+                queries_vendor.append(f'{co} "{vendor}" "{market}" deal OR contract ({yr_str})')
             elif cats:
-                queries_vendor.append(f'"{company_name}" "{vendor}" "{cats[0]}" deal OR contract')
+                queries_vendor.append(f'{co} "{vendor}" "{cats[0]}" deal OR contract')
             else:
-                queries_vendor.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+                queries_vendor.append(f'{co} "{vendor}" deal OR contract OR agreement')
 
         # Top product keywords (first 15)
         for kw in kw_product[:15]:
-            queries_kw.append(f'"{company_name}" "{kw}" deal OR contract OR implementation ({yr_str})')
+            queries_kw.append(f'{co} "{kw}" deal OR contract OR implementation ({yr_str})')
 
         # Top process keywords (first 10)
         for kw in kw_process[:10]:
-            queries_kw.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
+            queries_kw.append(f'{co} "{kw}" vendor OR outsourcing OR contract ({yr_str})')
 
         # Site: queries — all 32 sources (every group) in T1
         for i in range(0, len(sources), SOURCE_GROUP_SZ):
             grp = sources[i: i + SOURCE_GROUP_SZ]
             site_expr = " OR ".join(f"site:{s}" for s in grp)
-            queries_site.append(f'({site_expr}) "{company_name}" deal OR contract OR agreement ({yr_str})')
+            queries_site.append(f'({site_expr}) {co} deal OR contract OR agreement ({yr_str})')
 
         # Broad anchors (2 per year range)
-        queries_broad.append(f'"{company_name}" IT deal contract signed ({yr_str})')
-        queries_broad.append(f'"{company_name}" technology outsourcing agreement ({yr_str})')
+        queries_broad.append(f'{co} IT deal contract signed ({yr_str})')
+        queries_broad.append(f'{co} technology outsourcing agreement ({yr_str})')
 
     elif tier == 2:
         # Vendor + sub-industry + process keyword combos
@@ -202,33 +241,33 @@ def build_search_queries(
             vkw_pr  = meta.get("kw_process", [])
             if vkw_pr:
                 for kw in vkw_pr[:2]:
-                    queries_vendor.append(f'"{company_name}" "{vendor}" "{kw}" ({yr_str})')
+                    queries_vendor.append(f'{co} "{vendor}" "{kw}" ({yr_str})')
             elif sub_ind:
-                queries_vendor.append(f'"{company_name}" "{vendor}" "{sub_ind}" contract OR deal')
+                queries_vendor.append(f'{co} "{vendor}" "{sub_ind}" contract OR deal')
             else:
-                queries_vendor.append(f'"{company_name}" "{vendor}" deal OR contract OR agreement')
+                queries_vendor.append(f'{co} "{vendor}" deal OR contract OR agreement')
 
         # Remaining product keywords + first 50 process keywords
         for kw in kw_product[15:]:
-            queries_kw.append(f'"{company_name}" "{kw}" deal OR contract OR implementation ({yr_str})')
+            queries_kw.append(f'{co} "{kw}" deal OR contract OR implementation ({yr_str})')
         for kw in kw_process[10:60]:
-            queries_kw.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
+            queries_kw.append(f'{co} "{kw}" vendor OR outsourcing OR contract ({yr_str})')
 
         # Technology keywords (first 40)
         for kw in kw_technology[:40]:
-            queries_kw.append(f'"{company_name}" "{kw}" deal OR contract OR selected ({yr_str})')
+            queries_kw.append(f'{co} "{kw}" deal OR contract OR selected ({yr_str})')
 
         # No site: queries in T2 — all sources already covered in T1
 
     elif tier >= 3:
         # T3: keyword catch-alls only — no vendor queries (keeps T3 fast and cheap)
         for kw in kw_process[60:]:
-            queries_kw.append(f'"{company_name}" "{kw}" vendor OR outsourcing OR contract ({yr_str})')
+            queries_kw.append(f'{co} "{kw}" vendor OR outsourcing OR contract ({yr_str})')
         for kw in kw_technology[40:]:
-            queries_kw.append(f'"{company_name}" "{kw}" deal OR contract OR selected ({yr_str})')
+            queries_kw.append(f'{co} "{kw}" deal OR contract OR selected ({yr_str})')
 
-        queries_broad.append(f'"{company_name}" vendor selected partnership announcement ({yr_str})')
-        queries_broad.append(f'"{company_name}" outsourcing managed services digital transformation ({yr_str})')
+        queries_broad.append(f'{co} vendor selected partnership announcement ({yr_str})')
+        queries_broad.append(f'{co} outsourcing managed services digital transformation ({yr_str})')
 
     # Final order: vendor (most targeted) → kw → site → broad
     queries = queries_vendor + queries_kw + queries_site + queries_broad
