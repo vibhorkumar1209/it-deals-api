@@ -766,8 +766,16 @@ async def _run_tier(
     extra_keywords: list[str] | None,
     industry: str = "",
     t2_vendors: list[str] | None = None,
-) -> AsyncGenerator[dict, None]:
-    """Run one search tier. Yields progress events then a final 'tier_done' event."""
+    progress_q: "asyncio.Queue | None" = None,
+) -> tuple[list[dict], int]:
+    """Run one search tier. Returns (deals, relevant_page_count).
+    Posts phase messages to progress_q so enrich_company can forward them as
+    heartbeats WITHOUT cancelling this task (asyncio.wait is safe; wait_for is not).
+    """
+    def _progress(msg: str) -> None:
+        if progress_q is not None:
+            progress_q.put_nowait({"type": "heartbeat", "message": msg})
+
     queries = build_search_queries(
         company_name, goal, year_range, tier=tier,
         extra_vendors=extra_vendors,
@@ -776,16 +784,15 @@ async def _run_tier(
         industry=industry,
         t2_vendors=t2_vendors,
     )
-    yield {"type": "heartbeat", "message": f"🔍 Tier {tier}: running {len(queries)} search queries…"}
+    _progress(f"🔍 Tier {tier}: running {len(queries)} search queries…")
 
     raw_urls = await collect_urls(queries, max_urls=max_urls)
     urls = _dedup_by_domain([u for u in raw_urls if u not in seen_urls])
     seen_urls.update(urls)
     if not urls:
-        yield {"type": "tier_done", "deals": [], "relevant": 0}
-        return
+        return [], 0
 
-    yield {"type": "heartbeat", "message": f"📄 Tier {tier}: scraping {len(urls)} pages…"}
+    _progress(f"📄 Tier {tier}: scraping {len(urls)} pages…")
 
     # Scrape: custom scraper → Apify → Jina (in priority order)
     scraped: list[dict] = []
@@ -797,11 +804,11 @@ async def _run_tier(
     if not scraped:
         scraped = await scrape_urls_jina_fallback(urls[:15])
 
-    yield {"type": "heartbeat", "message": f"🧠 Tier {tier}: extracting deals from {len(scraped)} scraped pages…"}
+    _progress(f"🧠 Tier {tier}: extracting from {len(scraped)} pages…")
     relevant = [p for p in scraped if is_deal_page(p["text"], company_name)]
     pages_to_use = relevant if relevant else scraped[:5]
     deals = await asyncio.to_thread(_claude_extract_deals, pages_to_use, company_name, goal, schema_fields)
-    yield {"type": "tier_done", "deals": deals, "relevant": len(relevant)}
+    return deals, len(relevant)
 
 
 async def enrich_company(
@@ -843,41 +850,39 @@ async def enrich_company(
             break
 
         if tier == 2:
-            yield {"type": "heartbeat", "message": f"📈 Only {len(all_deals)} deals — escalating to Tier 2 (broader keywords + more vendors)…"}
+            yield {"type": "heartbeat", "message": f"📈 Only {len(all_deals)} deals — escalating to Tier 2…"}
         elif tier == 3:
-            yield {"type": "heartbeat", "message": f"📈 Tier 3 keyword catch-all enabled — running deep search…"}
+            yield {"type": "heartbeat", "message": f"📈 Tier 3 deep search enabled…"}
 
         tier_deals: list[dict] = []
         tier_relevant = 0
 
-        # Stream progress events from the tier generator with a watchdog
-        tier_gen = _run_tier(
+        # Use a Queue for phase events so _run_tier posts updates WITHOUT being
+        # cancelled. asyncio.wait() with timeout is safe (it never cancels tasks);
+        # asyncio.wait_for() is NOT used here because it would cancel the Apify
+        # HTTP call every 8 s, guaranteeing 0 URLs returned.
+        progress_q: asyncio.Queue = asyncio.Queue()
+        task = asyncio.create_task(_run_tier(
             company_name, goal, schema_fields, year_range, tier, max_urls,
             seen_urls, extra_vendors, extra_sources, extra_keywords, industry,
-            t2_vendors=t2_vendors,
-        )
+            t2_vendors=t2_vendors, progress_q=progress_q,
+        ))
         elapsed = 0
         try:
-            while elapsed < 1200:
-                # Wait up to 8s for next event; emit a heartbeat tick if nothing arrives
-                try:
-                    event = await asyncio.wait_for(tier_gen.__anext__(), timeout=8)
-                except asyncio.TimeoutError:
-                    elapsed += 8
+            while not task.done() and elapsed < 1200:
+                done, _ = await asyncio.wait({task}, timeout=8)
+                elapsed += 8
+                # Drain any phase messages posted by _run_tier
+                while not progress_q.empty():
+                    yield progress_q.get_nowait()
+                if not done:
                     yield {"type": "heartbeat", "message": f"⏳ Tier {tier} working… ({elapsed}s)"}
-                    continue
-                except StopAsyncIteration:
-                    break
 
-                if event["type"] == "tier_done":
-                    tier_deals   = event.get("deals", [])
-                    tier_relevant = event.get("relevant", 0)
-                    break
-                else:
-                    elapsed += 0  # progress event resets perceived wait
-                    yield event   # forward heartbeat (🔍 Searching / 📄 Scraping / 🧠 Extracting)
+            tier_deals, tier_relevant = task.result()
         except Exception as e:
             logger.warning(f"Tier {tier} error: {e}")
+            if not task.done():
+                task.cancel()
 
         total_relevant += tier_relevant
         yield {"type": "heartbeat", "message": f"📋 Tier {tier}: {len(tier_deals)} deals from {tier_relevant} relevant pages"}
