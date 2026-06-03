@@ -75,10 +75,11 @@ SKIP_DOMAINS = {
 # Tier 1: all 32 sources + top-30 vendors + top product/process keywords
 # Tier 2: top-100 vendors + broader keyword combos     (if < 25 deals)
 # Tier 3: top-300 vendors + tech keyword combos        (if still < 25 deals)
-TIER1_VENDORS    = 30
+TIER1_VENDORS    = 15   # kept small so T1 fits in 1 Apify batch (~40 queries total)
 TIER2_VENDORS    = 100
 TIER3_VENDORS    = 300
 SOURCE_GROUP_SZ  = 3    # domains per site: query
+TIER1_MAX_SOURCES = 8   # source groups in T1 (8×3=24 domains, 8 site: queries)
 
 # Suffixes that are geographic or legal entity markers — stripped to produce a
 # shorter canonical name used as an OR alias in every search query.
@@ -203,7 +204,8 @@ def build_search_queries(
     queries_broad: list[str] = []
 
     if tier == 1:
-        # Vendor + market context (most precise — goes first in final list)
+        # T1 target: ≤40 queries (1 Apify batch = 1 parallel run = ~90s max)
+        # 15 vendors + 8 product kw + 5 process kw + 8 site groups + 2 broad = 38
         for vendor in vendors:
             meta   = vendor_meta.get(vendor, {})
             market = meta.get("primary_market", "")
@@ -215,16 +217,16 @@ def build_search_queries(
             else:
                 queries_vendor.append(f'{co} "{vendor}" deal OR contract OR agreement')
 
-        # Top product keywords (first 15)
-        for kw in kw_product[:15]:
+        # Top product keywords (first 8 — high signal, low noise)
+        for kw in kw_product[:8]:
             queries_kw.append(f'{co} "{kw}" deal OR contract OR implementation ({yr_str})')
 
-        # Top process keywords (first 10)
-        for kw in kw_process[:10]:
+        # Top process keywords (first 5)
+        for kw in kw_process[:5]:
             queries_kw.append(f'{co} "{kw}" vendor OR outsourcing OR contract ({yr_str})')
 
-        # Site: queries — all 32 sources (every group) in T1
-        for i in range(0, len(sources), SOURCE_GROUP_SZ):
+        # Site: queries — top 8 source groups (24 domains) in T1
+        for i in range(0, min(len(sources), TIER1_MAX_SOURCES * SOURCE_GROUP_SZ), SOURCE_GROUP_SZ):
             grp = sources[i: i + SOURCE_GROUP_SZ]
             site_expr = " OR ".join(f"site:{s}" for s in grp)
             queries_site.append(f'({site_expr}) {co} deal OR contract OR agreement ({yr_str})')
@@ -337,7 +339,8 @@ async def _google_news_rss_search(queries: list[str], results_per_query: int = 1
     return urls
 
 
-APIFY_BATCH_SZ = 40   # max queries per Apify actor run (keeps each run under 180s)
+APIFY_BATCH_SZ = 40        # max queries per Apify actor run
+APIFY_SEARCH_TIMEOUT = 90  # seconds — most batches complete well under this
 
 async def _apify_google_search(queries: list[str], results_per_query: int = 10) -> list[str]:
     """
@@ -350,7 +353,7 @@ async def _apify_google_search(queries: list[str], results_per_query: int = 10) 
 
     actor_url = (
         "https://api.apify.com/v2/acts/apify~google-search-scraper"
-        f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout=180&memory=512"
+        f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout={APIFY_SEARCH_TIMEOUT}&memory=512"
     )
     batches = [queries[i: i + APIFY_BATCH_SZ] for i in range(0, len(queries), APIFY_BATCH_SZ)]
 
@@ -363,7 +366,7 @@ async def _apify_google_search(queries: list[str], results_per_query: int = 10) 
                 "countryCode": "us",
                 "languageCode": "en",
             }
-            async with httpx.AsyncClient(timeout=200) as client:
+            async with httpx.AsyncClient(timeout=APIFY_SEARCH_TIMEOUT + 15) as client:
                 r = await client.post(actor_url, json=payload)
             if not r.is_success:
                 logger.warning(f"Apify batch failed {r.status_code}: {r.text[:200]}")
@@ -477,7 +480,9 @@ async def _jina_search_fallback(query: str) -> list[str]:
 async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
     """
     Collect URLs via Apify Google Search (primary) or Jina (fallback).
-    Runs all queries in one Apify call for speed.
+    Google News RSS is intentionally skipped — its article links are all
+    news.google.com redirect URLs which are filtered by SKIP_DOMAINS, making
+    it a guaranteed 40s waste before Apify gets called.
     """
     from urllib.parse import urlparse
 
@@ -497,15 +502,7 @@ async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
                     break
         return out
 
-    # Primary: Google News RSS (free, clean real URLs, no anti-bot)
-    raw = await _google_news_rss_search(queries, results_per_query=5)
-    urls = _filter(raw)
-    if urls:
-        logger.info(f"Google News RSS returned {len(urls)} filtered URLs")
-        return urls
-    logger.warning("Google News RSS returned no URLs — trying Apify")
-
-    # Secondary: Apify Google Search Scraper
+    # Primary: Apify Google Search Scraper
     if APIFY_KEY:
         raw = await _apify_google_search(queries, results_per_query=5)
         urls = _filter(raw)
@@ -769,8 +766,8 @@ async def _run_tier(
     extra_keywords: list[str] | None,
     industry: str = "",
     t2_vendors: list[str] | None = None,
-) -> tuple[list[dict], int]:
-    """Run one search tier. Returns (deals, relevant_page_count)."""
+) -> AsyncGenerator[dict, None]:
+    """Run one search tier. Yields progress events then a final 'tier_done' event."""
     queries = build_search_queries(
         company_name, goal, year_range, tier=tier,
         extra_vendors=extra_vendors,
@@ -779,11 +776,16 @@ async def _run_tier(
         industry=industry,
         t2_vendors=t2_vendors,
     )
+    yield {"type": "heartbeat", "message": f"🔍 Tier {tier}: running {len(queries)} search queries…"}
+
     raw_urls = await collect_urls(queries, max_urls=max_urls)
     urls = _dedup_by_domain([u for u in raw_urls if u not in seen_urls])
     seen_urls.update(urls)
     if not urls:
-        return [], 0
+        yield {"type": "tier_done", "deals": [], "relevant": 0}
+        return
+
+    yield {"type": "heartbeat", "message": f"📄 Tier {tier}: scraping {len(urls)} pages…"}
 
     # Scrape: custom scraper → Apify → Jina (in priority order)
     scraped: list[dict] = []
@@ -795,10 +797,11 @@ async def _run_tier(
     if not scraped:
         scraped = await scrape_urls_jina_fallback(urls[:15])
 
+    yield {"type": "heartbeat", "message": f"🧠 Tier {tier}: extracting deals from {len(scraped)} scraped pages…"}
     relevant = [p for p in scraped if is_deal_page(p["text"], company_name)]
     pages_to_use = relevant if relevant else scraped[:5]
     deals = await asyncio.to_thread(_claude_extract_deals, pages_to_use, company_name, goal, schema_fields)
-    return deals, len(relevant)
+    yield {"type": "tier_done", "deals": deals, "relevant": len(relevant)}
 
 
 async def enrich_company(
@@ -839,35 +842,42 @@ async def enrich_company(
         if tier == 3 and not run_t3:
             break
 
-        if tier == 1:
-            yield {"type": "heartbeat", "message": f"🔍 Tier 1 search for {company_name} (sources + top keywords + vendors)…"}
-        elif tier == 2:
+        if tier == 2:
             yield {"type": "heartbeat", "message": f"📈 Only {len(all_deals)} deals — escalating to Tier 2 (broader keywords + more vendors)…"}
-        else:
+        elif tier == 3:
             yield {"type": "heartbeat", "message": f"📈 Tier 3 keyword catch-all enabled — running deep search…"}
 
-        task = asyncio.ensure_future(_run_tier(
+        tier_deals: list[dict] = []
+        tier_relevant = 0
+
+        # Stream progress events from the tier generator with a watchdog
+        tier_gen = _run_tier(
             company_name, goal, schema_fields, year_range, tier, max_urls,
             seen_urls, extra_vendors, extra_sources, extra_keywords, industry,
             t2_vendors=t2_vendors,
-        ))
+        )
         elapsed = 0
-        while not task.done() and elapsed < 1200:
-            done, _ = await asyncio.wait({task}, timeout=8)
-            elapsed += 8
-            if done:
-                break
-            yield {"type": "heartbeat", "message": f"🔍 Tier {tier} searching… ({elapsed}s)"}
+        try:
+            while elapsed < 1200:
+                # Wait up to 8s for next event; emit a heartbeat tick if nothing arrives
+                try:
+                    event = await asyncio.wait_for(tier_gen.__anext__(), timeout=8)
+                except asyncio.TimeoutError:
+                    elapsed += 8
+                    yield {"type": "heartbeat", "message": f"⏳ Tier {tier} working… ({elapsed}s)"}
+                    continue
+                except StopAsyncIteration:
+                    break
 
-        if not task.done():
-            task.cancel()
-            tier_deals, tier_relevant = [], 0
-        else:
-            try:
-                tier_deals, tier_relevant = task.result()
-            except Exception as e:
-                logger.warning(f"Tier {tier} error: {e}")
-                tier_deals, tier_relevant = [], 0
+                if event["type"] == "tier_done":
+                    tier_deals   = event.get("deals", [])
+                    tier_relevant = event.get("relevant", 0)
+                    break
+                else:
+                    elapsed += 0  # progress event resets perceived wait
+                    yield event   # forward heartbeat (🔍 Searching / 📄 Scraping / 🧠 Extracting)
+        except Exception as e:
+            logger.warning(f"Tier {tier} error: {e}")
 
         total_relevant += tier_relevant
         yield {"type": "heartbeat", "message": f"📋 Tier {tier}: {len(tier_deals)} deals from {tier_relevant} relevant pages"}
