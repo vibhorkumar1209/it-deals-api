@@ -140,101 +140,38 @@ def _build_tech_stack_prompt(
 {vendor_block}
 For each listed vendor, also look for direct market competitors in the same functional bucket."""
 
-    if call_num == 1:
-        search_block = f"""SEARCHES — Call 1: Core enterprise apps, HR, finance, comms, ITSM (2021–2026)
-  - "{company_name}" ERP finance accounting NetSuite SAP QuickBooks Oracle 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" HR payroll Workday Rippling Gusto Deel ADP SuccessFactors 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" Slack OR Teams OR Google Workspace communication collaboration 2023 OR 2024 OR 2025
-  - "{company_name}" Jira OR Notion OR Asana OR Monday.com project management 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" contract management Ironclad DocuSign CLM Icertis 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" ServiceNow OR BMC Remedy OR Jira Service Management ITSM 2022 OR 2023 OR 2024 OR 2025
-  - site:builtwith.com OR site:stackshare.io "{company_name}"
-  - "{company_name}" careers job posting software tools skills required 2023 OR 2024 OR 2025
-  - "{company_name}" technology partner case study implemented deployed 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" privacy policy cookie third-party software tools
-  - "{company_name}" software tool platform vendor deployed signed 2022 OR 2023 OR 2024 OR 2025"""
-
-    elif call_num == 2:
-        search_block = f"""SEARCHES — Call 2: CRM, sales, marketing, billing, support, cloud, IAM (2021–2026)
-  - "{company_name}" Salesforce OR HubSpot OR Microsoft Dynamics CRM 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" Zendesk OR Intercom OR Freshdesk OR Gorgias customer support helpdesk 2022 OR 2023 OR 2024
-  - "{company_name}" Marketo OR Klaviyo OR Braze OR Mailchimp marketing automation 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" ZoomInfo OR Apollo OR Outreach OR Gong OR Salesloft sales intelligence 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" Stripe OR Chargebee OR Zuora billing subscription 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" AWS OR Azure OR Google Cloud cloud hosting infrastructure 2023 OR 2024 OR 2025 OR 2026
-  - "{company_name}" Cloudflare OR Akamai CDN DNS network 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" Okta OR Auth0 OR Entra ID OR SailPoint identity IAM 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" PostgreSQL OR MongoDB OR MySQL OR Supabase OR Oracle database 2022 OR 2023 OR 2024
-  - site:linkedin.com/jobs "{company_name}" required skills tools 2024 OR 2025
-  - "{company_name}" technology platform vendor partnership announcement 2023 OR 2024 OR 2025"""
-
-    else:  # call 3
-        search_block = f"""SEARCHES — Call 3: DevOps, data, analytics, AI, security, integration (2021–2026)
-  - "{company_name}" GitHub OR GitLab OR Bitbucket version control CI/CD 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" Datadog OR New Relic OR Dynatrace OR Sentry APM observability monitoring 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" MuleSoft OR Apigee OR Kong API management 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" Zapier OR Workato OR Make OR Boomi iPaaS integration automation 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" Snowflake OR Databricks OR BigQuery OR Redshift data warehouse 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" Fivetran OR dbt OR Airflow OR Informatica ETL data integration 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" Power BI OR Tableau OR Looker OR Qlik business intelligence 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" Mixpanel OR Amplitude OR Google Analytics product analytics 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" OpenAI OR LangChain OR Pinecone OR Vertex AI ML platform 2023 OR 2024 OR 2025 OR 2026
-  - "{company_name}" CrowdStrike OR SentinelOne OR Splunk OR Zscaler OR Palo Alto cybersecurity 2022 OR 2023 OR 2024 OR 2025
-  - site:g2.com OR site:capterra.com "{company_name}" software review
-  - "{company_name}" annual report technology tools vendors 2023 OR 2024 OR 2025"""
+    FOCUS_MAP = {
+        1: f'enterprise software stack of {company_name}: ERP, HR, finance, ITSM, communications, project management, collaboration tools',
+        2: f'technology vendors used by {company_name}: CRM, cloud infrastructure, cybersecurity, identity, databases, marketing tools',
+        3: f'software tools at {company_name}: DevOps, data analytics, AI/ML, BI, API management, integration platforms, security',
+    }
+    focus = FOCUS_MAP.get(call_num, f'complete software tool stack of {company_name}')
 
     fields_desc = "\n".join(f'  "{f["key"]}": "{f["label"]}"' for f in TECH_STACK_FIELDS)
     fields_example = {f["key"]: f"<{f['label']}>" for f in TECH_STACK_FIELDS}
 
-    return f"""You are a senior market intelligence technographic analyst with live Google Search.
+    return f"""You are a technographic research analyst. Use Google Search to find the technology stack of {company_name}.
 
-TARGET: {company_name} | Website: {domain}{linkedin_block}
+COMPANY: {company_name}{f" | {domain}" if domain else ""}{linkedin_block}
 
-TEMPORAL SCOPE: LAST 5 YEARS ONLY (2021–2026).
-Only include tools/platforms that are active or evidenced within this period.
+RESEARCH FOCUS: Find the {focus} (last 5 years, 2021–2026).
 
-{scope_block}
+Search for: job postings mentioning required tools, vendor case studies, press releases, privacy policies listing third-party software, technology partnerships, and annual reports.
 
-{search_block}
-
-{CONFIDENCE_GUIDE}
-
-TARGET: Find as many distinct tools as possible — large enterprises typically run 80–200+ tools.
-Do NOT stop early. Exhaust every category before returning results.
-
-PREFERRED tech_stack_category values — use these where they fit, but do NOT limit yourself to them.
-If you find a tool that doesn't fit any of these, create a clear descriptive sub-category name for it:
-{chr(10).join(f"  - {cat}" for cat in ALL_CATEGORIES_FLAT)}
-  - (any new descriptive sub-category for tools not covered above)
-
-EXTRACTION RULES:
-- One JSON object per distinct software/tool deployment
-- Populate ALL 8 fields — no blanks allowed
-- integration_partner: name of the SI, consulting firm, or vendor that implemented this software
-  e.g. "Accenture", "TCS", "Deloitte", "IBM", "Capgemini", "Vendor-led" — use "-" if not found
-- last_detected: e.g. "Active – Q2 2026", "2024 job posting", "2023 vendor case study"
-- tech_install: approximate license/seat count as a range
-  e.g. "200–500 seats", "5,000–20,000 users", "50,000–100,000 users", "Enterprise-wide (100,000+)"
-  Base on company headcount, department size, and typical vendor seat-to-employee ratios
-- renewal_date: next estimated renewal quarter e.g. "Q1 2027", "Q3 2026" — no "Est." prefix
-- confidence_score: percentage with brief reason e.g. "87% – job posting", "94% – vendor case study"
-
-core_tech_category: use one of the preferred values below, or create a new one if needed:
-  Core Enterprise Operations | Customer-Facing & Revenue | Infrastructure & Cloud |
-  Development & Engineering | Data Analytics & AI | Security & Compliance | Unclassified
-
-tech_stack_category: use a preferred value from the list above where it fits;
-  otherwise create a clear, concise descriptive name (e.g. "Fleet Management Platform", "PLM", "Digital Signage").
-
-Return ONLY a valid JSON array — no prose, no markdown fences.
-Use EXACTLY these JSON key names (snake_case, no spaces):
-[
-  {{
+For each software tool found, return one JSON object with these EXACT keys:
 {fields_desc}
-  }}
-]
 
-Example (use these exact key names): {json.dumps(fields_example)}
+Rules:
+- core_tech_category: Core Enterprise Operations | Customer-Facing & Revenue | Infrastructure & Cloud | Development & Engineering | Data Analytics & AI | Security & Compliance | Unclassified
+- tech_stack_category: use standard names like "ERP & Finance", "CRM & Account Management", "Cloud Hosting" etc., or a descriptive name if none fits
+- integration_partner: SI/consulting firm that implemented it (e.g. "Accenture", "TCS") or "-"
+- last_detected: e.g. "Active – 2025", "2024 job posting"
+- tech_install: estimated seat/license range e.g. "1,000–5,000 seats", "Enterprise-wide"
+- renewal_date: estimated quarter e.g. "Q2 2027"
+- confidence_score: e.g. "85% – job posting", "94% – vendor case study"
+
+Return ONLY a raw JSON array, no markdown:
+[{json.dumps(fields_example)}]
 """
 
 
