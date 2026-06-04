@@ -492,10 +492,11 @@ async def debug_gemini_search(company: str = "Daimler Truck North America", full
     def _run():
         from google import genai
         from google.genai import types
-        from enrich_pipeline import _build_research_prompt
         client = genai.Client(api_key=google_key)
         if full_prompt:
-            prompt = _build_research_prompt(company, "", "", [], [])
+            from enrich_pipeline import _build_prompts
+            prompts = _build_prompts(company, "", "", [], [])
+            prompt = prompts[0]   # use first call prompt for quick test
             max_tok = 16384
         else:
             prompt = (
@@ -541,6 +542,35 @@ async def debug_gemini_search(company: str = "Daimler Truck North America", full
         }
     except asyncio.TimeoutError:
         return {"error": "timeout after 60s"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/debug-tech-stack")
+async def debug_tech_stack(company: str = "Kubota North America", call_num: int = 1):
+    """Test one tech stack Gemini call. call_num=1,2,3."""
+    google_key = os.getenv("GOOGLE_AI_API_KEY", "")
+    if not google_key:
+        return {"error": "GOOGLE_AI_API_KEY not set"}
+
+    def _run():
+        from google import genai
+        from google.genai import types
+        from tech_stack_pipeline import _build_tech_stack_prompt, _gemini_tech_stack_sync
+        prompt = _build_tech_stack_prompt(company, "", "", [], [], call_num)
+        result = _gemini_tech_stack_sync(prompt, company)
+        return result
+
+    try:
+        tools = await asyncio.wait_for(asyncio.to_thread(_run), timeout=180)
+        return {
+            "company": company,
+            "call_num": call_num,
+            "tools_found": len(tools),
+            "preview": tools[:5],
+        }
+    except asyncio.TimeoutError:
+        return {"error": f"timeout after 180s on call {call_num}"}
     except Exception as e:
         return {"error": str(e)}
 
