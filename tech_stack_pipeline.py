@@ -376,6 +376,16 @@ async def find_tech_stack(
     fc = focus_categories or []
     fv = focus_vendors or []
 
+    # Derive a shorter "brand name" by stripping common subsidiary suffixes
+    _STRIP = re.compile(
+        r"\s+(north america|south america|europe|asia|apac|latam|"
+        r"inc\.?|llc\.?|ltd\.?|corp\.?|corporation|group|holdings|"
+        r"gmbh|ag|plc|sa|bv|nv|pty|co\.?)\s*$",
+        re.IGNORECASE,
+    )
+    brand_name = _STRIP.sub("", company_name).strip()
+    search_name = company_name  # used in queries — may be widened to brand_name on fallback
+
     mode = "wide-spectrum" if not fc and not fv else "laser-focused"
     num_calls = 3
     yield {"type": "heartbeat", "message": f"🔍 Tech stack scan for {company_name} ({mode} mode)…"}
@@ -409,7 +419,7 @@ async def find_tech_stack(
                 break
             except asyncio.TimeoutError:
                 elapsed += 10
-                yield {"type": "heartbeat", "message": f"🌐 [{call_num}/2] Scanning… ({elapsed}s)"}
+                yield {"type": "heartbeat", "message": f"🌐 [{call_num}/{num_calls}] Scanning… ({elapsed}s)"}
                 await asyncio.sleep(0)
             except Exception as e:
                 logger.error(f"Tech stack call {call_num} error for {company_name}: {e}", exc_info=True)
@@ -435,6 +445,47 @@ async def find_tech_stack(
 
         yield {"type": "heartbeat", "message": f"✅ Call {call_num} done: +{new_tools} tools (total {total})"}
         await asyncio.sleep(0)
+
+    # ── Fallback: retry with brand name if subsidiary name returned nothing ──────
+    if total == 0 and brand_name.lower() != company_name.lower():
+        yield {"type": "heartbeat",
+               "message": f"🔄 No results for '{company_name}' — retrying as '{brand_name}'…"}
+        await asyncio.sleep(0)
+
+        fallback_prompt = _build_tech_stack_prompt(brand_name, domain, linkedin_url, fc, fv, 1)
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(None, _gemini_tech_stack_sync, fallback_prompt, brand_name)
+
+        elapsed = 0
+        fallback_tools: list[dict] = []
+        while elapsed < CALL_TIMEOUT:
+            try:
+                fallback_tools = await asyncio.wait_for(asyncio.shield(future), timeout=10)
+                break
+            except asyncio.TimeoutError:
+                elapsed += 10
+                yield {"type": "heartbeat", "message": f"🌐 Fallback scan… ({elapsed}s)"}
+                await asyncio.sleep(0)
+            except Exception as e:
+                logger.error(f"Fallback error for {brand_name}: {e}", exc_info=True)
+                break
+        else:
+            future.cancel()
+
+        for tool in fallback_tools:
+            dedup_key = f"{tool.get('vendor','').lower()}|{tool.get('tech_stack_category','').lower()}"
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
+            row = {"company_name": company_name, "domain": domain, "_status": "ok"}
+            row.update(tool)
+            yield {"type": "row_done", "row": row}
+            await asyncio.sleep(0.04)
+            total += 1
+
+        if total > 0:
+            yield {"type": "heartbeat", "message": f"✅ Fallback found {total} tools via '{brand_name}'"}
+            await asyncio.sleep(0)
 
     if total == 0:
         yield {"type": "heartbeat", "message": f"⚠️ No tech stack data found for {company_name}"}
