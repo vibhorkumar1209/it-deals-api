@@ -367,17 +367,37 @@ def _gemini_extract_deals_sync(
 
     field_keys = [f["key"] for f in SCHEMA_FIELDS]
 
+    import time as _time
+    MAX_RETRIES = 3
+
+    response = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    temperature=0.1,
+                    max_output_tokens=16384,
+                ),
+            )
+            break   # success
+        except Exception as api_err:
+            err_str = str(api_err)
+            is_retryable = any(x in err_str for x in ("503", "UNAVAILABLE", "429", "quota", "overloaded"))
+            logger.warning(f"Gemini attempt {attempt}/{MAX_RETRIES} failed for {company_name}: {api_err}")
+            if is_retryable and attempt < MAX_RETRIES:
+                _time.sleep(15 * attempt)   # 15s, 30s back-off
+                continue
+            logger.error(f"Gemini API error for {company_name}: {api_err}", exc_info=True)
+            return []
+
+    if response is None:
+        return []
+
     try:
-        client = genai.Client(api_key=GOOGLE_AI_KEY)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                temperature=0.1,
-                max_output_tokens=16384,
-            ),
-        )
 
         # ── Extract raw text — ALWAYS use parts iteration, never rely on .text ──
         raw_text = ""

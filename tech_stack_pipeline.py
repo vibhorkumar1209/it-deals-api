@@ -250,45 +250,59 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
         logger.error("GOOGLE_AI_API_KEY not set")
         return []
 
+    import time as _time
+    MAX_RETRIES = 3
+    response = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    temperature=0.1,
+                    max_output_tokens=65536,
+                ),
+            )
+            break   # success
+        except Exception as api_err:
+            err_str = str(api_err)
+            is_retryable = any(x in err_str for x in ("503", "UNAVAILABLE", "429", "quota", "overloaded"))
+            logger.warning(f"Tech stack Gemini attempt {attempt}/{MAX_RETRIES} for {company_name}: {api_err}")
+            if is_retryable and attempt < MAX_RETRIES:
+                _time.sleep(15 * attempt)
+                continue
+            logger.error(f"Gemini tech stack error for {company_name}: {api_err}", exc_info=True)
+            return []
+
+    if response is None:
+        return []
+
+    # Always extract via parts — response.text raises with grounding
+    raw_text = ""
     try:
-        client = genai.Client(api_key=GOOGLE_AI_KEY)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                temperature=0.1,
-                max_output_tokens=65536,
-            ),
-        )
-
-        # Always extract via parts — response.text raises with grounding
-        raw_text = ""
+        for candidate in (response.candidates or []):
+            for part in (candidate.content.parts or []):
+                t = getattr(part, "text", None)
+                if t:
+                    raw_text += t
+    except Exception:
         try:
-            for candidate in (response.candidates or []):
-                for part in (candidate.content.parts or []):
-                    t = getattr(part, "text", None)
-                    if t:
-                        raw_text += t
-        except Exception:
-            try:
-                raw_text = response.text or ""
-            except Exception:
-                pass
-
-        finish = "unknown"
-        try:
-            finish = str(response.candidates[0].finish_reason)
+            raw_text = response.text or ""
         except Exception:
             pass
 
-        logger.info(f"Tech stack Gemini: {len(raw_text)} chars, finish={finish} for {company_name}")
+    finish = "unknown"
+    try:
+        finish = str(response.candidates[0].finish_reason)
+    except Exception:
+        pass
 
-        if not raw_text:
-            return []
+    logger.info(f"Tech stack Gemini: {len(raw_text)} chars, finish={finish} for {company_name}")
 
-    except Exception as e:
-        logger.error(f"Gemini tech stack error for {company_name}: {e}", exc_info=True)
+    if not raw_text:
         return []
 
     # ── Parse JSON ────────────────────────────────────────────────────────────
