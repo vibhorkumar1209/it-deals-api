@@ -269,8 +269,12 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
             break   # success
         except Exception as api_err:
             err_str = str(api_err)
-            is_retryable = any(x in err_str for x in ("503", "UNAVAILABLE", "429", "quota", "overloaded"))
+            is_quota = "RESOURCE_EXHAUSTED" in err_str or "free_tier" in err_str
+            is_retryable = not is_quota and any(x in err_str for x in ("503", "UNAVAILABLE", "overloaded"))
             logger.warning(f"Tech stack Gemini attempt {attempt}/{MAX_RETRIES} for {company_name}: {api_err}")
+            if is_quota:
+                raise RuntimeError(f"Gemini quota exhausted (free tier limit reached). "
+                                   f"Please upgrade your Google AI API key to a paid plan.") from api_err
             if is_retryable and attempt < MAX_RETRIES:
                 _time.sleep(15 * attempt)
                 continue

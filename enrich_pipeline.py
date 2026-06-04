@@ -386,10 +386,15 @@ def _gemini_extract_deals_sync(
             break   # success
         except Exception as api_err:
             err_str = str(api_err)
-            is_retryable = any(x in err_str for x in ("503", "UNAVAILABLE", "429", "quota", "overloaded"))
+            is_quota = "RESOURCE_EXHAUSTED" in err_str or "free_tier" in err_str
+            is_retryable = not is_quota and any(x in err_str for x in ("503", "UNAVAILABLE", "overloaded"))
             logger.warning(f"Gemini attempt {attempt}/{MAX_RETRIES} failed for {company_name}: {api_err}")
+            if is_quota:
+                # Quota exhausted — not retryable, raise so callers can surface to user
+                raise RuntimeError(f"Gemini quota exhausted (free tier limit reached). "
+                                   f"Please upgrade your Google AI API key to a paid plan.") from api_err
             if is_retryable and attempt < MAX_RETRIES:
-                _time.sleep(15 * attempt)   # 15s, 30s back-off
+                _time.sleep(15 * attempt)
                 continue
             logger.error(f"Gemini API error for {company_name}: {api_err}", exc_info=True)
             return []
