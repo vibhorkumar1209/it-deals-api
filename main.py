@@ -204,6 +204,9 @@ async def extract(req: ReExtractRequest):
 class EnrichInput(BaseModel):
     company_name: str
     domain: str
+    linkedin_url: str = ""
+    focus_tech: list[str] = Field(default_factory=list)
+    focus_vendor: list[str] = Field(default_factory=list)
 
 class SchemaField(BaseModel):
     key: str
@@ -250,6 +253,9 @@ async def enrich_task(req: EnrichTaskRequest):
                     domain=inp.domain,
                     goal=req.goal,
                     schema_fields=schema_fields,
+                    linkedin_url=inp.linkedin_url,
+                    focus_tech=inp.focus_tech or req.keywords,
+                    focus_vendor=inp.focus_vendor or req.vendors,
                 ):
                     if event["type"] == "row_done":
                         deal_row = event["row"]
