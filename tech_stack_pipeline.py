@@ -100,25 +100,26 @@ def _build_tech_stack_prompt(
 For each listed vendor, also look for direct market competitors in the same functional bucket."""
 
     if call_num == 1:
-        search_block = f"""SEARCHES TO RUN (Call 1 — digital footprint & public signals):
-  - site:{domain} OR inurl:{domain} technology stack tools
-  - "{company_name}" software tools vendors uses deployed
-  - "{company_name}" job posting OR careers requires experience with
-  - "{company_name}" technology partner OR case study
-  - "{company_name}" privacy policy OR cookie policy third-party tools
+        search_block = f"""SEARCHES TO RUN (Call 1 — digital footprint & public signals, 2021–2026):
+  - site:{domain} OR inurl:{domain} technology stack tools software
+  - "{company_name}" software tools vendors uses deployed 2022 OR 2023 OR 2024 OR 2025 OR 2026
+  - "{company_name}" careers job posting requires experience 2023 OR 2024 OR 2025
+  - "{company_name}" technology partner case study 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" privacy policy cookie policy third-party tools
   - site:builtwith.com OR site:similartech.com OR site:stackshare.io "{company_name}"
-  - site:g2.com OR site:capterra.com "{company_name}" review uses
-  - "{company_name}" ERP CRM cloud platform deployed implemented"""
+  - site:g2.com OR site:capterra.com "{company_name}"
+  - "{company_name}" ERP CRM cloud platform deployed implemented 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" digital transformation technology 2024 OR 2025 OR 2026"""
     else:
-        search_block = f"""SEARCHES TO RUN (Call 2 — vendor confirmations & job signals):
-  - "{company_name}" SAP OR Oracle OR Microsoft OR Salesforce OR ServiceNow OR Workday
-  - "{company_name}" AWS OR Azure OR Google Cloud OR hybrid cloud
-  - "{company_name}" cybersecurity OR SIEM OR endpoint OR zero trust
-  - "{company_name}" data warehouse OR analytics OR BI OR Snowflake OR Databricks
-  - "{company_name}" DevOps OR CI/CD OR Kubernetes OR observability
-  - "{company_name}" site:linkedin.com/jobs OR careers technology stack required
-  - "{company_name}" annual report technology infrastructure spend
-  - "{company_name}" vendor partnership OR integration"""
+        search_block = f"""SEARCHES TO RUN (Call 2 — vendor confirmations & job signals, 2021–2026):
+  - "{company_name}" SAP OR Oracle OR Microsoft OR Salesforce OR ServiceNow OR Workday 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" AWS OR Azure OR Google Cloud 2023 OR 2024 OR 2025 OR 2026
+  - "{company_name}" cybersecurity SIEM endpoint zero trust 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" data warehouse analytics BI Snowflake Databricks 2023 OR 2024 OR 2025
+  - "{company_name}" DevOps CI/CD Kubernetes observability APM 2022 OR 2023 OR 2024
+  - site:linkedin.com/jobs "{company_name}" technology stack required skills
+  - "{company_name}" annual report technology infrastructure 2023 OR 2024 OR 2025
+  - "{company_name}" vendor partnership integration announcement 2024 OR 2025 OR 2026"""
 
     fields_desc = "\n".join(f'  "{f["key"]}": "{f["label"]}"' for f in TECH_STACK_FIELDS)
     fields_example = {f["key"]: f"<{f['label']}>" for f in TECH_STACK_FIELDS}
@@ -127,25 +128,26 @@ For each listed vendor, also look for direct market competitors in the same func
 
 TARGET: {company_name} | Website: {domain}{linkedin_block}
 
+TEMPORAL SCOPE: LAST 5 YEARS ONLY (2021–2026).
+Only include software/tools that are active, deployed, or evidenced within this period.
+Exclude tools with no signals since 2020.
+
 {scope_block}
 
 {search_block}
 
 {CONFIDENCE_GUIDE}
 
-TEMPORAL SCOPE: Focus on technology deployments active or detected in the LAST 5 YEARS
-(2021–2026). Include older tools only if still clearly active today.
-
 EXTRACTION RULES:
-- One JSON object per distinct software/tool deployment
+- One JSON object per distinct software/tool deployment — output can be in the hundreds for large enterprises
 - Populate ALL 8 fields — no blanks allowed
 - integration_partner: list 1-3 key systems this tool connects to (comma-separated)
-- last_detected: e.g. "Active – Q2 2026" or "Detected May 2026 job posting"
-- tech_install: approximate license/seat count as a range — can be in hundreds or thousands
+- last_detected: e.g. "Active – Q2 2026" or "Detected May 2026 job posting" or "2024 case study"
+- tech_install: approximate license/seat count as a range — estimates can be in hundreds or thousands
   e.g. "200–500 seats", "5,000–20,000 users", "50,000–100,000 users", "Enterprise-wide (100,000+)"
-  Base estimate on company headcount, dept size, and typical vendor seat ratios
-- renewal_date: estimated next renewal quarter, plain format e.g. "Q1 2027", "Q4 2026" — no "Est." prefix
-- confidence_score: percentage string e.g. "87%" with brief reason e.g. "87% – job posting"
+  Base on company headcount, department size, and typical vendor seat-to-employee ratios
+- renewal_date: next estimated renewal quarter in plain format e.g. "Q1 2027", "Q3 2026" — no "Est." prefix
+- confidence_score: percentage with brief reason e.g. "87% – job posting", "94% – vendor case study"
 
 core_tech_category must be one of:
   Core Enterprise Operations | Customer-Facing & Revenue | Infrastructure & Cloud |
@@ -183,7 +185,7 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
                 temperature=0.1,
-                max_output_tokens=16384,
+                max_output_tokens=65536,
             ),
         )
 
