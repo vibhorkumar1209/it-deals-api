@@ -226,14 +226,15 @@ core_tech_category: use one of the preferred values below, or create a new one i
 tech_stack_category: use a preferred value from the list above where it fits;
   otherwise create a clear, concise descriptive name (e.g. "Fleet Management Platform", "PLM", "Digital Signage").
 
-Return ONLY a valid JSON array — no prose, no markdown fences:
+Return ONLY a valid JSON array — no prose, no markdown fences.
+Use EXACTLY these JSON key names (snake_case, no spaces):
 [
   {{
 {fields_desc}
   }}
 ]
 
-Example shape: {json.dumps(fields_example)}
+Example (use these exact key names): {json.dumps(fields_example)}
 """
 
 
@@ -356,18 +357,38 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
         if not isinstance(parsed, list):
             return []
 
+        # Build flexible key map: handles exact keys, labels, label-as-snake_case, case-insensitive
+        def _norm(s: str) -> str:
+            return s.lower().replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_").strip("_")
+
+        key_map: dict[str, str] = {}
+        for f in TECH_STACK_FIELDS:
+            k, lbl = f["key"], f["label"]
+            for variant in (k, k.lower(), lbl, lbl.lower(), _norm(lbl), lbl.replace(" ", "")):
+                key_map[variant] = k
+                key_map[variant.lower()] = k
+
         out = []
         for item in parsed:
             if not isinstance(item, dict):
                 continue
             row: dict = {}
-            for key in FIELD_KEYS:
-                val = item.get(key)
-                # Normalise empty/unknown to "-"
-            clean_val = str(val).strip() if val not in (None, "null", "None", "") else ""
-            if clean_val.lower() in ("", "unknown", "n/a", "na", "none", "-"):
-                clean_val = "-"
-            row[key] = clean_val
+            # Map whatever keys Gemini used → canonical FIELD_KEYS
+            for gemini_key, val in item.items():
+                canonical = key_map.get(gemini_key) or key_map.get(gemini_key.lower()) or key_map.get(_norm(gemini_key))
+                if canonical and canonical not in row:
+                    clean_val = str(val).strip() if val not in (None, "null", "None", "") else ""
+                    if clean_val.lower() in ("", "unknown", "n/a", "na", "none"):
+                        clean_val = "-"
+                    row[canonical] = clean_val
+            # Fill any missing fields with "-"
+            for fk in FIELD_KEYS:
+                if fk not in row:
+                    row[fk] = "-"
+            # Skip rows with fewer than 2 real values (likely parsing artifacts)
+            real_vals = sum(1 for v in row.values() if v and v != "-")
+            if real_vals < 2:
+                continue
             out.append(row)
 
         logger.info(f"Tech stack: parsed {len(out)} tools for {company_name}")
