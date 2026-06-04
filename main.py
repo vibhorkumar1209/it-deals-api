@@ -561,13 +561,40 @@ async def debug_tech_stack(company: str = "Kubota North America", call_num: int 
         result = _gemini_tech_stack_sync(prompt, company)
         return result
 
+    def _run_raw():
+        from google import genai
+        from google.genai import types
+        from tech_stack_pipeline import _build_tech_stack_prompt
+        prompt = _build_tech_stack_prompt(company, "", "", [], [], call_num)
+        client = genai.Client(api_key=google_key)
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.1, max_output_tokens=65536,
+            ),
+        )
+        raw = ""
+        try:
+            for cand in (resp.candidates or []):
+                for part in (cand.content.parts or []):
+                    t = getattr(part, "text", None)
+                    if t: raw += t
+        except Exception:
+            pass
+        return raw
+
     try:
-        tools = await asyncio.wait_for(asyncio.to_thread(_run), timeout=180)
+        raw = await asyncio.wait_for(asyncio.to_thread(_run_raw), timeout=180)
+        tools = await asyncio.wait_for(asyncio.to_thread(_run), timeout=5)
         return {
             "company": company,
             "call_num": call_num,
+            "raw_chars": len(raw),
+            "raw_preview": raw[:2000],
             "tools_found": len(tools),
-            "preview": tools[:5],
+            "first_tool_keys": list(tools[0].keys()) if tools else [],
+            "preview": tools[:3],
         }
     except asyncio.TimeoutError:
         return {"error": f"timeout after 180s on call {call_num}"}
