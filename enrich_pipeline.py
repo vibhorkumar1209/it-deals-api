@@ -127,6 +127,9 @@ EXTRACTION RULES:
 - One JSON object per distinct deal — never merge two deals
 - Capture deals across ALL years available, not just recent ones
 - Include press releases, news, vendor announcements, IR filings, annual reports
+- PAY SPECIAL ATTENTION to: post spin-off / demerger IT separation programmes,
+  nine-figure or billion-dollar IT outsourcing restructurings, IT carve-out programmes
+  that replace systems from a former parent company, large infrastructure consolidation deals
 
 Return ONLY a valid JSON array:
 [
@@ -174,6 +177,9 @@ _SECTOR_KEYWORDS = {
             "precision agriculture technology deal",
             "AI SaaS manufacturing contract",
             "digital twin industrial IoT agreement",
+            "spin-off IT separation carve-out independent infrastructure",
+            "post spin-off IT systems standalone architecture",
+            "demerger IT outsourcing restructuring billion",
         ],
     },
     "banking_finance": {
@@ -265,11 +271,17 @@ def _build_prompts(
   - "{company_name}" digital transformation program cloud migration
   - "{company_name}" managed services ERP SAP Oracle implementation
   - "{company_name}" cybersecurity infrastructure data center contract
+  - "{company_name}" IT separation spin-off independent infrastructure
+  - "{company_name}" post spin-off IT systems carve-out restructuring
+  - "{company_name}" IT outsourcing restructuring nine-figure billion
+  - "{company_name}" independent digital architecture enterprise systems
+  - "{company_name}" demerger IT separation standalone systems
   - site:businesswire.com OR site:prnewswire.com "{company_name}" technology deal"""
 
     p1_vendors = (
         "Accenture, Infosys, TCS, Wipro, HCLTech, Cognizant, Capgemini, DXC Technology, "
-        "IBM, SAP, Oracle, Microsoft, AWS, Google Cloud, ServiceNow, Salesforce, Workday"
+        "IBM, SAP, Oracle, Microsoft, AWS, Google Cloud, ServiceNow, Salesforce, Workday, "
+        "Baker McKenzie, EY, Deloitte, KPMG, PwC"   # advisory/legal for large IT restructurings
     )
 
     prompt1 = _make_prompt(company_name, domain, linkedin_block,
