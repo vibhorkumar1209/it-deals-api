@@ -318,12 +318,9 @@ def _build_prompts(
                            fields_desc, fields_json_keys, sector_block)
 
     # ── Prompt 2: year sweep + sector vendors + user focus ────────────────────
+    # Combine IT deal + acquisition into one query per year to halve search count
     year_searches = "\n".join(
-        f'  - "{company_name}" IT technology deal contract acquisition {y}' for y in range(2015, 2026)
-    )
-    # Add standalone acquisition searches by year (catches M&A not tagged as "IT deal")
-    year_searches += "\n" + "\n".join(
-        f'  - "{company_name}" acquires acquisition bought purchased technology {y}' for y in range(2015, 2026)
+        f'  - "{company_name}" IT deal OR technology acquisition OR tech contract {y}' for y in range(2016, 2026)
     )
 
     p2_vendors = "Dell Technologies, HPE, Atos, NTT DATA, Unisys, Fujitsu, T-Systems, CGI, Snowflake, CrowdStrike, Palo Alto Networks"
@@ -515,7 +512,7 @@ async def enrich_company(
     prompts = _build_prompts(company_name, domain, linkedin_url, ft, fv)
     seen_keys: set[str] = set()   # deduplicate across the two calls
     total_deals = 0
-    CALL_TIMEOUT = 120            # 2 min per call — well within Gemini's capacity
+    CALL_TIMEOUT = 150            # 2.5 min per call
 
     for call_idx, prompt in enumerate(prompts, 1):
         label = "broad IT & cloud deals" if call_idx == 1 else "year-by-year + vendor sweep"
