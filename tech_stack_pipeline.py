@@ -23,7 +23,7 @@ TECH_STACK_FIELDS = [
     {"key": "vendor",              "label": "Vendor"},
     {"key": "integration_partner", "label": "Integration Partner"},
     {"key": "last_detected",       "label": "Last Detected"},
-    {"key": "tech_install",        "label": "Tech Install (approx)"},
+    {"key": "tech_install",        "label": "Install Size (approx)"},
     {"key": "renewal_date",        "label": "Renewal (est.)"},
     {"key": "confidence_score",    "label": "Confidence"},
 ]
@@ -138,7 +138,7 @@ EXTRACTION RULES:
 - Populate ALL 8 fields — no blanks allowed
 - integration_partner: list 1-3 key systems this tool connects to (comma-separated)
 - last_detected: e.g. "Active – Q2 2026" or "Detected May 2026 job posting"
-- tech_install: e.g. "~3 years ago" or "Recent – < 12 months"
+- tech_install: approximate license/seat count as a range e.g. "500–1,000 seats", "10,000–50,000 users", "Enterprise-wide", "Dept-level ~50–200 seats"
 - renewal_date: estimated next renewal e.g. "Est. Q1 2027" based on typical SaaS cycles
 - confidence_score: percentage string e.g. "87%" with brief reason e.g. "87% – job posting"
 
