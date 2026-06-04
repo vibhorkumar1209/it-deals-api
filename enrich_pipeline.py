@@ -370,16 +370,11 @@ def _gemini_extract_deals_sync(
     import time as _time
     MAX_RETRIES = 3
 
-    HTTP_TIMEOUT = 90   # hard HTTP-level timeout — prevents indefinite hangs
 
     response = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            try:
-                http_opts = types.HttpOptions(timeout=HTTP_TIMEOUT)
-            except Exception:
-                http_opts = {"timeout": HTTP_TIMEOUT}
-            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options=http_opts)
+            client = genai.Client(api_key=GOOGLE_AI_KEY)
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
