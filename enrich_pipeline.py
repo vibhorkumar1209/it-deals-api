@@ -235,13 +235,28 @@ def _gemini_extract_deals_sync(
 
     # ── Parse JSON array from response ───────────────────────────────────────
     try:
-        clean = re.sub(r"```(?:json)?\s*|\s*```", "", raw_text.strip())
-        array_match = re.search(r"\[.*\]", clean, re.DOTALL)
-        if not array_match:
-            logger.warning(f"No JSON array in Gemini response for {company_name}. Preview: {clean[:300]}")
-            return []
+        # Strip markdown fences
+        clean = re.sub(r"```(?:json)?\s*", "", raw_text.strip())
+        clean = re.sub(r"```\s*$", "", clean, flags=re.MULTILINE).strip()
 
-        parsed = json.loads(array_match.group(0))
+        # Try direct parse first
+        try:
+            parsed = json.loads(clean)
+        except json.JSONDecodeError:
+            # Find the outermost [...] array
+            array_match = re.search(r"\[.*\]", clean, re.DOTALL)
+            if not array_match:
+                logger.warning(f"No JSON array in Gemini response for {company_name}. Preview: {clean[:400]}")
+                return []
+            try:
+                parsed = json.loads(array_match.group(0))
+            except json.JSONDecodeError:
+                # Try to find the LAST complete array by scanning from the end
+                # This handles trailing commas or truncated JSON
+                text = array_match.group(0)
+                # Remove trailing commas before ] or }
+                text = re.sub(r",\s*([\]}])", r"\1", text)
+                parsed = json.loads(text)
         if isinstance(parsed, dict):
             parsed = [parsed]
         if not isinstance(parsed, list):

@@ -254,8 +254,8 @@ async def enrich_task(req: EnrichTaskRequest):
                     goal=req.goal,
                     schema_fields=schema_fields,
                     linkedin_url=inp.linkedin_url,
-                    focus_tech=inp.focus_tech or req.keywords,
-                    focus_vendor=inp.focus_vendor or req.vendors,
+                    focus_tech=inp.focus_tech or [],
+                    focus_vendor=inp.focus_vendor or [],
                 ):
                     if event["type"] == "row_done":
                         deal_row = event["row"]
@@ -392,41 +392,77 @@ async def debug(company: str = "HDFC Bank"):
 
 @app.get("/api/debug-enrich")
 async def debug_enrich():
-    """Diagnose enrichment: check env keys and test Claude via thread."""
-    import anthropic as _anthropic
-
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-    apify_key     = os.getenv("APIFY_API_KEY", "")
-    parallel_key  = os.getenv("PARALLEL_API_KEY", "")
-    jina_key      = os.getenv("JINA_KEY", "")
+    """Diagnose enrichment: check env keys and test Gemini."""
+    google_key = os.getenv("GOOGLE_AI_API_KEY", "")
 
     out: dict = {
         "env": {
-            "ANTHROPIC_API_KEY": "set" if anthropic_key else "MISSING",
-            "APIFY_API_KEY":     "set" if apify_key     else "MISSING",
-            "PARALLEL_API_KEY":  "set" if parallel_key  else "MISSING",
-            "JINA_KEY":          "set" if jina_key      else "MISSING",
+            "GOOGLE_AI_API_KEY": "set" if google_key else "MISSING",
         },
-        "claude_test": "skipped — key missing",
-        "anthropic_version": _anthropic.__version__,
+        "gemini_test": "skipped — key missing",
     }
 
-    if anthropic_key:
-        def _test_claude():
-            ac = _anthropic.Anthropic(api_key=anthropic_key)
-            msg = ac.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=20,
-                messages=[{"role": "user", "content": "Say OK"}],
+    if google_key:
+        def _test_gemini():
+            from google import genai
+            from google.genai import types
+            client = genai.Client(api_key=google_key)
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents='Return ONLY this JSON array: [{"ok": true}]',
+                config=types.GenerateContentConfig(temperature=0, max_output_tokens=50),
             )
-            return msg.content[0].text
+            return resp.text or ""
         try:
-            result = await asyncio.to_thread(_test_claude)
-            out["claude_test"] = result
+            result = await asyncio.wait_for(asyncio.to_thread(_test_gemini), timeout=30)
+            out["gemini_test"] = result
         except Exception as e:
-            out["claude_test"] = f"ERROR: {e}"
+            out["gemini_test"] = f"ERROR: {e}"
 
     return out
+
+
+@app.get("/api/debug-gemini-search")
+async def debug_gemini_search(company: str = "Daimler Truck North America"):
+    """Test Gemini with Google Search Grounding for a company. Returns raw response."""
+    google_key = os.getenv("GOOGLE_AI_API_KEY", "")
+    if not google_key:
+        return {"error": "GOOGLE_AI_API_KEY not set"}
+
+    def _run():
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=google_key)
+        prompt = (
+            f'Find 3 recent IT technology deals for {company}. '
+            f'Return ONLY a JSON array: [{{"vendor":"..","deal_type":"..","date_signed":"..","description":".."}}]'
+        )
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.1,
+                max_output_tokens=2048,
+            ),
+        )
+        return resp.text or ""
+
+    try:
+        raw = await asyncio.wait_for(asyncio.to_thread(_run), timeout=60)
+        import re as _re
+        has_array = bool(_re.search(r"\[.*?\]", raw, _re.DOTALL))
+        return {
+            "company": company,
+            "chars": len(raw),
+            "has_json_array": has_array,
+            "preview": raw[:800],
+            "tail": raw[-400:] if len(raw) > 800 else "",
+        }
+    except asyncio.TimeoutError:
+        return {"error": "timeout after 60s"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 if __name__ == "__main__":
