@@ -370,10 +370,15 @@ def _gemini_extract_deals_sync(
     import time as _time
     MAX_RETRIES = 3
 
+    HTTP_TIMEOUT = 90   # hard HTTP-level timeout — prevents indefinite hangs
+
     response = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            client = genai.Client(
+                api_key=GOOGLE_AI_KEY,
+                http_options={"timeout": HTTP_TIMEOUT},
+            )
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
@@ -387,7 +392,8 @@ def _gemini_extract_deals_sync(
         except Exception as api_err:
             err_str = str(api_err)
             is_quota = "RESOURCE_EXHAUSTED" in err_str or "free_tier" in err_str
-            is_retryable = not is_quota and any(x in err_str for x in ("503", "UNAVAILABLE", "overloaded"))
+            is_timeout = any(x in err_str.lower() for x in ("timeout", "timed out", "deadline"))
+            is_retryable = not is_quota and (any(x in err_str for x in ("503", "UNAVAILABLE", "overloaded")) or is_timeout)
             logger.warning(f"Gemini attempt {attempt}/{MAX_RETRIES} failed for {company_name}: {api_err}")
             if is_quota:
                 # Quota exhausted — not retryable, raise so callers can surface to user

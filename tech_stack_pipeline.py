@@ -192,9 +192,15 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
     MAX_RETRIES = 3
     response = None
 
+    HTTP_TIMEOUT = 90   # hard timeout on the underlying HTTP request
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            # Set HTTP-level timeout so a hung Gemini server can't block forever
+            client = genai.Client(
+                api_key=GOOGLE_AI_KEY,
+                http_options={"timeout": HTTP_TIMEOUT},
+            )
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
@@ -208,13 +214,13 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
         except Exception as api_err:
             err_str = str(api_err)
             is_quota = "RESOURCE_EXHAUSTED" in err_str or "free_tier" in err_str
-            is_retryable = not is_quota and any(x in err_str for x in ("503", "UNAVAILABLE", "overloaded"))
+            is_timeout = any(x in err_str.lower() for x in ("timeout", "timed out", "deadline"))
+            is_retryable = not is_quota and any(x in err_str for x in ("503", "UNAVAILABLE", "overloaded")) or is_timeout
             logger.warning(f"Tech stack Gemini attempt {attempt}/{MAX_RETRIES} for {company_name}: {api_err}")
             if is_quota:
-                raise RuntimeError(f"Gemini quota exhausted (free tier limit reached). "
-                                   f"Please upgrade your Google AI API key to a paid plan.") from api_err
+                raise RuntimeError("Gemini quota exhausted — upgrade to a paid API plan.") from api_err
             if is_retryable and attempt < MAX_RETRIES:
-                _time.sleep(15 * attempt)
+                _time.sleep(10 * attempt)
                 continue
             logger.error(f"Gemini tech stack error for {company_name}: {api_err}", exc_info=True)
             return []
