@@ -1,14 +1,11 @@
 """
-Enrichment pipeline: search → Apify scrape → identify → Claude classify.
+Enrichment pipeline: Google Search Grounding → Gemini extraction.
 
-Flow for each company input:
-  1. Generate search queries: company × top vendors × deal keywords
-  2. Run Jina Search to collect URLs
-  3. Deduplicate + filter URLs
-  4. Scrape each URL via Apify Website Content Crawler
-  5. Filter pages for deal relevance (NLP)
-  6. Extract schema fields from relevant pages using Claude
-  7. Merge results across pages → final row
+Single-call architecture:
+  1. Build a focused research prompt with company × vendor × keyword queries
+  2. Call gemini-2.5-flash with googleSearch tool enabled
+  3. Gemini searches live web, reads pages, and returns structured JSON deals
+  4. Parse + normalise → yield one row_done per deal
 """
 
 import asyncio
@@ -18,13 +15,11 @@ import os
 import re
 from typing import AsyncGenerator
 
-import httpx
-
 logger = logging.getLogger(__name__)
 
-# ── Top vendors to combine in searches ───────────────────────────────────────
-# A curated shortlist covering the most commonly found IT deal vendors.
-# Used to build targeted "company + vendor" search queries.
+GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
+
+# ── Top vendors for query construction ───────────────────────────────────────
 TOP_VENDORS = [
     # Global SIs
     "TCS", "Infosys", "Wipro", "HCLTech", "Accenture", "IBM", "Cognizant",
@@ -42,323 +37,169 @@ TOP_VENDORS = [
     "Atos", "NTT", "Unisys",
 ]
 
-# ── Deal search keywords ──────────────────────────────────────────────────────
-DEAL_KEYWORDS = [
-    "deal", "contract", "signed", "awarded", "selected", "partnership",
-    "outsourcing", "implementation", "agreement", "go-live", "digital transformation",
-]
 
-# ── Domains to skip (social, aggregators with no article text) ────────────────
-SKIP_DOMAINS = {
-    "linkedin.com", "twitter.com", "x.com", "facebook.com", "instagram.com",
-    "youtube.com", "reddit.com", "quora.com", "wikipedia.org",
-    "glassdoor.com", "indeed.com", "crunchbase.com",
-}
-
-JINA_KEY = os.getenv("JINA_KEY", "")
-ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-APIFY_KEY = os.getenv("APIFY_API_KEY", "")
-
-
-# ── Step 1: Generate search queries ──────────────────────────────────────────
-
-def build_search_queries(company_name: str, goal: str, year_range: tuple[int, int] = (2022, 2025)) -> list[str]:
-    """Generate search queries: company-only + company×vendor combinations."""
-    queries: list[str] = []
-    years = list(range(year_range[0], year_range[1] + 1))  # full 5-year range
-
-    # Generic deal queries — one per year
-    for year in years:
-        queries.append(f'"{company_name}" IT deal contract signed {year}')
-        queries.append(f'"{company_name}" technology outsourcing agreement {year}')
-
-    # Company + vendor pairs — top vendors, year-agnostic (broad)
-    for vendor in TOP_VENDORS[:10]:
-        queries.append(f'"{company_name}" "{vendor}" deal contract agreement')
-
-    # Broad catch-all
-    queries.append(f'"{company_name}" digital transformation IT vendor selected 2020 2021 2022 2023 2024')
-
-    return queries
-
-
-# ── Step 2: Search via Jina → collect URLs ────────────────────────────────────
-
-async def _apify_google_search(queries: list[str], results_per_query: int = 10) -> list[str]:
+def _build_research_prompt(
+    company_name: str,
+    domain: str,
+    goal: str,
+    schema_fields: list[dict],
+    year_range: tuple[int, int],
+    extra_vendors: list[str] | None = None,
+    extra_sources: list[str] | None = None,
+    extra_keywords: list[str] | None = None,
+) -> str:
     """
-    Search Google via Apify Google Search Scraper actor.
-    Sends all queries in one actor run — much faster than serial searches.
-    Returns flat list of unique URLs from organic results.
+    Construct a rich research prompt that Gemini + Google Search Grounding will act on.
+    The prompt tells Gemini exactly what to search for and what JSON to return.
     """
-    if not APIFY_KEY or not queries:
-        return []
-    try:
-        actor_url = (
-            "https://api.apify.com/v2/acts/apify~google-search-scraper"
-            f"/run-sync-get-dataset-items?token={APIFY_KEY}&timeout=60&memory=256"
-        )
-        payload = {
-            "queries": "\n".join(queries),   # one query per line
-            "maxPagesPerQuery": 1,
-            "resultsPerPage": results_per_query,
-            "countryCode": "us",
-            "languageCode": "en",
-        }
-        async with httpx.AsyncClient(timeout=70) as client:
-            r = await client.post(actor_url, json=payload)
-            if not r.is_success:
-                logger.warning(f"Apify Google Search {r.status_code}: {r.text[:200]}")
-                return []
-            items = r.json()
-            urls: list[str] = []
-            seen: set[str] = set()
-            for item in items:
-                for result in item.get("organicResults", []):
-                    url = result.get("url", "")
-                    if url and url not in seen:
-                        seen.add(url)
-                        urls.append(url)
-            logger.info(f"Apify Google Search: {len(urls)} URLs from {len(queries)} queries")
-            return urls
-    except Exception as e:
-        logger.warning(f"Apify Google Search error: {e}")
-        return []
-
-
-async def _jina_search_fallback(query: str) -> list[str]:
-    """Fallback: Jina semantic search when Apify is unavailable."""
-    if not JINA_KEY:
-        return []
-    try:
-        async with httpx.AsyncClient(timeout=12) as client:
-            r = await client.get(
-                "https://s.jina.ai/",
-                params={"q": query},
-                headers={
-                    "Accept": "application/json",
-                    "Authorization": f"Bearer {JINA_KEY}",
-                    "X-Respond-With": "no-content",
-                },
-            )
-            if not r.is_success:
-                return []
-            urls = [item.get("url", "") for item in r.json().get("data", []) if item.get("url")]
-            return urls
-    except Exception as e:
-        logger.debug(f"Jina search error: {e}")
-        return []
-
-
-async def collect_urls(queries: list[str], max_urls: int = 30) -> list[str]:
-    """
-    Collect URLs via Apify Google Search (primary) or Jina (fallback).
-    Runs all queries in one Apify call for speed.
-    """
-    from urllib.parse import urlparse
-
-    def _filter(raw_urls: list[str]) -> list[str]:
-        seen: set[str] = set()
-        out: list[str] = []
-        for url in raw_urls:
-            if not url:
-                continue
-            domain = urlparse(url).netloc.lstrip("www.")
-            if any(domain == s or domain.endswith("." + s) for s in SKIP_DOMAINS):
-                continue
-            if url not in seen:
-                seen.add(url)
-                out.append(url)
-                if len(out) >= max_urls:
-                    break
-        return out
-
-    # Primary: Apify Google Search (all queries in one call)
-    if APIFY_KEY:
-        raw = await _apify_google_search(queries, results_per_query=10)
-        urls = _filter(raw)
-        if urls:
-            return urls
-        logger.warning("Apify Google Search returned no URLs — falling back to Jina")
-
-    # Fallback: Jina (batched)
-    seen: set[str] = set()
-    urls: list[str] = []
-    for i in range(0, len(queries), 5):
-        batch = queries[i: i + 5]
-        results = await asyncio.gather(*[_jina_search_fallback(q) for q in batch], return_exceptions=True)
-        for result in results:
-            if isinstance(result, Exception):
-                continue
-            for url in result:
-                if not url:
-                    continue
-                domain = urlparse(url).netloc.lstrip("www.")
-                if any(domain == s or domain.endswith("." + s) for s in SKIP_DOMAINS):
-                    continue
-                if url not in seen:
-                    seen.add(url)
-                    urls.append(url)
-        if len(urls) >= max_urls:
-            break
-
-    return urls[:max_urls]
-
-
-# ── Step 3: Scrape via Apify ──────────────────────────────────────────────────
-
-async def scrape_urls_apify(urls: list[str]) -> list[dict]:
-    """
-    Scrape a batch of URLs via Apify Website Content Crawler (sync API).
-    Returns list of {url, text} dicts.
-    """
-    if not APIFY_KEY or not urls:
-        return []
-
-    actor_url = (
-        "https://api.apify.com/v2/acts/apify~website-content-crawler/run-sync-get-dataset-items"
-        f"?token={APIFY_KEY}&timeout=120&memory=512"
-    )
-    payload = {
-        "startUrls": [{"url": u} for u in urls],
-        "maxCrawlPages": len(urls),
-        "crawlerType": "cheerio",
-        "removeElementsCssSelector": "nav,footer,header,script,style,.cookie-banner,.ad",
-        "htmlTransformer": "readableText",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=130) as client:
-            r = await client.post(actor_url, json=payload)
-            if not r.is_success:
-                logger.warning(f"Apify batch scrape {r.status_code}: {r.text[:200]}")
-                return []
-            items = r.json()
-            results = []
-            for item in items:
-                text = item.get("text") or item.get("markdown") or ""
-                url = item.get("url") or item.get("loadedUrl") or ""
-                if text and len(text.split()) >= 80:
-                    results.append({"url": url, "text": text})
-            logger.info(f"Apify scraped {len(results)}/{len(urls)} URLs with content")
-            return results
-    except Exception as e:
-        logger.warning(f"Apify batch scrape error: {e}")
-        return []
-
-
-async def scrape_urls_jina_fallback(urls: list[str]) -> list[dict]:
-    """Fallback scraper using Jina Reader when Apify is not configured."""
-    from website_router import fetch_via_jina_reader
-
-    results = []
-    tasks = [fetch_via_jina_reader(url) for url in urls]
-    fetched = await asyncio.gather(*tasks, return_exceptions=True)
-    for url, result in zip(urls, fetched):
-        if isinstance(result, Exception) or result is None:
-            continue
-        text, _ = result
-        if text and len(text.split()) >= 80:
-            results.append({"url": url, "text": text})
-    return results
-
-
-# ── Step 4: Identify deal-relevant pages ─────────────────────────────────────
-
-def is_deal_page(text: str, company_name: str) -> bool:
-    """Quick relevance filter — must mention company + at least one deal signal."""
-    tl = text.lower()
-    cn = company_name.lower()
-    if cn not in tl:
-        return False
-    deal_signals = [
-        "deal", "contract", "signed", "awarded", "selected", "partnership",
-        "agreement", "outsourcing", "implementation", "go-live",
-        "digital transformation", "managed services", "vendor",
+    start_yr, end_yr = year_range
+    vendors = list(dict.fromkeys((extra_vendors or []) + TOP_VENDORS))[:20]
+    keywords = extra_keywords or [
+        "IT deal", "technology contract", "outsourcing agreement",
+        "digital transformation", "managed services", "cloud migration",
+        "ERP implementation", "cybersecurity contract", "vendor selected",
     ]
-    return any(sig in tl for sig in deal_signals)
-
-
-# ── Step 5: Extract schema fields via Claude ──────────────────────────────────
-
-def _claude_extract_deals(pages: list[dict], company_name: str, goal: str, schema_fields: list[dict]) -> list[dict]:
-    """
-    Call Claude to extract MULTIPLE deal rows from scraped pages.
-    Returns a list of dicts, one per distinct deal found.
-    Runs in a thread (blocking Anthropic SDK call).
-    """
-    import anthropic
-
-    if not ANTHROPIC_KEY:
-        return []
+    sources = extra_sources or []
 
     fields_desc = "\n".join(
-        f'- {f["key"]}: {f.get("description") or f.get("label", "")} ({f.get("type","string")})'
+        f'  "{f["key"]}": "{f.get("description") or f.get("label", "")}"'
         for f in schema_fields
+    )
+    field_keys_example = {
+        f["key"]: f"<{f.get('type', 'string')}>" for f in schema_fields
+    }
+
+    vendor_list = ", ".join(vendors[:15])
+    keyword_list = ", ".join(keywords[:10])
+    source_hint = (
+        f"\nPrioritise results from these sources: {', '.join(sources[:10])}"
+        if sources else ""
+    )
+
+    return f"""You are an enterprise IT deal researcher. Your task is to find every IT deal,
+technology contract, outsourcing agreement, and digital transformation initiative
+involving {company_name} ({domain}) announced between {start_yr} and {end_yr}.
+
+RESEARCH INSTRUCTIONS:
+- Search Google for deals involving {company_name} and vendors such as: {vendor_list}
+- Look for keywords such as: {keyword_list}
+- Cover press releases, business news, vendor announcements, and IR filings{source_hint}
+- Search multiple queries — by year, by vendor, by deal type — to maximise coverage
+- Read the actual article pages, not just headlines
+
+GOAL: {goal}
+
+OUTPUT FORMAT:
+Return ONLY a valid JSON array. Each element represents one distinct deal:
+[
+  {{
+{fields_desc}
+  }},
+  ...
+]
+
+RULES:
+- One JSON object per deal — never merge two deals into one
+- Use null for any field not found in the sources
+- Be specific: exact vendor names, exact dates (YYYY-MM-DD), exact values in USD millions
+- Include source URL where available
+- If no deals are found, return an empty array []
+- Do NOT include any text outside the JSON array
+
+Example element shape:
+{json.dumps(field_keys_example, indent=2)}
+"""
+
+
+def _gemini_extract_deals_sync(
+    company_name: str,
+    domain: str,
+    goal: str,
+    schema_fields: list[dict],
+    year_range: tuple[int, int],
+    extra_vendors: list[str] | None,
+    extra_sources: list[str] | None,
+    extra_keywords: list[str] | None,
+) -> list[dict]:
+    """
+    Blocking call to Gemini 2.5 Flash with Google Search grounding.
+    Runs inside asyncio.to_thread so it doesn't block the event loop.
+    Returns list of normalised deal dicts.
+    """
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        logger.error("google-genai package not installed. Run: pip install google-genai")
+        return []
+
+    if not GOOGLE_AI_KEY:
+        logger.error("GOOGLE_AI_API_KEY env var not set")
+        return []
+
+    prompt = _build_research_prompt(
+        company_name, domain, goal, schema_fields,
+        year_range, extra_vendors, extra_sources, extra_keywords,
     )
     field_keys = [f["key"] for f in schema_fields]
 
-    # Combine page texts, truncate to fit context
-    combined = ""
-    for p in pages[:12]:
-        snippet = p["text"][:2500]
-        combined += f"\n\n[Source: {p['url']}]\n{snippet}"
-    combined = combined[:24000]  # hard cap
-
-    if combined:
-        prompt = (
-            f"You are extracting IT deal records for {company_name} from scraped web content.\n\n"
-            f"GOAL: {goal}\n\n"
-            f"Extract EVERY distinct deal or contract mentioned. Each deal = one JSON object.\n"
-            f"Return a JSON ARRAY where each element has these exact keys:\n{fields_desc}\n\n"
-            f"Rules:\n"
-            f"- One object per deal/contract — do NOT merge multiple deals into one\n"
-            f"- Include deals from all years found in the content (2020–2025)\n"
-            f"- Use null for fields not mentioned for that specific deal\n"
-            f"- Be specific: exact vendor name, date, value, contract duration where stated\n"
-            f"- If no deals found, return an empty array []\n"
-            f"- Return ONLY the JSON array, no explanation\n\n"
-            f"SCRAPED CONTENT:\n{combined}"
-        )
-    else:
-        # No scraped pages — ask Claude from knowledge
-        prompt = (
-            f"List all known IT deals and technology contracts for {company_name} from 2020–2025.\n\n"
-            f"GOAL: {goal}\n\n"
-            f"Return a JSON ARRAY where each element is one deal with these exact keys:\n{fields_desc}\n\n"
-            f"Rules:\n"
-            f"- One object per deal — do NOT merge multiple deals\n"
-            f"- Include as many distinct deals as you know (target 5–15 deals)\n"
-            f"- Use null for fields you are not confident about\n"
-            f"- Return ONLY the JSON array, no explanation"
-        )
-
     try:
-        ac = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        msg = ac.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=3000,
-            messages=[{"role": "user", "content": prompt}],
+        client = genai.Client(api_key=GOOGLE_AI_KEY)
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.1,          # low temp for factual extraction
+                max_output_tokens=8192,
+            ),
         )
-        raw = msg.content[0].text
-        clean = re.sub(r"```(?:json)?\s*|\s*```", "", raw.strip())
-        parsed = json.loads(clean)
+
+        raw_text = response.text or ""
+        logger.info(f"Gemini response length: {len(raw_text)} chars for {company_name}")
+
+    except Exception as e:
+        logger.error(f"Gemini API error for {company_name}: {e}")
+        return []
+
+    # ── Parse JSON from response ──────────────────────────────────────────────
+    try:
+        # Strip markdown code fences if present
+        clean = re.sub(r"```(?:json)?\s*|\s*```", "", raw_text.strip())
+
+        # Extract the JSON array (handles prose before/after the array)
+        array_match = re.search(r"\[.*\]", clean, re.DOTALL)
+        if not array_match:
+            logger.warning(f"No JSON array found in Gemini response for {company_name}")
+            return []
+
+        parsed = json.loads(array_match.group(0))
+
         if isinstance(parsed, dict):
-            # Claude returned a single object — wrap it
             parsed = [parsed]
         if not isinstance(parsed, list):
             return []
-        # Normalise: ensure all keys present, convert nulls
+
+        # Normalise: ensure all schema keys present, coerce nulls to ""
         out = []
         for item in parsed:
             if not isinstance(item, dict):
                 continue
-            row = {}
+            row: dict = {}
             for key in field_keys:
                 val = item.get(key)
-                row[key] = str(val) if val not in (None, "null", "") else ""
+                row[key] = str(val) if val not in (None, "null", "None", "") else ""
             out.append(row)
+
+        logger.info(f"Gemini extracted {len(out)} deals for {company_name}")
         return out
+
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parse error for {company_name}: {e}\nRaw: {raw_text[:500]}")
+        return []
     except Exception as e:
-        logger.warning(f"Claude extraction error: {e}")
+        logger.error(f"Unexpected parse error for {company_name}: {e}")
         return []
 
 
@@ -369,105 +210,93 @@ async def enrich_company(
     domain: str,
     goal: str,
     schema_fields: list[dict],
-    year_range: tuple[int, int] = (2022, 2025),
-    max_urls: int = 20,
+    year_range: tuple[int, int] = (2021, 2025),
+    max_urls: int = 20,                 # kept for API compatibility, unused
+    extra_vendors: list[str] | None = None,
+    extra_sources: list[str] | None = None,
+    extra_keywords: list[str] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """
-    Full enrichment pipeline for one company. Yields progress events then final row.
+    Single-call enrichment pipeline using Gemini 2.5 Flash + Google Search Grounding.
+
+    Replaces the previous multi-step: Apify search → Apify scrape → Claude extract.
+    Gemini handles searching, reading, and structured extraction in one API call.
     """
+    boost_parts = []
+    if extra_vendors:  boost_parts.append(f"{len(extra_vendors)} vendors")
+    if extra_sources:  boost_parts.append(f"{len(extra_sources)} sources")
+    if extra_keywords: boost_parts.append(f"{len(extra_keywords)} keywords")
+    boost_str = f" [+{', '.join(boost_parts)}]" if boost_parts else ""
 
-    yield {"type": "heartbeat", "message": f"🔍 Building search queries for {company_name}…"}
+    yield {
+        "type": "heartbeat",
+        "message": f"🔍 Searching {company_name} deals ({year_range[0]}–{year_range[1]}){boost_str}…",
+    }
 
-    # Step 1: Generate queries
-    queries = build_search_queries(company_name, goal, year_range)
-    yield {"type": "heartbeat", "message": f"🔍 Running {len(queries)} searches for {company_name}…"}
+    # Run blocking Gemini call in a thread — yield heartbeats while waiting
+    gemini_task = asyncio.ensure_future(
+        asyncio.to_thread(
+            _gemini_extract_deals_sync,
+            company_name, domain, goal, schema_fields,
+            year_range, extra_vendors, extra_sources, extra_keywords,
+        )
+    )
 
-    # Step 2: Collect URLs (run in batches, yield heartbeat between)
-    url_collect_task = asyncio.ensure_future(collect_urls(queries, max_urls=max_urls))
     elapsed = 0
-    while not url_collect_task.done() and elapsed < 90:
-        done, _ = await asyncio.wait({url_collect_task}, timeout=8)
+    while not gemini_task.done() and elapsed < 120:
+        done, _ = await asyncio.wait({gemini_task}, timeout=8)
         elapsed += 8
         if done:
             break
-        yield {"type": "heartbeat", "message": f"🔍 Searching… ({elapsed}s)"}
-    if not url_collect_task.done():
-        url_collect_task.cancel()
-        urls: list[str] = []
-    else:
-        try:
-            urls = url_collect_task.result()
-        except Exception:
-            urls = []
+        yield {"type": "heartbeat", "message": f"🌐 Gemini searching & reading sources… ({elapsed}s)"}
 
-    if not urls:
-        yield {"type": "heartbeat", "message": f"⚠️ No URLs found — using Claude knowledge for {company_name}…"}
-        deals: list[dict] = await asyncio.to_thread(
-            _claude_extract_deals, [], company_name, goal, schema_fields
-        )
-        if not deals:
-            row = {"company_name": company_name, "domain": domain, "_status": "no_result", "_sources": 0}
-            for f in schema_fields:
-                row[f["key"]] = ""
-            yield {"type": "row_done", "row": row}
-            return
-        yield {"type": "heartbeat", "message": f"✅ Found {len(deals)} deals for {company_name} (from knowledge)"}
-        for deal in deals:
-            row = {"company_name": company_name, "domain": domain, "_status": "ok", "_sources": 0}
-            row.update(deal)
-            yield {"type": "row_done", "row": row}
-        return
-
-    yield {"type": "heartbeat", "message": f"🕸️ Scraping {len(urls)} URLs for {company_name}…"}
-
-    # Step 3: Scrape via Apify (or Jina fallback)
-    if APIFY_KEY:
-        # Scrape in batches of 10 to stay within Apify timeout
-        scraped: list[dict] = []
-        for i in range(0, len(urls), 10):
-            batch = urls[i: i + 10]
-            batch_result = await scrape_urls_apify(batch)
-            scraped.extend(batch_result)
-            if i + 10 < len(urls):
-                yield {"type": "heartbeat", "message": f"🕸️ Scraped {len(scraped)} pages… ({i+10}/{len(urls)})"}
-    else:
-        yield {"type": "heartbeat", "message": f"🕸️ Scraping via Jina (no Apify key)…"}
-        scraped = await scrape_urls_jina_fallback(urls[:10])
-
-    yield {"type": "heartbeat", "message": f"✅ Scraped {len(scraped)} pages — identifying deals…"}
-
-    # Step 4: Filter deal-relevant pages
-    relevant = [p for p in scraped if is_deal_page(p["text"], company_name)]
-    yield {"type": "heartbeat", "message": f"📋 {len(relevant)}/{len(scraped)} pages are deal-relevant — extracting…"}
-
-    # Step 5: Extract multiple deals with Claude
-    pages_to_use = relevant if relevant else scraped[:5]
-    deals: list[dict] = await asyncio.to_thread(
-        _claude_extract_deals, pages_to_use, company_name, goal, schema_fields
-    )
-
-    if not deals:
-        # No deals extracted — yield a no_result row
-        row: dict = {
+    if not gemini_task.done():
+        gemini_task.cancel()
+        logger.error(f"Gemini task timed out for {company_name}")
+        row = {
             "company_name": company_name,
             "domain": domain,
-            "_status": "no_result",
-            "_sources": len(relevant),
+            "_status": "timeout",
+            "_sources": 0,
         }
         for f in schema_fields:
             row[f["key"]] = ""
         yield {"type": "row_done", "row": row}
         return
 
-    yield {"type": "heartbeat", "message": f"✅ Found {len(deals)} deals for {company_name}"}
+    try:
+        deals: list[dict] = gemini_task.result()
+    except Exception as e:
+        logger.error(f"Gemini task raised: {e}")
+        deals = []
 
-    # Yield one row per deal
+    if not deals:
+        yield {
+            "type": "heartbeat",
+            "message": f"⚠️ No deals found for {company_name}",
+        }
+        row = {
+            "company_name": company_name,
+            "domain": domain,
+            "_status": "no_result",
+            "_sources": 0,
+        }
+        for f in schema_fields:
+            row[f["key"]] = ""
+        yield {"type": "row_done", "row": row}
+        return
+
+    yield {
+        "type": "heartbeat",
+        "message": f"✅ Found {len(deals)} deals for {company_name}",
+    }
+
     for deal in deals:
         row = {
             "company_name": company_name,
             "domain": domain,
             "_status": "ok",
-            "_sources": len(relevant),
+            "_sources": 1,   # Gemini used live grounding (sources embedded in response)
         }
         row.update(deal)
         yield {"type": "row_done", "row": row}
