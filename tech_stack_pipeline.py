@@ -31,32 +31,73 @@ TECH_STACK_FIELDS = [
 FIELD_KEYS = [f["key"] for f in TECH_STACK_FIELDS]
 
 # ── Category taxonomy ─────────────────────────────────────────────────────────
-WIDE_CATEGORIES = """
-Core Enterprise Operations:
-  ERP, HCM/HRMS, Finance & Accounting, Procurement & Source-to-Pay, Legal Tech, ITSM
 
-Customer-Facing & Revenue:
-  CRM, Marketing Automation, CDP, E-Commerce Platform, Customer Support / Helpdesk,
-  Sales Engagement, Loyalty & Personalisation, CPQ
+# Canonical tech_stack_category values → must match exactly in output
+TECH_STACK_CATEGORIES = {
+    "Core Enterprise Operations": [
+        "ERP & Finance",           # NetSuite, SAP, QuickBooks, Oracle Financials
+        "HR & Payroll",            # Rippling, Gusto, Workday, Deel, ADP
+        "Internal Communications", # Slack, Teams, Google Workspace, Zoom
+        "Project & Knowledge Management",  # Jira, Notion, Asana, Monday, Confluence
+        "Contract Lifecycle Management",   # Ironclad, DocuSign CLM, Icertis
+        "Procurement & Source-to-Pay",     # Coupa, Ariba, Ivalua, Jaggaer
+        "ITSM & Service Desk",             # ServiceNow, BMC Remedy, Jira Service Mgmt
+    ],
+    "Customer-Facing & Revenue": [
+        "CRM & Account Management",  # Salesforce, HubSpot, Microsoft Dynamics
+        "Customer Support & Helpdesk", # Zendesk, Intercom, Gorgias, Freshdesk
+        "Marketing Automation",      # Klaviyo, Braze, Marketo, Mailchimp, Pardot
+        "Sales Intelligence",        # ZoomInfo, Apollo, Outreach, Salesloft, Gong
+        "Billing & Subscription",    # Stripe, Chargebee, Zuora, Recurly
+        "E-Commerce Platform",       # Shopify, Magento, commercetools, SAP Commerce
+        "CPQ & Configure-Price-Quote", # Salesforce CPQ, DealHub, Conga
+    ],
+    "Infrastructure & Cloud": [
+        "Cloud Hosting",    # AWS, Azure, GCP, Vercel, Render
+        "CDN & DNS",        # Cloudflare, Akamai, Fastly, AWS CloudFront
+        "Databases",        # PostgreSQL, MongoDB, MySQL, Supabase, Oracle DB, Redis
+        "Identity & IAM",   # Okta, Auth0, Clerk, Microsoft Entra ID, SailPoint
+        "Collaboration & Productivity", # Microsoft 365, Google Workspace, Slack
+        "Device Management / MDM",      # Jamf, Intune, VMware Workspace ONE
+        "Network & VPN",               # Cisco, Zscaler, Palo Alto Prisma
+    ],
+    "Development & Engineering": [
+        "Version Control",      # GitHub, GitLab, Bitbucket, Azure DevOps
+        "CI/CD Automation",     # Jenkins, GitHub Actions, CircleCI, ArgoCD
+        "APM & Monitoring",     # Datadog, New Relic, Sentry, Dynatrace, Elastic
+        "API Management",       # MuleSoft, Apigee, Kong, AWS API Gateway
+        "Container & Orchestration",  # Kubernetes, Docker, OpenShift
+        "iPaaS & Integration",  # Zapier, Make, Workato, Boomi, MuleSoft
+        "Low-Code / No-Code",   # OutSystems, Mendix, Power Apps, Appian
+    ],
+    "Data Analytics & AI": [
+        "Data Warehousing",       # Snowflake, BigQuery, Databricks, Redshift
+        "Data Integration & ETL", # Fivetran, Airbyte, Airflow, dbt, Informatica
+        "Business Intelligence",  # Tableau, Power BI, Looker, Qlik, MicroStrategy
+        "Product Analytics",      # Google Analytics, Mixpanel, Amplitude, Heap
+        "AI/ML Infrastructure",   # OpenAI API, LangChain, Pinecone, Vertex AI, SageMaker
+        "Data Catalogue & Governance", # Collibra, Alation, Atlan
+    ],
+    "Security & Compliance": [
+        "Cybersecurity / EDR",    # CrowdStrike, SentinelOne, Microsoft Defender
+        "SIEM & Threat Detection", # Splunk, Microsoft Sentinel, IBM QRadar
+        "Vulnerability Management", # Tenable, Qualys, Rapid7
+        "GRC & Compliance",       # ServiceNow GRC, MetricStream, Vanta, Drata
+        "DLP & Data Security",    # Symantec DLP, Forcepoint, Nightfall
+        "Zero Trust / ZTNA",      # Zscaler, Cloudflare Access, Palo Alto Prisma
+    ],
+    "Unclassified": [
+        "Unclassified Tools",     # Any clear software not fitting above
+    ],
+}
 
-Infrastructure & Cloud:
-  Cloud Hosting (IaaS), CDN, DNS & Domain, Email Hosting / MX,
-  Identity & IAM / SSO, VPN & Network, Collaboration & Productivity,
-  Video Conferencing, Device Management / MDM
+# Flat list of all valid tech_stack_category values
+ALL_CATEGORIES_FLAT = [cat for cats in TECH_STACK_CATEGORIES.values() for cat in cats]
 
-Development & Engineering:
-  Source Control & CI/CD, APM & Observability, Feature Flagging,
-  API Gateway, Container Orchestration, Low-Code / No-Code
-
-Data Analytics & AI:
-  Data Warehouse, ETL / ELT, BI & Dashboards, AI/ML Platform,
-  Data Catalogue, Real-Time Streaming, Customer Data Platform
-
-Security & Compliance:
-  Endpoint Security / EDR, SIEM, Identity Threat Detection,
-  Vulnerability Management, DLP, GRC / Compliance Automation,
-  Zero Trust / ZTNA
-"""
+WIDE_CATEGORIES = "\n".join(
+    f"\n{core}:\n" + "\n".join(f"  - {cat}" for cat in cats)
+    for core, cats in TECH_STACK_CATEGORIES.items()
+)
 
 CONFIDENCE_GUIDE = """
 Confidence scoring:
@@ -100,43 +141,43 @@ def _build_tech_stack_prompt(
 For each listed vendor, also look for direct market competitors in the same functional bucket."""
 
     if call_num == 1:
-        search_block = f"""SEARCHES — Call 1: Enterprise applications & public digital signals (2021–2026)
-  - site:{domain} technology stack software tools platform
-  - "{company_name}" software platform deployed implemented 2023 OR 2024 OR 2025 OR 2026
-  - "{company_name}" ERP HCM CRM SCM finance platform 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" SAP OR Oracle OR Workday OR ServiceNow OR Salesforce
-  - "{company_name}" Microsoft 365 OR Teams OR Azure OR Dynamics 2022 OR 2023 OR 2024 OR 2025
+        search_block = f"""SEARCHES — Call 1: Core enterprise apps, HR, finance, comms, ITSM (2021–2026)
+  - "{company_name}" ERP finance accounting NetSuite SAP QuickBooks Oracle 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" HR payroll Workday Rippling Gusto Deel ADP SuccessFactors 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" Slack OR Teams OR Google Workspace communication collaboration 2023 OR 2024 OR 2025
+  - "{company_name}" Jira OR Notion OR Asana OR Monday.com project management 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" contract management Ironclad DocuSign CLM Icertis 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" ServiceNow OR BMC Remedy OR Jira Service Management ITSM 2022 OR 2023 OR 2024 OR 2025
+  - site:builtwith.com OR site:stackshare.io "{company_name}"
   - "{company_name}" careers job posting software tools skills required 2023 OR 2024 OR 2025
-  - site:builtwith.com OR site:stackshare.io OR site:similartech.com "{company_name}"
-  - "{company_name}" privacy policy OR cookie disclosure third-party software tools
-  - "{company_name}" technology partner vendor case study 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" digital transformation program technology 2023 OR 2024 OR 2025 OR 2026"""
+  - "{company_name}" technology partner case study implemented deployed 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" privacy policy cookie third-party software tools"""
 
     elif call_num == 2:
-        search_block = f"""SEARCHES — Call 2: Cloud, data, security & DevOps stack (2021–2026)
-  - "{company_name}" AWS OR Azure OR Google Cloud OR hybrid cloud 2023 OR 2024 OR 2025 OR 2026
-  - "{company_name}" Snowflake OR Databricks OR data warehouse OR data lake 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" cybersecurity endpoint SIEM zero trust identity 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" Palo Alto OR CrowdStrike OR Microsoft Defender OR Okta OR SailPoint
-  - "{company_name}" DevOps CI/CD Kubernetes containers observability APM 2022 OR 2023 OR 2024
-  - "{company_name}" Splunk OR Elastic OR Dynatrace OR Datadog OR New Relic
-  - "{company_name}" network infrastructure SD-WAN data center 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" collaboration productivity tools intranet 2023 OR 2024 OR 2025
-  - site:linkedin.com/jobs "{company_name}" technology skills required 2024 OR 2025
-  - "{company_name}" annual report technology spend infrastructure 2023 OR 2024 OR 2025"""
+        search_block = f"""SEARCHES — Call 2: CRM, sales, marketing, billing, support, cloud, IAM (2021–2026)
+  - "{company_name}" Salesforce OR HubSpot OR Microsoft Dynamics CRM 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" Zendesk OR Intercom OR Freshdesk OR Gorgias customer support helpdesk 2022 OR 2023 OR 2024
+  - "{company_name}" Marketo OR Klaviyo OR Braze OR Mailchimp marketing automation 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" ZoomInfo OR Apollo OR Outreach OR Gong OR Salesloft sales intelligence 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" Stripe OR Chargebee OR Zuora billing subscription 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" AWS OR Azure OR Google Cloud cloud hosting infrastructure 2023 OR 2024 OR 2025 OR 2026
+  - "{company_name}" Cloudflare OR Akamai CDN DNS network 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" Okta OR Auth0 OR Entra ID OR SailPoint identity IAM 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" PostgreSQL OR MongoDB OR MySQL OR Supabase OR Oracle database 2022 OR 2023 OR 2024
+  - site:linkedin.com/jobs "{company_name}" required skills tools 2024 OR 2025"""
 
     else:  # call 3
-        search_block = f"""SEARCHES — Call 3: Customer-facing, analytics, supply chain & sector-specific (2021–2026)
-  - "{company_name}" marketing automation CRM customer data platform 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" Salesforce OR HubSpot OR Marketo OR Adobe Experience OR Adobe Campaign
-  - "{company_name}" supply chain SCM procurement WMS TMS 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" BI dashboard analytics Power BI Tableau Qlik 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" AI ML platform machine learning deployment 2023 OR 2024 OR 2025 OR 2026
-  - "{company_name}" ecommerce OR customer portal OR self-service platform 2022 OR 2023 OR 2024
-  - "{company_name}" ITSM ticketing ServiceNow OR Jira OR Remedy OR BMC 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" low-code no-code RPA automation platform 2022 OR 2023 OR 2024 OR 2025
-  - site:g2.com OR site:capterra.com "{company_name}" software review uses
-  - "{company_name}" vendor relationship partnership technology 2024 OR 2025 OR 2026"""
+        search_block = f"""SEARCHES — Call 3: DevOps, data, analytics, AI, security, integration (2021–2026)
+  - "{company_name}" GitHub OR GitLab OR Bitbucket version control CI/CD 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" Datadog OR New Relic OR Dynatrace OR Sentry APM observability monitoring 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" MuleSoft OR Apigee OR Kong API management 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" Zapier OR Workato OR Make OR Boomi iPaaS integration automation 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" Snowflake OR Databricks OR BigQuery OR Redshift data warehouse 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" Fivetran OR dbt OR Airflow OR Informatica ETL data integration 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" Power BI OR Tableau OR Looker OR Qlik business intelligence 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" Mixpanel OR Amplitude OR Google Analytics product analytics 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" OpenAI OR LangChain OR Pinecone OR Vertex AI ML platform 2023 OR 2024 OR 2025 OR 2026
+  - "{company_name}" CrowdStrike OR SentinelOne OR Splunk OR Zscaler OR Palo Alto cybersecurity 2022 OR 2023 OR 2024 OR 2025"""
 
     fields_desc = "\n".join(f'  "{f["key"]}": "{f["label"]}"' for f in TECH_STACK_FIELDS)
     fields_example = {f["key"]: f"<{f['label']}>" for f in TECH_STACK_FIELDS}
@@ -157,13 +198,8 @@ Only include tools/platforms that are active or evidenced within this period.
 TARGET: Find as many distinct tools as possible — large enterprises typically run 80–200+ tools.
 Do NOT stop early. Exhaust every category before returning results.
 
-CATEGORIES TO COVER EXHAUSTIVELY (find tools in ALL of these):
-  Core Enterprise Operations: ERP, Finance/Accounting, HCM/HRMS, Procurement, Legal Tech, ITSM
-  Customer-Facing & Revenue: CRM, Marketing Automation, CDP, E-Commerce, Support/Helpdesk, CPQ, Loyalty
-  Infrastructure & Cloud: IaaS, CDN, DNS, Email/MX, IAM/SSO, VPN, Collaboration, Video Conf, MDM
-  Development & Engineering: Source Control, CI/CD, APM, Feature Flags, API Gateway, Containers, Low-Code
-  Data Analytics & AI: Data Warehouse, ETL/ELT, BI/Dashboards, AI/ML Platform, Data Catalogue, Streaming
-  Security & Compliance: EDR/Endpoint, SIEM, IAM/PAM, Vulnerability Mgmt, DLP, GRC, Zero Trust/ZTNA
+EXACT tech_stack_category values to use (use these verbatim — no variations):
+{chr(10).join(f"  - {cat}" for cat in ALL_CATEGORIES_FLAT)}
 
 EXTRACTION RULES:
 - One JSON object per distinct software/tool deployment
@@ -179,7 +215,9 @@ EXTRACTION RULES:
 
 core_tech_category must be one of:
   Core Enterprise Operations | Customer-Facing & Revenue | Infrastructure & Cloud |
-  Development & Engineering | Data Analytics & AI | Security & Compliance
+  Development & Engineering | Data Analytics & AI | Security & Compliance | Unclassified
+
+tech_stack_category must be one of the exact values listed above — no free-text variations.
 
 Return ONLY a valid JSON array — no prose, no markdown fences:
 [
