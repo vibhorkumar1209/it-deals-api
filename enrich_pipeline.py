@@ -330,38 +330,44 @@ async def enrich_company(
 
     yield {"type": "heartbeat",
            "message": f"🔍 Researching {company_name} IT deals{focus_str}…"}
+    await asyncio.sleep(0)  # flush SSE before blocking call
 
-    gemini_task = asyncio.ensure_future(
-        asyncio.to_thread(
-            _gemini_extract_deals_sync,
-            company_name, domain, linkedin_url, ft, fv,
-        )
+    # Run Gemini in a thread; send heartbeats every 10s so SSE stays alive
+    loop = asyncio.get_event_loop()
+    gemini_future = loop.run_in_executor(
+        None,
+        _gemini_extract_deals_sync,
+        company_name, domain, linkedin_url, ft, fv,
     )
 
     elapsed = 0
-    while not gemini_task.done() and elapsed < 240:
-        done, _ = await asyncio.wait({gemini_task}, timeout=8)
-        elapsed += 8
-        if done:
-            break
-        yield {"type": "heartbeat",
-               "message": f"🌐 Gemini searching & reading sources… ({elapsed}s)"}
+    deals: list[dict] = []
+    TIMEOUT = 240
 
-    if not gemini_task.done():
-        gemini_task.cancel()
-        logger.error(f"Gemini timed out (240s) for {company_name}")
+    while elapsed < TIMEOUT:
+        try:
+            deals = await asyncio.wait_for(asyncio.shield(gemini_future), timeout=10)
+            break  # finished successfully
+        except asyncio.TimeoutError:
+            elapsed += 10
+            yield {"type": "heartbeat",
+                   "message": f"🌐 Gemini searching & reading sources… ({elapsed}s)"}
+            await asyncio.sleep(0)  # flush heartbeat to client
+        except Exception as e:
+            logger.error(f"Gemini task error for {company_name}: {e}", exc_info=True)
+            yield {"type": "heartbeat", "message": f"⚠️ Gemini error: {e}"}
+            deals = []
+            break
+    else:
+        # True timeout
+        gemini_future.cancel()
+        logger.error(f"Gemini timed out ({TIMEOUT}s) for {company_name}")
         row = {"company_name": company_name, "domain": domain,
                "_status": "timeout", "_sources": 0}
         for f in SCHEMA_FIELDS:
             row[f["key"]] = ""
         yield {"type": "row_done", "row": row}
         return
-
-    try:
-        deals: list[dict] = gemini_task.result()
-    except Exception as e:
-        logger.error(f"Gemini task error for {company_name}: {e}")
-        deals = []
 
     if not deals:
         yield {"type": "heartbeat", "message": f"⚠️ No deals found for {company_name}"}
