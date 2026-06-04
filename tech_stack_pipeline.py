@@ -151,7 +151,8 @@ For each listed vendor, also look for direct market competitors in the same func
   - site:builtwith.com OR site:stackshare.io "{company_name}"
   - "{company_name}" careers job posting software tools skills required 2023 OR 2024 OR 2025
   - "{company_name}" technology partner case study implemented deployed 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" privacy policy cookie third-party software tools"""
+  - "{company_name}" privacy policy cookie third-party software tools
+  - "{company_name}" software tool platform vendor deployed signed 2022 OR 2023 OR 2024 OR 2025"""
 
     elif call_num == 2:
         search_block = f"""SEARCHES — Call 2: CRM, sales, marketing, billing, support, cloud, IAM (2021–2026)
@@ -164,7 +165,8 @@ For each listed vendor, also look for direct market competitors in the same func
   - "{company_name}" Cloudflare OR Akamai CDN DNS network 2022 OR 2023 OR 2024 OR 2025
   - "{company_name}" Okta OR Auth0 OR Entra ID OR SailPoint identity IAM 2022 OR 2023 OR 2024 OR 2025
   - "{company_name}" PostgreSQL OR MongoDB OR MySQL OR Supabase OR Oracle database 2022 OR 2023 OR 2024
-  - site:linkedin.com/jobs "{company_name}" required skills tools 2024 OR 2025"""
+  - site:linkedin.com/jobs "{company_name}" required skills tools 2024 OR 2025
+  - "{company_name}" technology platform vendor partnership announcement 2023 OR 2024 OR 2025"""
 
     else:  # call 3
         search_block = f"""SEARCHES — Call 3: DevOps, data, analytics, AI, security, integration (2021–2026)
@@ -177,7 +179,9 @@ For each listed vendor, also look for direct market competitors in the same func
   - "{company_name}" Power BI OR Tableau OR Looker OR Qlik business intelligence 2022 OR 2023 OR 2024 OR 2025
   - "{company_name}" Mixpanel OR Amplitude OR Google Analytics product analytics 2022 OR 2023 OR 2024 OR 2025
   - "{company_name}" OpenAI OR LangChain OR Pinecone OR Vertex AI ML platform 2023 OR 2024 OR 2025 OR 2026
-  - "{company_name}" CrowdStrike OR SentinelOne OR Splunk OR Zscaler OR Palo Alto cybersecurity 2022 OR 2023 OR 2024 OR 2025"""
+  - "{company_name}" CrowdStrike OR SentinelOne OR Splunk OR Zscaler OR Palo Alto cybersecurity 2022 OR 2023 OR 2024 OR 2025
+  - site:g2.com OR site:capterra.com "{company_name}" software review
+  - "{company_name}" annual report technology tools vendors 2023 OR 2024 OR 2025"""
 
     fields_desc = "\n".join(f'  "{f["key"]}": "{f["label"]}"' for f in TECH_STACK_FIELDS)
     fields_example = {f["key"]: f"<{f['label']}>" for f in TECH_STACK_FIELDS}
@@ -198,8 +202,10 @@ Only include tools/platforms that are active or evidenced within this period.
 TARGET: Find as many distinct tools as possible — large enterprises typically run 80–200+ tools.
 Do NOT stop early. Exhaust every category before returning results.
 
-EXACT tech_stack_category values to use (use these verbatim — no variations):
+PREFERRED tech_stack_category values — use these where they fit, but do NOT limit yourself to them.
+If you find a tool that doesn't fit any of these, create a clear descriptive sub-category name for it:
 {chr(10).join(f"  - {cat}" for cat in ALL_CATEGORIES_FLAT)}
+  - (any new descriptive sub-category for tools not covered above)
 
 EXTRACTION RULES:
 - One JSON object per distinct software/tool deployment
@@ -213,11 +219,12 @@ EXTRACTION RULES:
 - renewal_date: next estimated renewal quarter e.g. "Q1 2027", "Q3 2026" — no "Est." prefix
 - confidence_score: percentage with brief reason e.g. "87% – job posting", "94% – vendor case study"
 
-core_tech_category must be one of:
+core_tech_category: use one of the preferred values below, or create a new one if needed:
   Core Enterprise Operations | Customer-Facing & Revenue | Infrastructure & Cloud |
   Development & Engineering | Data Analytics & AI | Security & Compliance | Unclassified
 
-tech_stack_category must be one of the exact values listed above — no free-text variations.
+tech_stack_category: use a preferred value from the list above where it fits;
+  otherwise create a clear, concise descriptive name (e.g. "Fleet Management Platform", "PLM", "Digital Signage").
 
 Return ONLY a valid JSON array — no prose, no markdown fences:
 [
