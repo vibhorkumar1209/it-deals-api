@@ -20,7 +20,7 @@ GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
 TECH_STACK_FIELDS = [
     {"key": "core_tech_category",  "label": "Core Tech Category"},
     {"key": "tech_stack_category", "label": "Tech Stack Category"},
-    {"key": "vendor",              "label": "Vendor"},
+    {"key": "vendor",              "label": "Tech"},
     {"key": "integration_partner", "label": "Implementation Partner"},
     {"key": "last_detected",       "label": "Last Detected"},
     {"key": "tech_install",        "label": "Install Size (approx)"},
