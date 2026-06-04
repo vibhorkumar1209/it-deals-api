@@ -204,9 +204,6 @@ async def extract(req: ReExtractRequest):
 class EnrichInput(BaseModel):
     company_name: str
     domain: str
-    industry: str = ""              # filters vendor list to industry-relevant vendors
-    vendor: str = ""                # primary vendor for this company — T1 priority
-    competitor_vendors: list[str] = []  # competitors of vendor — injected at T2
 
 class SchemaField(BaseModel):
     key: str
@@ -218,11 +215,6 @@ class EnrichTaskRequest(BaseModel):
     goal: str = Field(..., min_length=10)
     schema_fields: list[SchemaField] = Field(..., min_length=1)
     inputs: list[EnrichInput] = Field(..., min_length=1, max_length=50)
-    # Optional enrichment boosters — merged with pipeline defaults when provided
-    vendors: list[str] = Field(default_factory=list)   # global extra vendors for all companies
-    sources: list[str] = Field(default_factory=list)   # domains for site: queries
-    keywords: list[str] = Field(default_factory=list)  # extra deal signal keywords
-    run_t3: bool = Field(default=False)                # opt-in: run Tier 3 keyword catch-all
 
 
 @app.post("/api/enrich-task")
@@ -253,23 +245,11 @@ async def enrich_task(req: EnrichTaskRequest):
             company_deals: list[dict] = []
 
             try:
-                # Per-company vendor goes first in T1; global vendors follow
-                company_vendors = ([inp.vendor.strip()] if inp.vendor.strip() else []) + list(req.vendors)
-                # Per-company competitor_vendors injected at T2
-                t2 = inp.competitor_vendors or None
-
                 async for event in enrich_company(
                     company_name=inp.company_name,
                     domain=inp.domain,
                     goal=req.goal,
                     schema_fields=schema_fields,
-                    year_range=(2016, 2025),
-                    extra_vendors=company_vendors or None,
-                    extra_sources=req.sources,
-                    extra_keywords=req.keywords,
-                    industry=inp.industry,
-                    run_t3=req.run_t3,
-                    t2_vendors=t2,
                 ):
                     if event["type"] == "row_done":
                         deal_row = event["row"]
@@ -409,21 +389,17 @@ async def debug_enrich():
     """Diagnose enrichment: check env keys and test Claude via thread."""
     import anthropic as _anthropic
 
-    anthropic_key   = os.getenv("ANTHROPIC_API_KEY", "")
-    apify_key       = os.getenv("APIFY_API_KEY", "")
-    parallel_key    = os.getenv("PARALLEL_API_KEY", "")
-    jina_key        = os.getenv("JINA_KEY", "")
-    scraper_api_key  = os.getenv("SCRAPER_API_KEY", "")
-    scraper_base_url = os.getenv("SCRAPER_BASE_URL", "")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    apify_key     = os.getenv("APIFY_API_KEY", "")
+    parallel_key  = os.getenv("PARALLEL_API_KEY", "")
+    jina_key      = os.getenv("JINA_KEY", "")
 
     out: dict = {
         "env": {
-            "ANTHROPIC_API_KEY": "set" if anthropic_key    else "MISSING",
-            "APIFY_API_KEY":     "set" if apify_key        else "MISSING",
-            "PARALLEL_API_KEY":  "set" if parallel_key     else "MISSING",
-            "JINA_KEY":          "set" if jina_key         else "MISSING",
-            "SCRAPER_API_KEY":   "set" if scraper_api_key  else "MISSING",
-            "SCRAPER_BASE_URL":  scraper_base_url          if scraper_base_url else "MISSING",
+            "ANTHROPIC_API_KEY": "set" if anthropic_key else "MISSING",
+            "APIFY_API_KEY":     "set" if apify_key     else "MISSING",
+            "PARALLEL_API_KEY":  "set" if parallel_key  else "MISSING",
+            "JINA_KEY":          "set" if jina_key      else "MISSING",
         },
         "claude_test": "skipped — key missing",
         "anthropic_version": _anthropic.__version__,
@@ -444,177 +420,7 @@ async def debug_enrich():
         except Exception as e:
             out["claude_test"] = f"ERROR: {e}"
 
-    # Test Google News RSS search
-    import httpx as _httpx, re as _re2
-    from urllib.parse import quote_plus as _qp
-    try:
-        rss_url = f"https://news.google.com/rss/search?q={_qp('HDFC Bank IBM deal 2023')}&hl=en-US&gl=US&ceid=US:en"
-        async with _httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            r = await client.get(rss_url, headers={"User-Agent": "Mozilla/5.0 (compatible; RSS reader)"})
-        urls = [u for u in _re2.findall(r'<link>([^<]+)</link>', r.text) if u.startswith("http") and "rss/search" not in u and u != "https://news.google.com/"][:4]
-        out["gnews_rss_test"] = {"status_code": r.status_code, "ok": r.is_success,
-                                  "urls_found": len(urls), "sample": urls}
-    except Exception as e:
-        out["gnews_rss_test"] = {"error": str(e)}
-
-    # Test custom scraper API (vibhorkumar1209/scraper-api)
-    if scraper_base_url:
-        import httpx as _httpx
-        try:
-            headers = {"x-api-key": scraper_api_key} if scraper_api_key else {}
-            async with _httpx.AsyncClient(timeout=25) as client:
-                r = await client.get(
-                    f"{scraper_base_url.rstrip('/')}/scrape/web",
-                    params={"url": "https://economictimes.indiatimes.com/industry/banking/finance/banking/hdfc-bank-signs-multi-year-data-deal/articleshow/94349454.cms"},
-                    headers=headers,
-                )
-            body = r.json() if r.is_success else {}
-            text = (body.get("data") or {}).get("bodyText", "")
-            out["custom_scraper_test"] = {
-                "status_code": r.status_code,
-                "ok": r.is_success,
-                "words_scraped": len(text.split()) if text else 0,
-                "preview": text[:200] if text else None,
-                "error": body.get("error") if not r.is_success else None,
-            }
-        except Exception as e:
-            out["custom_scraper_test"] = {"error": str(e)}
-
-    # Test Apify Google Search with 1 query
-    if apify_key:
-        import httpx as _httpx
-        try:
-            actor_url = (
-                f"https://api.apify.com/v2/acts/apify~google-search-scraper"
-                f"/run-sync-get-dataset-items?token={apify_key}&timeout=30&memory=256"
-            )
-            async with _httpx.AsyncClient(timeout=40) as client:
-                r = await client.post(actor_url, json={
-                    "queries": '"HDFC Bank" IBM deal 2023',
-                    "maxPagesPerQuery": 1,
-                    "resultsPerPage": 3,
-                    "countryCode": "us",
-                })
-            out["apify_test"] = {
-                "status_code": r.status_code,
-                "ok": r.is_success,
-                "response_preview": r.text[:300] if not r.is_success else f"{len(r.json())} result sets, first set has {len(r.json()[0].get('organicResults', [])) if r.json() else 0} URLs",
-            }
-        except Exception as e:
-            out["apify_test"] = {"error": str(e)}
-
-    # Test Jina search
-    if jina_key:
-        import httpx as _httpx
-        try:
-            async with _httpx.AsyncClient(timeout=15) as client:
-                r = await client.get("https://s.jina.ai/", params={"q": "HDFC Bank IBM deal 2023"},
-                    headers={"Accept": "application/json", "Authorization": f"Bearer {jina_key}", "X-Respond-With": "no-content"})
-            body = r.json()
-            out["jina_test"] = {
-                "status_code": r.status_code,
-                "ok": r.is_success,
-                "urls_found": len(body.get("data") or []),
-                "error": body.get("message") if not r.is_success else None,
-            }
-        except Exception as e:
-            out["jina_test"] = {"error": str(e)}
-
     return out
-
-
-@app.get("/api/vendor-competitors")
-async def vendor_competitors(vendor: str = ""):
-    """
-    Two-step competitor lookup:
-    Step 1 — Ask Claude to describe what the vendor actually does (grounds it in
-              the vendor's real products, not inferred from CRM category labels).
-    Step 2 — Ask Claude to identify segmented competitors based on that description.
-    This prevents misclassification (e.g. Tavant's 'Claims' = warranty, not insurance).
-    """
-    if not vendor.strip():
-        return {"vendor": vendor, "competitors": [], "segments": []}
-
-    import anthropic as _anthropic, re as _re
-
-    vendor_clean = vendor.strip()
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-
-    if not anthropic_key:
-        return {"vendor": vendor_clean, "competitors": [], "segments": [],
-                "message": "ANTHROPIC_API_KEY not set on server"}
-
-    def _call(messages: list, max_tokens: int = 300) -> str:
-        ac = _anthropic.Anthropic(api_key=anthropic_key)
-        msg = ac.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=max_tokens,
-            messages=messages,
-        )
-        return msg.content[0].text.strip()
-
-    # ── Step 1: Ground Claude in what the vendor actually does ─────────────────
-    try:
-        description = await asyncio.to_thread(_call, [{
-            "role": "user",
-            "content": (
-                f"In 3-4 sentences, describe what **{vendor_clean}** does as a company — "
-                f"their core products, key solutions, and primary target markets/industries. "
-                f"Be specific about named products if you know them. "
-                f"If you are not confident about this vendor, say so explicitly."
-            ),
-        }], 300)
-    except Exception as e:
-        logger.warning(f"Vendor description step failed: {e}")
-        description = ""
-
-    if not description or "not familiar" in description.lower() or "don't have" in description.lower():
-        return {
-            "vendor": vendor_clean,
-            "competitors": [],
-            "segments": [],
-            "description": description,
-            "message": f"Claude has limited knowledge of '{vendor_clean}'. Try the full company name.",
-        }
-
-    # ── Step 2: Find segmented competitors using the grounded description ──────
-    compete_prompt = (
-        f"Company: {vendor_clean}\n"
-        f"What they do: {description}\n\n"
-        f"Based on the above, identify {vendor_clean}'s distinct business segments and the "
-        f"top direct competitors in each segment — companies that compete for the same customer RFPs.\n\n"
-        f"Return ONLY valid JSON (no markdown, no code fences):\n"
-        f'{{"segments":[{{"name":"Segment Name","description":"one-line product/solution area","competitors":["A","B","C","D","E"]}}]}}\n\n'
-        f"Rules:\n"
-        f"- 2-4 distinct segments based on actual products described above\n"
-        f"- 4-6 direct competitors per segment (not generic SIs like TCS/Infosys/Accenture unless {vendor_clean} is a generic SI)\n"
-        f"- Official company names only\n"
-        f"- Competitors must actively compete for the same deals, not just adjacent markets"
-    )
-    claude_segments: list[dict] = []
-    try:
-        raw = await asyncio.to_thread(_call, [{"role": "user", "content": compete_prompt}], 900)
-        m = _re.search(r'\{.*\}', raw, _re.DOTALL)
-        if m:
-            parsed = json.loads(m.group())
-            for seg in parsed.get("segments", []):
-                if isinstance(seg, dict) and seg.get("name") and isinstance(seg.get("competitors"), list):
-                    claude_segments.append({
-                        "name": str(seg["name"]),
-                        "description": str(seg.get("description", "")),
-                        "competitors": [str(c).strip() for c in seg["competitors"] if c][:6],
-                    })
-    except Exception as e:
-        logger.warning(f"Competitor segment step failed: {e}")
-
-    all_competitors = list(dict.fromkeys(c for seg in claude_segments for c in seg["competitors"]))
-    return {
-        "vendor": vendor_clean,
-        "description": description,
-        "segments": claude_segments,
-        "competitors": all_competitors,
-        "source": "claude",
-    }
 
 
 if __name__ == "__main__":

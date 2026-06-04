@@ -3,7 +3,7 @@ services:
     name: it-deals-api
     env: python
     region: oregon
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
