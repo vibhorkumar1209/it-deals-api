@@ -199,6 +199,66 @@ async def extract(req: ReExtractRequest):
 
 
 
+# ── Tech Stack Finder ────────────────────────────────────────────────────────
+
+class TechStackInput(BaseModel):
+    company_name: str
+    domain: str
+    linkedin_url: str = ""
+    focus_categories: list[str] = Field(default_factory=list)
+    focus_vendors: list[str] = Field(default_factory=list)
+
+class TechStackRequest(BaseModel):
+    inputs: list[TechStackInput] = Field(..., min_length=1, max_length=20)
+
+
+@app.post("/api/tech-stack")
+async def tech_stack(req: TechStackRequest):
+    """SSE stream: technographic profile per company."""
+    from tech_stack_pipeline import find_tech_stack, TECH_STACK_FIELDS
+
+    async def _generate():
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        if not os.getenv("GOOGLE_AI_API_KEY"):
+            yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set on server."})
+            return
+
+        yield _sse({"type": "progress", "message": f"🚀 Scanning tech stack for {len(req.inputs)} companies…"})
+
+        results: list[dict] = []
+        row_index = 0
+
+        for i, inp in enumerate(req.inputs):
+            yield _sse({"type": "heartbeat", "message": f"🔍 Company {i+1}/{len(req.inputs)}: {inp.company_name}"})
+            try:
+                async for event in find_tech_stack(
+                    company_name=inp.company_name,
+                    domain=inp.domain,
+                    linkedin_url=inp.linkedin_url,
+                    focus_categories=inp.focus_categories,
+                    focus_vendors=inp.focus_vendors,
+                ):
+                    if event["type"] == "row_done":
+                        results.append(event["row"])
+                        yield _sse({"type": "row", "row": event["row"], "index": row_index})
+                        row_index += 1
+                    else:
+                        yield _sse(event)
+            except Exception as e:
+                logger.error(f"Tech stack error for {inp.company_name}: {e}", exc_info=True)
+                yield _sse({"type": "heartbeat", "message": f"⚠️ Error for {inp.company_name}: {e}"})
+
+        yield _sse({"type": "complete", "results": results, "total": len(results)})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
 # ── Enrichment Task ───────────────────────────────────────────────────────────
 
 class EnrichInput(BaseModel):
