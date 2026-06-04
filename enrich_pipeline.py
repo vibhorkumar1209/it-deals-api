@@ -96,22 +96,37 @@ INDUSTRY_CONTEXT = {
 
 def _make_prompt(company_name: str, domain: str, linkedin_block: str,
                  search_focus: str, known_vendors: str,
-                 extra_searches: str, fields_desc: str, fields_json_keys: dict) -> str:
+                 extra_searches: str, fields_desc: str, fields_json_keys: dict,
+                 sector_block: str = "") -> str:
     return f"""You are an enterprise IT deal research analyst with live Google Search.
 
 COMPANY: {company_name} | Website: {domain}{linkedin_block}
 
-TASK: Find IT and technology deals for {company_name}. Search these topics:
+TASK: Find IT, technology, and strategic tech deals for {company_name}.
+
+DEAL CATEGORIES TO CAPTURE (find ALL of these):
+1. IT Outsourcing & Managed Services — SI contracts, BPO, ITO, infrastructure managed services
+2. Cloud & Digital Transformation — cloud migration, SaaS rollouts, digital programmes
+3. ERP / CRM / HCM / SCM — enterprise application implementations and upgrades
+4. IT Acquisitions — tech company acquisitions, acqui-hires, asset purchases with IT angle
+5. Strategic Joint Ventures & Corporate Venture — JVs with tech firms, CVC investments in tech cos
+6. Enterprise Operations Partnerships — long-term IT ops partnerships, co-innovation agreements
+7. Technology Disinvestments — IT asset sales, carve-outs, spin-offs, divestitures of tech units
+8. Cybersecurity & Compliance — security platform contracts, SOC outsourcing, compliance tools
+9. Analytics, AI & Data — AI/ML platform deals, data lake, BI, advanced analytics contracts
+{sector_block}
+
+SEARCHES TO RUN:
 {search_focus}
-Vendor pairs to search (each vendor + company name):
+Vendor/partner searches (pair each with company name):
 {known_vendors}
 {extra_searches}
 
 EXTRACTION RULES:
 - Read full articles, not just headlines
-- One JSON object per distinct deal
-- Include: outsourcing, cloud, ERP/CRM, managed services, infrastructure,
-  IT carve-outs, SaaS, vendor selections, digital transformation, acquisitions with tech angle
+- One JSON object per distinct deal — never merge two deals
+- Capture deals across ALL years available, not just recent ones
+- Include press releases, news, vendor announcements, IR filings, annual reports
 
 Return ONLY a valid JSON array:
 [
@@ -121,17 +136,104 @@ Return ONLY a valid JSON array:
 ]
 
 FIELD RULES:
-- vendor: exact name (e.g. "Infosys", "SAP S/4HANA", "Microsoft Azure")
-- deal_type: ERP | CRM | Cloud Migration | Managed Services | Cybersecurity | Outsourcing |
-  Analytics/AI | Digital Transformation | Infrastructure | SaaS | HCM | SCM | IT Carve-out | Other
-- deal_value: e.g. "$3.2 billion" or omit if not public
+- vendor: exact name (e.g. "Infosys", "SAP S/4HANA", "Microsoft Azure", "Trimble")
+- deal_type: IT Outsourcing | Cloud Migration | ERP | CRM | HCM | SCM | Cybersecurity |
+  Analytics/AI | Digital Transformation | Infrastructure | SaaS | IT Acquisition |
+  Joint Venture | Corporate Venture | Disinvestment | Managed Services | Other
+- deal_value: e.g. "$3.2 billion" — omit if not public
 - date_signed: YYYY-MM-DD or YYYY-MM or YYYY
-- description: one clear sentence on what was agreed
-- source: direct URL to press release or news article
+- description: one concise sentence — what was agreed and why it matters
+- source: direct URL to press release, article, or filing
 
 Return ONLY the raw JSON array. No prose. No markdown fences.
 Example shape: {json.dumps(fields_json_keys)}
 """
+
+
+# ── Sector detection keywords → extra search topics ──────────────────────────
+_SECTOR_KEYWORDS = {
+    "automotive_manufacturing": {
+        "triggers": ["truck", "automotive", "vehicle", "motor", "daimler", "agco",
+                     "caterpillar", "deere", "cnh", "volvo", "ford", "gm", "stellantis",
+                     "manufacturer", "manufacturing", "industrial"],
+        "deal_types": [
+            "10. Telematics & Fleet Tech — OEM telematics, connected vehicle platforms, fleet SaaS",
+            "11. Autonomous & ADAS Tech — autonomous driving JVs, ADAS software, sensor partnerships",
+            "12. Heavy Hardware & AI SaaS — AI-powered machinery, precision agriculture/construction tech",
+            "13. Manufacturing Execution & IoT — MES, IIoT platforms, Industry 4.0, digital twin deals",
+        ],
+        "extra_vendors": (
+            "Trimble, Hexagon, Geotab, Samsara, Mobileye, NVIDIA, Qualcomm, HERE Technologies, "
+            "Aptiv, Verizon Connect, PTC, Dassault Systèmes, Siemens Digital Industries, "
+            "Bosch Connected Devices, Continental, ZF Friedrichshafen"
+        ),
+        "extra_searches": [
+            "telematics fleet management deal",
+            "autonomous vehicle technology partnership",
+            "connected truck platform agreement",
+            "precision agriculture technology deal",
+            "AI SaaS manufacturing contract",
+            "digital twin industrial IoT agreement",
+        ],
+    },
+    "banking_finance": {
+        "triggers": ["bank", "financial", "insurance", "hdfc", "icici", "fintech",
+                     "payment", "lending", "asset management"],
+        "deal_types": [
+            "10. Core Banking & Payments — core banking platform migrations, payment rails, open banking",
+            "11. RegTech & Compliance — AML, KYC, risk platform contracts",
+            "12. Digital Banking — mobile/internet banking platform deals, neobank JVs",
+        ],
+        "extra_vendors": (
+            "Temenos, Finastra, FIS, Fiserv, Mambu, Thought Machine, Backbase, "
+            "TCS BaNCS, Oracle FLEXCUBE, Intellect Design, Newgen, Finacle"
+        ),
+        "extra_searches": [
+            "core banking platform deal",
+            "digital banking transformation",
+            "payment technology partnership",
+            "fintech investment acquisition",
+        ],
+    },
+    "telecom": {
+        "triggers": ["telecom", "telco", "wireless", "network", "5g", "broadband",
+                     "spectrum", "operator"],
+        "deal_types": [
+            "10. Network & BSS/OSS — 5G rollout contracts, BSS/OSS transformation, network managed services",
+            "11. Digital Services Platform — content, cloud, enterprise ICT deals",
+        ],
+        "extra_vendors": (
+            "Ericsson, Nokia, Amdocs, Netcracker, Huawei, Mavenir, Rakuten Symphony"
+        ),
+        "extra_searches": [
+            "5G network contract deal",
+            "BSS OSS transformation",
+            "network managed services agreement",
+        ],
+    },
+}
+
+
+def _detect_sector_block(company_name: str) -> str:
+    """Return sector-specific deal categories and searches if company matches a sector."""
+    name_lower = company_name.lower()
+    for sector, cfg in _SECTOR_KEYWORDS.items():
+        if any(kw in name_lower for kw in cfg["triggers"]):
+            lines = cfg["deal_types"]
+            return "\n".join(lines)
+    return ""
+
+
+def _detect_sector_extra(company_name: str) -> tuple[str, str]:
+    """Return (extra_vendors, extra_searches_block) for detected sector."""
+    name_lower = company_name.lower()
+    for sector, cfg in _SECTOR_KEYWORDS.items():
+        if any(kw in name_lower for kw in cfg["triggers"]):
+            searches = "\n".join(
+                f'  - "{company_name}" {s}' for s in cfg["extra_searches"]
+            )
+            return cfg["extra_vendors"], searches
+    return "", ""
 
 
 def _build_prompts(
@@ -142,26 +244,28 @@ def _build_prompts(
     focus_vendor: list[str],
 ) -> list[str]:
     """
-    Return 2 focused prompts instead of one huge one.
-    Call 1: broad IT deals + major SI/cloud vendors.
-    Call 2: year-by-year sweep + focus tech/vendors.
-    Each completes in ~45-75s.
+    Return 2 focused prompts.
+    Call 1: broad IT + acquisitions/JVs/disinvestments + top SI vendors.
+    Call 2: year sweep + sector-specific + user focus.
+    Each targets ~60s completion.
     """
     linkedin_block = f" | LinkedIn: {linkedin_url}" if linkedin_url else ""
     fields_json_keys = {f["key"]: f"<{f['type']}>" for f in SCHEMA_FIELDS}
     fields_desc = "\n".join(f'  "{f["key"]}": "{f["description"]}"' for f in SCHEMA_FIELDS)
 
-    # ── Prompt 1: broad sweep + top vendors ───────────────────────────────────
-    p1_searches = f"""  - "{company_name}" IT outsourcing deal signed
-  - "{company_name}" technology contract award
-  - "{company_name}" digital transformation program
-  - "{company_name}" cloud migration agreement
-  - "{company_name}" managed services contract
-  - "{company_name}" ERP SAP Oracle implementation
-  - "{company_name}" infrastructure data center deal
-  - "{company_name}" cybersecurity contract
-  - "{company_name}" IT carve-out spin-off technology
-  - site:businesswire.com OR site:prnewswire.com "{company_name}" technology"""
+    sector_block = _detect_sector_block(company_name)
+    sector_vendors, sector_searches = _detect_sector_extra(company_name)
+
+    # ── Prompt 1: broad sweep + acquisitions/JVs/disinvestments + top vendors ─
+    p1_searches = f"""  - "{company_name}" IT outsourcing contract deal signed
+  - "{company_name}" technology acquisition acqui-hire
+  - "{company_name}" joint venture technology partner
+  - "{company_name}" corporate venture fund investment tech startup
+  - "{company_name}" IT disinvestment carve-out spin-off asset sale
+  - "{company_name}" digital transformation program cloud migration
+  - "{company_name}" managed services ERP SAP Oracle implementation
+  - "{company_name}" cybersecurity infrastructure data center contract
+  - site:businesswire.com OR site:prnewswire.com "{company_name}" technology deal"""
 
     p1_vendors = (
         "Accenture, Infosys, TCS, Wipro, HCLTech, Cognizant, Capgemini, DXC Technology, "
@@ -170,31 +274,32 @@ def _build_prompts(
 
     prompt1 = _make_prompt(company_name, domain, linkedin_block,
                            p1_searches, p1_vendors, "",
-                           fields_desc, fields_json_keys)
+                           fields_desc, fields_json_keys, sector_block)
 
-    # ── Prompt 2: year sweep + more vendors + user focus ─────────────────────
+    # ── Prompt 2: year sweep + sector vendors + user focus ────────────────────
     year_searches = "\n".join(
-        f'  - "{company_name}" IT deal technology contract {y}' for y in range(2015, 2026)
+        f'  - "{company_name}" IT technology deal contract acquisition {y}' for y in range(2015, 2026)
     )
 
-    p2_vendors = (
-        "Dell Technologies, HPE, Atos, NTT DATA, Unisys, Fujitsu, T-Systems, CGI, "
-        "Siemens, Bosch, PTC, Dassault Systèmes, Palo Alto Networks, CrowdStrike, Snowflake, "
-        "Trimble, Hexagon, Esri, Bentley Systems"
-    )
+    p2_vendors = "Dell Technologies, HPE, Atos, NTT DATA, Unisys, Fujitsu, T-Systems, CGI, Snowflake, CrowdStrike, Palo Alto Networks"
+    if sector_vendors:
+        p2_vendors += f", {sector_vendors}"
 
-    extra = ""
+    extra_parts = []
+    if sector_searches:
+        extra_parts.append(f"Sector-specific searches:\n{sector_searches}")
     if focus_tech or focus_vendor:
-        lines = ["Additional user-specified searches:"]
+        lines = ["User-specified focus searches:"]
         for t in focus_tech:
             lines.append(f'  - "{company_name}" {t} deal contract')
         for v in focus_vendor:
-            lines.append(f'  - "{company_name}" {v} deal partnership')
-        extra = "\n".join(lines)
+            lines.append(f'  - "{company_name}" {v} deal partnership acquisition')
+        extra_parts.append("\n".join(lines))
+    extra = "\n\n".join(extra_parts)
 
     prompt2 = _make_prompt(company_name, domain, linkedin_block,
                            year_searches, p2_vendors, extra,
-                           fields_desc, fields_json_keys)
+                           fields_desc, fields_json_keys, sector_block)
 
     return [prompt1, prompt2]
 
