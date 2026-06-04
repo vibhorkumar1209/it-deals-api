@@ -224,11 +224,27 @@ def _gemini_extract_deals_sync(
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
                 temperature=0.1,
-                max_output_tokens=8192,
+                max_output_tokens=16384,
             ),
         )
-        raw_text = response.text or ""
+        # response.text can raise ValueError when grounding is active and the
+        # response has non-text parts — extract text manually from parts.
+        try:
+            raw_text = response.text or ""
+        except Exception:
+            raw_text = ""
+            try:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, "text") and part.text:
+                        raw_text += part.text
+            except Exception:
+                pass
+
         logger.info(f"Gemini response: {len(raw_text)} chars for {company_name}")
+        if not raw_text:
+            logger.warning(f"Empty Gemini response for {company_name}. "
+                           f"Finish reason: {response.candidates[0].finish_reason if response.candidates else 'unknown'}")
+            return []
     except Exception as e:
         logger.error(f"Gemini API error for {company_name}: {e}")
         return []
@@ -323,7 +339,7 @@ async def enrich_company(
     )
 
     elapsed = 0
-    while not gemini_task.done() and elapsed < 150:
+    while not gemini_task.done() and elapsed < 240:
         done, _ = await asyncio.wait({gemini_task}, timeout=8)
         elapsed += 8
         if done:
@@ -333,7 +349,7 @@ async def enrich_company(
 
     if not gemini_task.done():
         gemini_task.cancel()
-        logger.error(f"Gemini timed out for {company_name}")
+        logger.error(f"Gemini timed out (240s) for {company_name}")
         row = {"company_name": company_name, "domain": domain,
                "_status": "timeout", "_sources": 0}
         for f in SCHEMA_FIELDS:
