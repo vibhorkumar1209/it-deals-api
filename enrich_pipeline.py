@@ -509,6 +509,15 @@ async def enrich_company(
     ft = focus_tech or []
     fv = focus_vendor or []
 
+    # Strip common subsidiary suffixes to derive a broader search name for fallback
+    _STRIP = re.compile(
+        r"\s+(north america|south america|europe|asia|apac|latam|"
+        r"inc\.?|llc\.?|ltd\.?|corp\.?|corporation|group|holdings|"
+        r"gmbh|ag|plc|sa|bv|nv|pty|co\.?)\s*$",
+        re.IGNORECASE,
+    )
+    brand_name = _STRIP.sub("", company_name).strip()
+
     prompts = _build_prompts(company_name, domain, linkedin_url, ft, fv)
     seen_keys: set[str] = set()   # deduplicate across the two calls
     total_deals = 0
@@ -562,6 +571,54 @@ async def enrich_company(
         yield {"type": "heartbeat",
                "message": f"✅ Call {call_idx} done: +{new_deals} deals (total {total_deals})"}
         await asyncio.sleep(0)
+
+    # ── Fallback: retry with brand name if subsidiary name returned nothing ──────
+    if total_deals == 0 and brand_name.lower() != company_name.lower():
+        yield {"type": "heartbeat",
+               "message": f"🔄 No deals for '{company_name}' — retrying as '{brand_name}'…"}
+        await asyncio.sleep(0)
+
+        fallback_prompts = _build_prompts(brand_name, domain, linkedin_url, ft, fv)
+        for call_idx, prompt in enumerate(fallback_prompts, 1):
+            yield {"type": "heartbeat",
+                   "message": f"🔍 Fallback [{call_idx}/{len(fallback_prompts)}] Searching '{brand_name}'…"}
+            await asyncio.sleep(0)
+
+            loop = asyncio.get_event_loop()
+            future = loop.run_in_executor(None, _gemini_extract_deals_sync, prompt, brand_name)
+            elapsed = 0
+            call_deals: list[dict] = []
+
+            while elapsed < CALL_TIMEOUT:
+                try:
+                    call_deals = await asyncio.wait_for(asyncio.shield(future), timeout=10)
+                    break
+                except asyncio.TimeoutError:
+                    elapsed += 10
+                    yield {"type": "heartbeat", "message": f"🌐 Fallback searching… ({elapsed}s)"}
+                    await asyncio.sleep(0)
+                except Exception as e:
+                    logger.error(f"Fallback error for {brand_name}: {e}", exc_info=True)
+                    call_deals = []
+                    break
+            else:
+                future.cancel()
+
+            for deal in call_deals:
+                dedup_key = f"{deal.get('vendor','').lower()}|{deal.get('date_signed','')}"
+                if dedup_key in seen_keys:
+                    continue
+                seen_keys.add(dedup_key)
+                row = {"company_name": company_name, "domain": domain,
+                       "_status": "ok", "_sources": 1}
+                row.update(deal)
+                yield {"type": "row_done", "row": row}
+                await asyncio.sleep(0.05)
+                total_deals += 1
+
+        if total_deals > 0:
+            yield {"type": "heartbeat",
+                   "message": f"✅ Fallback found {total_deals} deals via '{brand_name}'"}
 
     if total_deals == 0:
         yield {"type": "heartbeat", "message": f"⚠️ No deals found for {company_name}"}
