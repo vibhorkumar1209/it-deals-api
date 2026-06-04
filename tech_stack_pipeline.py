@@ -100,37 +100,53 @@ def _build_tech_stack_prompt(
 For each listed vendor, also look for direct market competitors in the same functional bucket."""
 
     if call_num == 1:
-        search_block = f"""SEARCHES TO RUN (Call 1 — digital footprint & public signals, 2021–2026):
-  - site:{domain} OR inurl:{domain} technology stack tools software
-  - "{company_name}" software tools vendors uses deployed 2022 OR 2023 OR 2024 OR 2025 OR 2026
-  - "{company_name}" careers job posting requires experience 2023 OR 2024 OR 2025
-  - "{company_name}" technology partner case study 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" privacy policy cookie policy third-party tools
-  - site:builtwith.com OR site:similartech.com OR site:stackshare.io "{company_name}"
-  - site:g2.com OR site:capterra.com "{company_name}"
-  - "{company_name}" ERP CRM cloud platform deployed implemented 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" digital transformation technology 2024 OR 2025 OR 2026"""
-    else:
-        search_block = f"""SEARCHES TO RUN (Call 2 — vendor confirmations & job signals, 2021–2026):
-  - "{company_name}" SAP OR Oracle OR Microsoft OR Salesforce OR ServiceNow OR Workday 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" AWS OR Azure OR Google Cloud 2023 OR 2024 OR 2025 OR 2026
-  - "{company_name}" cybersecurity SIEM endpoint zero trust 2022 OR 2023 OR 2024 OR 2025
-  - "{company_name}" data warehouse analytics BI Snowflake Databricks 2023 OR 2024 OR 2025
-  - "{company_name}" DevOps CI/CD Kubernetes observability APM 2022 OR 2023 OR 2024
-  - site:linkedin.com/jobs "{company_name}" technology stack required skills
-  - "{company_name}" annual report technology infrastructure 2023 OR 2024 OR 2025
-  - "{company_name}" vendor partnership integration announcement 2024 OR 2025 OR 2026"""
+        search_block = f"""SEARCHES — Call 1: Enterprise applications & public digital signals (2021–2026)
+  - site:{domain} technology stack software tools platform
+  - "{company_name}" software platform deployed implemented 2023 OR 2024 OR 2025 OR 2026
+  - "{company_name}" ERP HCM CRM SCM finance platform 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" SAP OR Oracle OR Workday OR ServiceNow OR Salesforce
+  - "{company_name}" Microsoft 365 OR Teams OR Azure OR Dynamics 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" careers job posting software tools skills required 2023 OR 2024 OR 2025
+  - site:builtwith.com OR site:stackshare.io OR site:similartech.com "{company_name}"
+  - "{company_name}" privacy policy OR cookie disclosure third-party software tools
+  - "{company_name}" technology partner vendor case study 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" digital transformation program technology 2023 OR 2024 OR 2025 OR 2026"""
+
+    elif call_num == 2:
+        search_block = f"""SEARCHES — Call 2: Cloud, data, security & DevOps stack (2021–2026)
+  - "{company_name}" AWS OR Azure OR Google Cloud OR hybrid cloud 2023 OR 2024 OR 2025 OR 2026
+  - "{company_name}" Snowflake OR Databricks OR data warehouse OR data lake 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" cybersecurity endpoint SIEM zero trust identity 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" Palo Alto OR CrowdStrike OR Microsoft Defender OR Okta OR SailPoint
+  - "{company_name}" DevOps CI/CD Kubernetes containers observability APM 2022 OR 2023 OR 2024
+  - "{company_name}" Splunk OR Elastic OR Dynatrace OR Datadog OR New Relic
+  - "{company_name}" network infrastructure SD-WAN data center 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" collaboration productivity tools intranet 2023 OR 2024 OR 2025
+  - site:linkedin.com/jobs "{company_name}" technology skills required 2024 OR 2025
+  - "{company_name}" annual report technology spend infrastructure 2023 OR 2024 OR 2025"""
+
+    else:  # call 3
+        search_block = f"""SEARCHES — Call 3: Customer-facing, analytics, supply chain & sector-specific (2021–2026)
+  - "{company_name}" marketing automation CRM customer data platform 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" Salesforce OR HubSpot OR Marketo OR Adobe Experience OR Adobe Campaign
+  - "{company_name}" supply chain SCM procurement WMS TMS 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" BI dashboard analytics Power BI Tableau Qlik 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" AI ML platform machine learning deployment 2023 OR 2024 OR 2025 OR 2026
+  - "{company_name}" ecommerce OR customer portal OR self-service platform 2022 OR 2023 OR 2024
+  - "{company_name}" ITSM ticketing ServiceNow OR Jira OR Remedy OR BMC 2022 OR 2023 OR 2024 OR 2025
+  - "{company_name}" low-code no-code RPA automation platform 2022 OR 2023 OR 2024 OR 2025
+  - site:g2.com OR site:capterra.com "{company_name}" software review uses
+  - "{company_name}" vendor relationship partnership technology 2024 OR 2025 OR 2026"""
 
     fields_desc = "\n".join(f'  "{f["key"]}": "{f["label"]}"' for f in TECH_STACK_FIELDS)
     fields_example = {f["key"]: f"<{f['label']}>" for f in TECH_STACK_FIELDS}
 
-    return f"""You are a market intelligence technographic analyst with live Google Search.
+    return f"""You are a senior market intelligence technographic analyst with live Google Search.
 
 TARGET: {company_name} | Website: {domain}{linkedin_block}
 
 TEMPORAL SCOPE: LAST 5 YEARS ONLY (2021–2026).
-Only include software/tools that are active, deployed, or evidenced within this period.
-Exclude tools with no signals since 2020.
+Only include tools/platforms that are active or evidenced within this period.
 
 {scope_block}
 
@@ -138,16 +154,27 @@ Exclude tools with no signals since 2020.
 
 {CONFIDENCE_GUIDE}
 
+TARGET: Find as many distinct tools as possible — large enterprises typically run 80–200+ tools.
+Do NOT stop early. Exhaust every category before returning results.
+
+CATEGORIES TO COVER EXHAUSTIVELY (find tools in ALL of these):
+  Core Enterprise Operations: ERP, Finance/Accounting, HCM/HRMS, Procurement, Legal Tech, ITSM
+  Customer-Facing & Revenue: CRM, Marketing Automation, CDP, E-Commerce, Support/Helpdesk, CPQ, Loyalty
+  Infrastructure & Cloud: IaaS, CDN, DNS, Email/MX, IAM/SSO, VPN, Collaboration, Video Conf, MDM
+  Development & Engineering: Source Control, CI/CD, APM, Feature Flags, API Gateway, Containers, Low-Code
+  Data Analytics & AI: Data Warehouse, ETL/ELT, BI/Dashboards, AI/ML Platform, Data Catalogue, Streaming
+  Security & Compliance: EDR/Endpoint, SIEM, IAM/PAM, Vulnerability Mgmt, DLP, GRC, Zero Trust/ZTNA
+
 EXTRACTION RULES:
-- One JSON object per distinct software/tool deployment — output can be in the hundreds for large enterprises
+- One JSON object per distinct software/tool deployment
 - Populate ALL 8 fields — no blanks allowed
-- integration_partner: name of the SI, consulting firm, or vendor that implemented/deployed this software
-  e.g. "Accenture", "TCS", "Deloitte", "IBM", "Capgemini", "vendor-led" — use "Unknown" if not found
-- last_detected: e.g. "Active – Q2 2026" or "Detected May 2026 job posting" or "2024 case study"
-- tech_install: approximate license/seat count as a range — estimates can be in hundreds or thousands
+- integration_partner: name of the SI, consulting firm, or vendor that implemented this software
+  e.g. "Accenture", "TCS", "Deloitte", "IBM", "Capgemini", "Vendor-led" — use "-" if not found
+- last_detected: e.g. "Active – Q2 2026", "2024 job posting", "2023 vendor case study"
+- tech_install: approximate license/seat count as a range
   e.g. "200–500 seats", "5,000–20,000 users", "50,000–100,000 users", "Enterprise-wide (100,000+)"
   Base on company headcount, department size, and typical vendor seat-to-employee ratios
-- renewal_date: next estimated renewal quarter in plain format e.g. "Q1 2027", "Q3 2026" — no "Est." prefix
+- renewal_date: next estimated renewal quarter e.g. "Q1 2027", "Q3 2026" — no "Est." prefix
 - confidence_score: percentage with brief reason e.g. "87% – job posting", "94% – vendor case study"
 
 core_tech_category must be one of:
@@ -273,7 +300,11 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
             row: dict = {}
             for key in FIELD_KEYS:
                 val = item.get(key)
-                row[key] = str(val) if val not in (None, "null", "None", "") else "—"
+                # Normalise empty/unknown to "-"
+            clean_val = str(val).strip() if val not in (None, "null", "None", "") else ""
+            if clean_val.lower() in ("", "unknown", "n/a", "na", "none", "-"):
+                clean_val = "-"
+            row[key] = clean_val
             out.append(row)
 
         logger.info(f"Tech stack: parsed {len(out)} tools for {company_name}")
@@ -295,12 +326,13 @@ async def find_tech_stack(
 ) -> AsyncGenerator[dict, None]:
     """
     Yields heartbeat + row_done events for each detected tech tool.
-    Makes 2 Gemini calls (digital footprint sweep + vendor confirmation).
+    Makes 3 Gemini calls covering enterprise apps, cloud/security/DevOps, and customer/analytics.
     """
     fc = focus_categories or []
     fv = focus_vendors or []
 
     mode = "wide-spectrum" if not fc and not fv else "laser-focused"
+    num_calls = 3
     yield {"type": "heartbeat", "message": f"🔍 Tech stack scan for {company_name} ({mode} mode)…"}
     await asyncio.sleep(0)
 
@@ -308,9 +340,15 @@ async def find_tech_stack(
     total = 0
     CALL_TIMEOUT = 150
 
-    for call_num in range(1, 3):
-        label = "digital footprint & public signals" if call_num == 1 else "vendor confirmations & job signals"
-        yield {"type": "heartbeat", "message": f"🌐 [{call_num}/2] Scanning {company_name}: {label}…"}
+    CALL_LABELS = {
+        1: "enterprise apps & digital footprint",
+        2: "cloud, security & DevOps",
+        3: "customer-facing, analytics & sector tools",
+    }
+
+    for call_num in range(1, num_calls + 1):
+        label = CALL_LABELS[call_num]
+        yield {"type": "heartbeat", "message": f"🌐 [{call_num}/{num_calls}] Scanning {company_name}: {label}…"}
         await asyncio.sleep(0)
 
         prompt = _build_tech_stack_prompt(company_name, domain, linkedin_url, fc, fv, call_num)
