@@ -230,26 +230,37 @@ def _gemini_extract_deals_sync(
                 max_output_tokens=16384,
             ),
         )
-        # response.text can raise ValueError when grounding is active and the
-        # response has non-text parts — extract text manually from parts.
+
+        # ── Extract raw text — ALWAYS use parts iteration, never rely on .text ──
+        raw_text = ""
         try:
-            raw_text = response.text or ""
-        except Exception:
-            raw_text = ""
+            for candidate in (response.candidates or []):
+                for part in (candidate.content.parts or []):
+                    t = getattr(part, "text", None)
+                    if t:
+                        raw_text += t
+        except Exception as parts_err:
+            logger.warning(f"Parts extraction failed for {company_name}: {parts_err}")
+            # Last-ditch: try .text property
             try:
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, "text") and part.text:
-                        raw_text += part.text
+                raw_text = response.text or ""
             except Exception:
                 pass
 
-        logger.info(f"Gemini response: {len(raw_text)} chars for {company_name}")
+        finish_reason = "unknown"
+        try:
+            finish_reason = str(response.candidates[0].finish_reason)
+        except Exception:
+            pass
+
+        logger.info(f"Gemini response: {len(raw_text)} chars, finish={finish_reason} for {company_name}")
+
         if not raw_text:
-            logger.warning(f"Empty Gemini response for {company_name}. "
-                           f"Finish reason: {response.candidates[0].finish_reason if response.candidates else 'unknown'}")
+            logger.warning(f"Empty response for {company_name}. finish_reason={finish_reason}")
             return []
+
     except Exception as e:
-        logger.error(f"Gemini API error for {company_name}: {e}")
+        logger.error(f"Gemini API error for {company_name}: {e}", exc_info=True)
         return []
 
     # ── Parse JSON array from response ───────────────────────────────────────
@@ -262,20 +273,44 @@ def _gemini_extract_deals_sync(
         try:
             parsed = json.loads(clean)
         except json.JSONDecodeError:
-            # Find the outermost [...] array
+            # Find the outermost [ ... ] array
             array_match = re.search(r"\[.*\]", clean, re.DOTALL)
             if not array_match:
-                logger.warning(f"No JSON array in Gemini response for {company_name}. Preview: {clean[:400]}")
-                return []
-            try:
-                parsed = json.loads(array_match.group(0))
-            except json.JSONDecodeError:
-                # Try to find the LAST complete array by scanning from the end
-                # This handles trailing commas or truncated JSON
-                text = array_match.group(0)
-                # Remove trailing commas before ] or }
-                text = re.sub(r",\s*([\]}])", r"\1", text)
-                parsed = json.loads(text)
+                # Response might be truncated — try to recover partial objects
+                logger.warning(f"No complete JSON array for {company_name}. Attempting recovery. Preview: {clean[:400]}")
+                # Find start of array, close it after last complete object
+                start = clean.find("[")
+                if start == -1:
+                    return []
+                fragment = clean[start:]
+                # Find last complete '}' and close array there
+                last_brace = fragment.rfind("}")
+                if last_brace == -1:
+                    return []
+                fragment = fragment[:last_brace + 1].rstrip().rstrip(",") + "\n]"
+                try:
+                    parsed = json.loads(fragment)
+                except json.JSONDecodeError:
+                    logger.error(f"Recovery failed for {company_name}")
+                    return []
+            else:
+                candidate_text = array_match.group(0)
+                try:
+                    parsed = json.loads(candidate_text)
+                except json.JSONDecodeError:
+                    # Fix trailing commas + try again
+                    candidate_text = re.sub(r",\s*([\]}])", r"\1", candidate_text)
+                    try:
+                        parsed = json.loads(candidate_text)
+                    except json.JSONDecodeError:
+                        # Truncated: recover last complete object
+                        last_brace = candidate_text.rfind("}")
+                        if last_brace == -1:
+                            return []
+                        fragment = candidate_text[:last_brace + 1].rstrip().rstrip(",") + "\n]"
+                        fragment = "[" + fragment.lstrip("[")
+                        parsed = json.loads(fragment)
+
         if isinstance(parsed, dict):
             parsed = [parsed]
         if not isinstance(parsed, list):
@@ -358,7 +393,7 @@ async def enrich_company(
             await asyncio.sleep(0)  # flush heartbeat to client
         except Exception as e:
             logger.error(f"Gemini task error for {company_name}: {e}", exc_info=True)
-            yield {"type": "heartbeat", "message": f"⚠️ Gemini error: {e}"}
+            yield {"type": "error", "message": f"Gemini error for {company_name}: {e}"}
             deals = []
             break
     else:
@@ -373,7 +408,7 @@ async def enrich_company(
         return
 
     if not deals:
-        yield {"type": "heartbeat", "message": f"⚠️ No deals found for {company_name}"}
+        yield {"type": "heartbeat", "message": f"⚠️ No deals found for {company_name} — check Render logs for details"}
         row = {"company_name": company_name, "domain": domain,
                "_status": "no_result", "_sources": 0}
         for f in SCHEMA_FIELDS:
