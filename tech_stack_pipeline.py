@@ -264,7 +264,7 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
                     temperature=0.1,
-                    max_output_tokens=65536,
+                    max_output_tokens=8192,
                 ),
             )
             break   # success
@@ -432,7 +432,7 @@ async def find_tech_stack(
 
     seen_keys: set[str] = set()
     total = 0
-    CALL_TIMEOUT = 150
+    CALL_TIMEOUT = 120
 
     CALL_LABELS = {
         1: "enterprise apps & digital footprint",
