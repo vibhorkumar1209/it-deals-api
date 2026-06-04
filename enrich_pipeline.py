@@ -155,9 +155,34 @@ Example shape: {json.dumps(fields_json_keys)}
 
 # ── Sector detection keywords → extra search topics ──────────────────────────
 _SECTOR_KEYWORDS = {
+    "agriculture_agtech": {
+        "triggers": ["agco", "deere", "cnh", "claas", "kubota", "trimble agriculture",
+                     "precision ag", "agtech", "farm", "agriculture", "agricultural",
+                     "crop", "harvest", "livestock", "grain"],
+        "deal_types": [
+            "10. AgTech Acquisitions — precision ag, farm management software, autonomous machinery startups",
+            "11. Precision Agriculture Platform — FMIS, guidance, telematics, yield monitoring deals",
+            "12. Autonomous Farming Tech — autonomous tractor, robotics, AI harvesting JVs",
+            "13. Farm Data & Analytics — farm data platforms, satellite/sensor analytics deals",
+        ],
+        "extra_vendors": (
+            "Trimble, Climate Corporation, Monsanto, Bayer Crop Science, Raven Industries, "
+            "Precision Planting, 640 Labs, 84.51°, Ag Leader Technology, CNH Industrial, "
+            "AGCO Fendt, Hexagon Agriculture, Farmers Edge, Granular, Proagrica"
+        ),
+        "extra_searches": [
+            "precision agriculture technology acquisition",
+            "farm management software deal acquisition",
+            "autonomous farming startup acquisition",
+            "agtech acquisition startup buy",
+            "precision ag platform partnership",
+            "farm data analytics deal",
+            "autonomous tractor robotics technology",
+        ],
+    },
     "automotive_manufacturing": {
-        "triggers": ["truck", "automotive", "vehicle", "motor", "daimler", "agco",
-                     "caterpillar", "deere", "cnh", "volvo", "ford", "gm", "stellantis",
+        "triggers": ["truck", "automotive", "vehicle", "motor", "daimler",
+                     "caterpillar", "volvo", "ford", "gm", "stellantis",
                      "manufacturer", "manufacturing", "industrial"],
         "deal_types": [
             "10. Telematics & Fleet Tech — OEM telematics, connected vehicle platforms, fleet SaaS",
@@ -276,6 +301,10 @@ def _build_prompts(
   - "{company_name}" IT outsourcing restructuring nine-figure billion
   - "{company_name}" independent digital architecture enterprise systems
   - "{company_name}" demerger IT separation standalone systems
+  - "{company_name}" acquires technology company startup
+  - "{company_name}" acquisition technology software hardware
+  - "{company_name}" bought acquired tech firm stake joint venture
+  - site:businesswire.com OR site:prnewswire.com "{company_name}" acquires
   - site:businesswire.com OR site:prnewswire.com "{company_name}" technology deal"""
 
     p1_vendors = (
@@ -291,6 +320,10 @@ def _build_prompts(
     # ── Prompt 2: year sweep + sector vendors + user focus ────────────────────
     year_searches = "\n".join(
         f'  - "{company_name}" IT technology deal contract acquisition {y}' for y in range(2015, 2026)
+    )
+    # Add standalone acquisition searches by year (catches M&A not tagged as "IT deal")
+    year_searches += "\n" + "\n".join(
+        f'  - "{company_name}" acquires acquisition bought purchased technology {y}' for y in range(2015, 2026)
     )
 
     p2_vendors = "Dell Technologies, HPE, Atos, NTT DATA, Unisys, Fujitsu, T-Systems, CGI, Snowflake, CrowdStrike, Palo Alto Networks"
