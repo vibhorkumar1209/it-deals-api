@@ -373,10 +373,11 @@ async def enrich_company(
         return
 
     yield {"type": "heartbeat",
-           "message": f"✅ {company_name}: {len(deals)} deals found"}
+           "message": f"✅ {company_name}: {len(deals)} deals found — populating table…"}
 
-    for deal in deals:
+    for i, deal in enumerate(deals):
         row = {"company_name": company_name, "domain": domain,
                "_status": "ok", "_sources": 1}
         row.update(deal)
         yield {"type": "row_done", "row": row}
+        await asyncio.sleep(0.05)   # force SSE flush between each row
