@@ -102,68 +102,73 @@ def _build_research_prompt(
     focus_vendor: list[str],
 ) -> str:
     """
-    Build the Gemini research prompt. Industry detection is delegated to Gemini
-    (it knows the company). User focus lists get boosted priority.
+    Build the Gemini research prompt. Broad baseline sweep always runs first;
+    focus_tech / focus_vendor are additive extra search passes.
     """
-    # Compose industry hint section
-    industry_sections = []
-    for sector, ctx in INDUSTRY_CONTEXT.items():
-        if sector == "default":
-            continue
-        industry_sections.append(
-            f"  {sector}: tech={', '.join(ctx['tech_areas'][:5])} | "
-            f"vendors={', '.join(ctx['vendors'][:6])}"
-        )
-
-    focus_tech_block = ""
-    if focus_tech:
-        focus_tech_block = (
-            f"\nUSER-SPECIFIED FOCUS TECHNOLOGIES (search these first, find ALL deals):\n"
-            + "\n".join(f"  - {t}" for t in focus_tech)
-        )
-
-    focus_vendor_block = ""
-    if focus_vendor:
-        focus_vendor_block = (
-            f"\nUSER-SPECIFIED FOCUS VENDORS (search these first, find ALL deals):\n"
-            + "\n".join(f"  - {v}" for v in focus_vendor)
-        )
-
-    linkedin_block = f"\nLinkedIn company page: {linkedin_url}" if linkedin_url else ""
+    linkedin_block = f"\n  LinkedIn: {linkedin_url}" if linkedin_url else ""
 
     fields_json_keys = {f["key"]: f"<{f['type']}>" for f in SCHEMA_FIELDS}
     fields_desc = "\n".join(
         f'  "{f["key"]}": "{f["description"]}"' for f in SCHEMA_FIELDS
     )
 
-    return f"""You are an enterprise IT deal research analyst with access to live Google Search.
+    # ── Focus blocks (additive only) ──────────────────────────────────────────
+    focus_block = ""
+    if focus_tech or focus_vendor:
+        lines = ["\nPASS 4 — USER-SPECIFIED FOCUS (run these searches IN ADDITION to passes 1-3):"]
+        if focus_tech:
+            for t in focus_tech:
+                lines.append(f'  - "{company_name}" {t} deal contract agreement')
+        if focus_vendor:
+            for v in focus_vendor:
+                lines.append(f'  - "{company_name}" {v} deal contract partnership')
+        focus_block = "\n".join(lines)
 
-COMPANY TO RESEARCH:
+    return f"""You are a senior enterprise IT deal research analyst with live Google Search access.
+Your goal: find UP TO 50 distinct IT and technology deals for {company_name}. Be exhaustive.
+
+COMPANY:
   Name: {company_name}
   Website: {domain}{linkedin_block}
 
-TASK: Find EVERY IT and technology deal, contract, outsourcing agreement, vendor selection,
-and digital transformation initiative involving {company_name}.
+━━━ MANDATORY SEARCH PASSES (always execute all three) ━━━
 
-RESEARCH STRATEGY:
-1. First, identify {company_name}'s industry sector.
-2. Based on the industry, determine the most relevant technology areas and major vendors.
-   Use these industry-to-vendor mappings as guidance:
-{chr(10).join(industry_sections)}
+PASS 1 — BROAD DEAL SWEEP (run ALL of these searches):
+  - "{company_name}" IT outsourcing deal signed
+  - "{company_name}" technology contract award
+  - "{company_name}" digital transformation program
+  - "{company_name}" cloud migration agreement
+  - "{company_name}" managed services contract
+  - "{company_name}" ERP implementation SAP Oracle
+  - "{company_name}" infrastructure deal data center
+  - "{company_name}" cybersecurity contract
+  - "{company_name}" IT carve-out separation spin-off technology
+  - site:businesswire.com "{company_name}" technology deal
+  - site:prnewswire.com "{company_name}" IT contract
+  - site:globenewswire.com "{company_name}" technology
 
-3. Run multiple Google searches to maximise coverage:
-   - "{company_name}" + major vendor names (by industry)
-   - "{company_name}" + key technology areas (by industry)
-   - "{company_name}" IT deal contract signed announcement
-   - "{company_name}" digital transformation outsourcing agreement
-   - site:businesswire.com OR site:prnewswire.com "{company_name}" technology
-   - "{company_name}" annual report technology spend
-{focus_tech_block}{focus_vendor_block}
+PASS 2 — MAJOR VENDOR SWEEP (search each vendor paired with company name):
+  Accenture, Infosys, TCS, Wipro, HCLTech, Cognizant, Capgemini, DXC Technology,
+  IBM, SAP, Oracle, Microsoft, AWS, Google Cloud, ServiceNow, Salesforce,
+  Workday, Dell Technologies, HPE, Atos, CGI, NTT DATA, Unisys, Fujitsu,
+  T-Systems, Siemens, Bosch, PTC, Dassault Systèmes, Palo Alto Networks
 
-4. Read the actual articles — not just headlines. Extract deal specifics.
-5. Include deals from press releases, news articles, vendor announcements, IR filings.
+PASS 3 — YEAR-BY-YEAR SWEEP (search by year to surface older deals):
+  For each year from 2015 to 2025, search:
+  - "{company_name}" IT deal {"{year}"}
+  - "{company_name}" technology contract {"{year}"}
+{focus_block}
 
-OUTPUT FORMAT — return ONLY a valid JSON array, one object per deal:
+━━━ EXTRACTION RULES ━━━
+- Read the FULL article for every promising result — do not stop at headlines
+- Include: outsourcing contracts, cloud migrations, ERP/CRM rollouts, managed services,
+  infrastructure deals, IT carve-outs, SaaS agreements, vendor selections, SI contracts,
+  digital transformation programmes, joint ventures with tech angle
+- Each distinct deal = one JSON object. Never merge two deals.
+- If a deal spans multiple years, use the announcement/signing date
+
+━━━ OUTPUT ━━━
+Return ONLY a valid JSON array — no prose, no markdown, no explanation:
 [
   {{
 {fields_desc}
@@ -171,23 +176,21 @@ OUTPUT FORMAT — return ONLY a valid JSON array, one object per deal:
 ]
 
 FIELD RULES:
-- "vendor": exact vendor/product name (e.g. "SAP S/4HANA", "TCS", "Microsoft Azure")
-- "deal_type": one of: ERP | CRM | Cloud Migration | Managed Services | Cybersecurity |
-  Outsourcing | Analytics/AI | Digital Transformation | Infrastructure | SaaS | Core Banking |
-  HCM | SCM | Network | Other
-- "deal_value": e.g. "$45 million" or "$1.2 billion" — null if not public
-- "date_signed": YYYY-MM-DD if exact, YYYY-MM if month known, YYYY if year only
-- "description": one clear sentence stating what was agreed
-- "source": full URL of press release or news article — null if not found
+- "vendor": exact vendor or product name (e.g. "Infosys", "SAP S/4HANA", "Microsoft Azure")
+- "deal_type": ERP | CRM | Cloud Migration | Managed Services | Cybersecurity | Outsourcing |
+  Analytics/AI | Digital Transformation | Infrastructure | SaaS | HCM | SCM | Network |
+  IT Carve-out | Other
+- "deal_value": e.g. "$3.2 billion" — omit if not publicly disclosed
+- "date_signed": YYYY-MM-DD preferred; YYYY-MM or YYYY if exact date unknown
+- "description": one concise sentence — what was agreed and why it matters
+- "source": direct URL to press release, news article, or filing
 
-CRITICAL RULES:
-- One JSON object per distinct deal — never merge two deals into one object
-- Cover ALL years 2010–2026 — do not limit to recent years
-- Return [] if genuinely no deals found
-- Return ONLY the JSON array — no prose, no markdown fences, nothing else
+HARD RULES:
+- TARGET 50 deals — do not stop at 10 or 15, keep searching until exhausted
+- Return [] only if genuinely zero deals exist
+- Return ONLY the raw JSON array
 
-Example shape:
-{json.dumps(fields_json_keys, indent=2)}
+Example shape: {json.dumps(fields_json_keys)}
 """
 
 
