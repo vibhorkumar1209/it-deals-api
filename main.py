@@ -423,8 +423,8 @@ async def debug_enrich():
 
 
 @app.get("/api/debug-gemini-search")
-async def debug_gemini_search(company: str = "Daimler Truck North America"):
-    """Test Gemini with Google Search Grounding for a company. Returns raw response."""
+async def debug_gemini_search(company: str = "Daimler Truck North America", full_prompt: bool = False):
+    """Test Gemini with Google Search Grounding. full_prompt=true uses the real pipeline prompt."""
     google_key = os.getenv("GOOGLE_AI_API_KEY", "")
     if not google_key:
         return {"error": "GOOGLE_AI_API_KEY not set"}
@@ -432,32 +432,52 @@ async def debug_gemini_search(company: str = "Daimler Truck North America"):
     def _run():
         from google import genai
         from google.genai import types
+        from enrich_pipeline import _build_research_prompt
         client = genai.Client(api_key=google_key)
-        prompt = (
-            f'Find 3 recent IT technology deals for {company}. '
-            f'Return ONLY a JSON array: [{{"vendor":"..","deal_type":"..","date_signed":"..","description":".."}}]'
-        )
+        if full_prompt:
+            prompt = _build_research_prompt(company, "", "", [], [])
+            max_tok = 16384
+        else:
+            prompt = (
+                f'Find 3 recent IT technology deals for {company}. '
+                f'Return ONLY a JSON array: [{{"vendor":"..","deal_type":"..","date_signed":"..","description":".."}}]'
+            )
+            max_tok = 2048
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
                 temperature=0.1,
-                max_output_tokens=2048,
+                max_output_tokens=max_tok,
             ),
         )
-        return resp.text or ""
+        # Try .text, fall back to parts
+        try:
+            text = resp.text or ""
+        except Exception:
+            text = ""
+            try:
+                for part in resp.candidates[0].content.parts:
+                    if hasattr(part, "text") and part.text:
+                        text += part.text
+            except Exception:
+                pass
+        finish = str(resp.candidates[0].finish_reason) if resp.candidates else "unknown"
+        return text, finish
 
     try:
-        raw = await asyncio.wait_for(asyncio.to_thread(_run), timeout=60)
+        raw, finish = await asyncio.wait_for(asyncio.to_thread(_run), timeout=180)
         import re as _re
         has_array = bool(_re.search(r"\[.*?\]", raw, _re.DOTALL))
         return {
             "company": company,
+            "full_prompt": full_prompt,
+            "finish_reason": finish,
             "chars": len(raw),
             "has_json_array": has_array,
-            "preview": raw[:800],
-            "tail": raw[-400:] if len(raw) > 800 else "",
+            "preview": raw[:1200],
+            "tail": raw[-600:] if len(raw) > 1200 else "",
         }
     except asyncio.TimeoutError:
         return {"error": "timeout after 60s"}
