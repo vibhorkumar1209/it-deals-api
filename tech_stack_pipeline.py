@@ -21,7 +21,7 @@ TECH_STACK_FIELDS = [
     {"key": "core_tech_category",  "label": "Core Tech Category"},
     {"key": "tech_stack_category", "label": "Tech Stack Category"},
     {"key": "vendor",              "label": "Vendor"},
-    {"key": "integration_partner", "label": "Integration Partner"},
+    {"key": "integration_partner", "label": "Implementation Partner"},
     {"key": "last_detected",       "label": "Last Detected"},
     {"key": "tech_install",        "label": "Install Size (approx)"},
     {"key": "renewal_date",        "label": "Renewal"},
@@ -141,7 +141,8 @@ Exclude tools with no signals since 2020.
 EXTRACTION RULES:
 - One JSON object per distinct software/tool deployment — output can be in the hundreds for large enterprises
 - Populate ALL 8 fields — no blanks allowed
-- integration_partner: list 1-3 key systems this tool connects to (comma-separated)
+- integration_partner: name of the SI, consulting firm, or vendor that implemented/deployed this software
+  e.g. "Accenture", "TCS", "Deloitte", "IBM", "Capgemini", "vendor-led" — use "Unknown" if not found
 - last_detected: e.g. "Active – Q2 2026" or "Detected May 2026 job posting" or "2024 case study"
 - tech_install: approximate license/seat count as a range — estimates can be in hundreds or thousands
   e.g. "200–500 seats", "5,000–20,000 users", "50,000–100,000 users", "Enterprise-wide (100,000+)"
