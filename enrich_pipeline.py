@@ -36,7 +36,7 @@ SCHEMA_FIELDS = [
 
 FIXED_GOAL = (
     "Find every IT and technology deal, contract, outsourcing agreement, and digital "
-    "transformation initiative involving this company from 2010 to 2026."
+    "transformation initiative involving this company."
 )
 
 # ── Industry-aware vendor + tech-area maps ────────────────────────────────────
@@ -143,7 +143,7 @@ COMPANY TO RESEARCH:
   Website: {domain}{linkedin_block}
 
 TASK: Find EVERY IT and technology deal, contract, outsourcing agreement, vendor selection,
-and digital transformation initiative involving {company_name} from 2010 to 2026.
+and digital transformation initiative involving {company_name}.
 
 RESEARCH STRATEGY:
 1. First, identify {company_name}'s industry sector.
@@ -154,7 +154,7 @@ RESEARCH STRATEGY:
 3. Run multiple Google searches to maximise coverage:
    - "{company_name}" + major vendor names (by industry)
    - "{company_name}" + key technology areas (by industry)
-   - "{company_name}" IT deal contract signed <year> (for each year 2010–2026)
+   - "{company_name}" IT deal contract signed announcement
    - "{company_name}" digital transformation outsourcing agreement
    - site:businesswire.com OR site:prnewswire.com "{company_name}" technology
    - "{company_name}" annual report technology spend
@@ -313,7 +313,7 @@ async def enrich_company(
     focus_str = f" [{', '.join(focus_parts)}]" if focus_parts else ""
 
     yield {"type": "heartbeat",
-           "message": f"🔍 Researching {company_name} IT deals 2010–2026{focus_str}…"}
+           "message": f"🔍 Researching {company_name} IT deals{focus_str}…"}
 
     gemini_task = asyncio.ensure_future(
         asyncio.to_thread(
