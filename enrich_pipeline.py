@@ -94,81 +94,26 @@ INDUSTRY_CONTEXT = {
 }
 
 
-def _build_research_prompt(
-    company_name: str,
-    domain: str,
-    linkedin_url: str,
-    focus_tech: list[str],
-    focus_vendor: list[str],
-) -> str:
-    """
-    Build the Gemini research prompt. Broad baseline sweep always runs first;
-    focus_tech / focus_vendor are additive extra search passes.
-    """
-    linkedin_block = f"\n  LinkedIn: {linkedin_url}" if linkedin_url else ""
+def _make_prompt(company_name: str, domain: str, linkedin_block: str,
+                 search_focus: str, known_vendors: str,
+                 extra_searches: str, fields_desc: str, fields_json_keys: dict) -> str:
+    return f"""You are an enterprise IT deal research analyst with live Google Search.
 
-    fields_json_keys = {f["key"]: f"<{f['type']}>" for f in SCHEMA_FIELDS}
-    fields_desc = "\n".join(
-        f'  "{f["key"]}": "{f["description"]}"' for f in SCHEMA_FIELDS
-    )
+COMPANY: {company_name} | Website: {domain}{linkedin_block}
 
-    # ── Focus blocks (additive only) ──────────────────────────────────────────
-    focus_block = ""
-    if focus_tech or focus_vendor:
-        lines = ["\nPASS 4 — USER-SPECIFIED FOCUS (run these searches IN ADDITION to passes 1-3):"]
-        if focus_tech:
-            for t in focus_tech:
-                lines.append(f'  - "{company_name}" {t} deal contract agreement')
-        if focus_vendor:
-            for v in focus_vendor:
-                lines.append(f'  - "{company_name}" {v} deal contract partnership')
-        focus_block = "\n".join(lines)
+TASK: Find IT and technology deals for {company_name}. Search these topics:
+{search_focus}
+Vendor pairs to search (each vendor + company name):
+{known_vendors}
+{extra_searches}
 
-    return f"""You are a senior enterprise IT deal research analyst with live Google Search access.
-Your goal: find UP TO 50 distinct IT and technology deals for {company_name}. Be exhaustive.
+EXTRACTION RULES:
+- Read full articles, not just headlines
+- One JSON object per distinct deal
+- Include: outsourcing, cloud, ERP/CRM, managed services, infrastructure,
+  IT carve-outs, SaaS, vendor selections, digital transformation, acquisitions with tech angle
 
-COMPANY:
-  Name: {company_name}
-  Website: {domain}{linkedin_block}
-
-━━━ MANDATORY SEARCH PASSES (always execute all three) ━━━
-
-PASS 1 — BROAD DEAL SWEEP (run ALL of these searches):
-  - "{company_name}" IT outsourcing deal signed
-  - "{company_name}" technology contract award
-  - "{company_name}" digital transformation program
-  - "{company_name}" cloud migration agreement
-  - "{company_name}" managed services contract
-  - "{company_name}" ERP implementation SAP Oracle
-  - "{company_name}" infrastructure deal data center
-  - "{company_name}" cybersecurity contract
-  - "{company_name}" IT carve-out separation spin-off technology
-  - site:businesswire.com "{company_name}" technology deal
-  - site:prnewswire.com "{company_name}" IT contract
-  - site:globenewswire.com "{company_name}" technology
-
-PASS 2 — MAJOR VENDOR SWEEP (search each vendor paired with company name):
-  Accenture, Infosys, TCS, Wipro, HCLTech, Cognizant, Capgemini, DXC Technology,
-  IBM, SAP, Oracle, Microsoft, AWS, Google Cloud, ServiceNow, Salesforce,
-  Workday, Dell Technologies, HPE, Atos, CGI, NTT DATA, Unisys, Fujitsu,
-  T-Systems, Siemens, Bosch, PTC, Dassault Systèmes, Palo Alto Networks
-
-PASS 3 — YEAR-BY-YEAR SWEEP (search by year to surface older deals):
-  For each year from 2015 to 2025, search:
-  - "{company_name}" IT deal {"{year}"}
-  - "{company_name}" technology contract {"{year}"}
-{focus_block}
-
-━━━ EXTRACTION RULES ━━━
-- Read the FULL article for every promising result — do not stop at headlines
-- Include: outsourcing contracts, cloud migrations, ERP/CRM rollouts, managed services,
-  infrastructure deals, IT carve-outs, SaaS agreements, vendor selections, SI contracts,
-  digital transformation programmes, joint ventures with tech angle
-- Each distinct deal = one JSON object. Never merge two deals.
-- If a deal spans multiple years, use the announcement/signing date
-
-━━━ OUTPUT ━━━
-Return ONLY a valid JSON array — no prose, no markdown, no explanation:
+Return ONLY a valid JSON array:
 [
   {{
 {fields_desc}
@@ -176,34 +121,91 @@ Return ONLY a valid JSON array — no prose, no markdown, no explanation:
 ]
 
 FIELD RULES:
-- "vendor": exact vendor or product name (e.g. "Infosys", "SAP S/4HANA", "Microsoft Azure")
-- "deal_type": ERP | CRM | Cloud Migration | Managed Services | Cybersecurity | Outsourcing |
-  Analytics/AI | Digital Transformation | Infrastructure | SaaS | HCM | SCM | Network |
-  IT Carve-out | Other
-- "deal_value": e.g. "$3.2 billion" — omit if not publicly disclosed
-- "date_signed": YYYY-MM-DD preferred; YYYY-MM or YYYY if exact date unknown
-- "description": one concise sentence — what was agreed and why it matters
-- "source": direct URL to press release, news article, or filing
+- vendor: exact name (e.g. "Infosys", "SAP S/4HANA", "Microsoft Azure")
+- deal_type: ERP | CRM | Cloud Migration | Managed Services | Cybersecurity | Outsourcing |
+  Analytics/AI | Digital Transformation | Infrastructure | SaaS | HCM | SCM | IT Carve-out | Other
+- deal_value: e.g. "$3.2 billion" or omit if not public
+- date_signed: YYYY-MM-DD or YYYY-MM or YYYY
+- description: one clear sentence on what was agreed
+- source: direct URL to press release or news article
 
-HARD RULES:
-- TARGET 50 deals — do not stop at 10 or 15, keep searching until exhausted
-- Return [] only if genuinely zero deals exist
-- Return ONLY the raw JSON array
-
+Return ONLY the raw JSON array. No prose. No markdown fences.
 Example shape: {json.dumps(fields_json_keys)}
 """
 
 
-def _gemini_extract_deals_sync(
+def _build_prompts(
     company_name: str,
     domain: str,
     linkedin_url: str,
     focus_tech: list[str],
     focus_vendor: list[str],
+) -> list[str]:
+    """
+    Return 2 focused prompts instead of one huge one.
+    Call 1: broad IT deals + major SI/cloud vendors.
+    Call 2: year-by-year sweep + focus tech/vendors.
+    Each completes in ~45-75s.
+    """
+    linkedin_block = f" | LinkedIn: {linkedin_url}" if linkedin_url else ""
+    fields_json_keys = {f["key"]: f"<{f['type']}>" for f in SCHEMA_FIELDS}
+    fields_desc = "\n".join(f'  "{f["key"]}": "{f["description"]}"' for f in SCHEMA_FIELDS)
+
+    # ── Prompt 1: broad sweep + top vendors ───────────────────────────────────
+    p1_searches = f"""  - "{company_name}" IT outsourcing deal signed
+  - "{company_name}" technology contract award
+  - "{company_name}" digital transformation program
+  - "{company_name}" cloud migration agreement
+  - "{company_name}" managed services contract
+  - "{company_name}" ERP SAP Oracle implementation
+  - "{company_name}" infrastructure data center deal
+  - "{company_name}" cybersecurity contract
+  - "{company_name}" IT carve-out spin-off technology
+  - site:businesswire.com OR site:prnewswire.com "{company_name}" technology"""
+
+    p1_vendors = (
+        "Accenture, Infosys, TCS, Wipro, HCLTech, Cognizant, Capgemini, DXC Technology, "
+        "IBM, SAP, Oracle, Microsoft, AWS, Google Cloud, ServiceNow, Salesforce, Workday"
+    )
+
+    prompt1 = _make_prompt(company_name, domain, linkedin_block,
+                           p1_searches, p1_vendors, "",
+                           fields_desc, fields_json_keys)
+
+    # ── Prompt 2: year sweep + more vendors + user focus ─────────────────────
+    year_searches = "\n".join(
+        f'  - "{company_name}" IT deal technology contract {y}' for y in range(2015, 2026)
+    )
+
+    p2_vendors = (
+        "Dell Technologies, HPE, Atos, NTT DATA, Unisys, Fujitsu, T-Systems, CGI, "
+        "Siemens, Bosch, PTC, Dassault Systèmes, Palo Alto Networks, CrowdStrike, Snowflake, "
+        "Trimble, Hexagon, Esri, Bentley Systems"
+    )
+
+    extra = ""
+    if focus_tech or focus_vendor:
+        lines = ["Additional user-specified searches:"]
+        for t in focus_tech:
+            lines.append(f'  - "{company_name}" {t} deal contract')
+        for v in focus_vendor:
+            lines.append(f'  - "{company_name}" {v} deal partnership')
+        extra = "\n".join(lines)
+
+    prompt2 = _make_prompt(company_name, domain, linkedin_block,
+                           year_searches, p2_vendors, extra,
+                           fields_desc, fields_json_keys)
+
+    return [prompt1, prompt2]
+
+
+def _gemini_extract_deals_sync(
+    prompt: str,
+    company_name: str,
 ) -> list[dict]:
     """
     Blocking Gemini 2.5 Flash call with Google Search grounding.
-    Runs inside asyncio.to_thread.
+    Accepts a pre-built prompt. Runs inside run_in_executor.
     """
     try:
         from google import genai
@@ -216,7 +218,6 @@ def _gemini_extract_deals_sync(
         logger.error("GOOGLE_AI_API_KEY env var not set")
         return []
 
-    prompt = _build_research_prompt(company_name, domain, linkedin_url, focus_tech, focus_vendor)
     field_keys = [f["key"] for f in SCHEMA_FIELDS]
 
     try:
@@ -361,67 +362,64 @@ async def enrich_company(
     ft = focus_tech or []
     fv = focus_vendor or []
 
-    focus_parts = []
-    if ft:  focus_parts.append(f"{len(ft)} tech focus")
-    if fv:  focus_parts.append(f"{len(fv)} vendor focus")
-    focus_str = f" [{', '.join(focus_parts)}]" if focus_parts else ""
+    prompts = _build_prompts(company_name, domain, linkedin_url, ft, fv)
+    seen_keys: set[str] = set()   # deduplicate across the two calls
+    total_deals = 0
+    CALL_TIMEOUT = 120            # 2 min per call — well within Gemini's capacity
 
-    yield {"type": "heartbeat",
-           "message": f"🔍 Researching {company_name} IT deals{focus_str}…"}
-    await asyncio.sleep(0)  # flush SSE before blocking call
+    for call_idx, prompt in enumerate(prompts, 1):
+        label = "broad IT & cloud deals" if call_idx == 1 else "year-by-year + vendor sweep"
+        yield {"type": "heartbeat",
+               "message": f"🔍 [{call_idx}/{len(prompts)}] Searching {company_name}: {label}…"}
+        await asyncio.sleep(0)
 
-    # Run Gemini in a thread; send heartbeats every 10s so SSE stays alive
-    loop = asyncio.get_event_loop()
-    gemini_future = loop.run_in_executor(
-        None,
-        _gemini_extract_deals_sync,
-        company_name, domain, linkedin_url, ft, fv,
-    )
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(None, _gemini_extract_deals_sync, prompt, company_name)
 
-    elapsed = 0
-    deals: list[dict] = []
-    TIMEOUT = 240
+        elapsed = 0
+        call_deals: list[dict] = []
 
-    while elapsed < TIMEOUT:
-        try:
-            deals = await asyncio.wait_for(asyncio.shield(gemini_future), timeout=10)
-            break  # finished successfully
-        except asyncio.TimeoutError:
-            elapsed += 10
-            yield {"type": "heartbeat",
-                   "message": f"🌐 Gemini searching & reading sources… ({elapsed}s)"}
-            await asyncio.sleep(0)  # flush heartbeat to client
-        except Exception as e:
-            logger.error(f"Gemini task error for {company_name}: {e}", exc_info=True)
-            yield {"type": "error", "message": f"Gemini error for {company_name}: {e}"}
-            deals = []
-            break
-    else:
-        # True timeout
-        gemini_future.cancel()
-        logger.error(f"Gemini timed out ({TIMEOUT}s) for {company_name}")
-        row = {"company_name": company_name, "domain": domain,
-               "_status": "timeout", "_sources": 0}
-        for f in SCHEMA_FIELDS:
-            row[f["key"]] = ""
-        yield {"type": "row_done", "row": row}
-        return
+        while elapsed < CALL_TIMEOUT:
+            try:
+                call_deals = await asyncio.wait_for(asyncio.shield(future), timeout=10)
+                break
+            except asyncio.TimeoutError:
+                elapsed += 10
+                yield {"type": "heartbeat",
+                       "message": f"🌐 [{call_idx}/{len(prompts)}] Gemini searching… ({elapsed}s)"}
+                await asyncio.sleep(0)
+            except Exception as e:
+                logger.error(f"Gemini call {call_idx} error for {company_name}: {e}", exc_info=True)
+                yield {"type": "heartbeat", "message": f"⚠️ Call {call_idx} error: {e}"}
+                call_deals = []
+                break
+        else:
+            future.cancel()
+            logger.warning(f"Call {call_idx} timed out for {company_name}")
+            yield {"type": "heartbeat", "message": f"⏱ Call {call_idx} timed out — partial results below"}
 
-    if not deals:
-        yield {"type": "heartbeat", "message": f"⚠️ No deals found for {company_name} — check Render logs for details"}
+        # Deduplicate and stream new deals immediately
+        new_deals = 0
+        for deal in call_deals:
+            dedup_key = f"{deal.get('vendor','').lower()}|{deal.get('date_signed','')}"
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
+            row = {"company_name": company_name, "domain": domain, "_status": "ok", "_sources": 1}
+            row.update(deal)
+            yield {"type": "row_done", "row": row}
+            await asyncio.sleep(0.05)
+            new_deals += 1
+            total_deals += 1
+
+        yield {"type": "heartbeat",
+               "message": f"✅ Call {call_idx} done: +{new_deals} deals (total {total_deals})"}
+        await asyncio.sleep(0)
+
+    if total_deals == 0:
+        yield {"type": "heartbeat", "message": f"⚠️ No deals found for {company_name}"}
         row = {"company_name": company_name, "domain": domain,
                "_status": "no_result", "_sources": 0}
         for f in SCHEMA_FIELDS:
             row[f["key"]] = ""
         yield {"type": "row_done", "row": row}
-        return
-
-    yield {"type": "heartbeat",
-           "message": f"✅ {company_name}: {len(deals)} deals found — populating table…"}
-
-    for i, deal in enumerate(deals):
-        row = {"company_name": company_name, "domain": domain,
-               "_status": "ok", "_sources": 1}
-        row.update(deal)
-        yield {"type": "row_done", "row": row}
-        await asyncio.sleep(0.05)   # force SSE flush between each row
