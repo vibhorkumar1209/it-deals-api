@@ -663,24 +663,36 @@ async def enrich_company(
 
 COMPANY: {company_name} | Website: {domain}
 
-TASK: Find all known IT partners, technology alliances, reseller agreements, and strategic
-technology partnerships that {company_name} has with other companies.
-Search for: "{company_name}" IT partner alliance technology partnership agreement
-Search for: "{company_name}" partner ecosystem reseller integration partner
-Search for: "{company_name}" strategic alliance technology vendor partner
+TASK: Find all known IT partners, technology alliances, reseller agreements, OEM deals,
+and strategic technology partnerships that {company_name} has with other companies.
 
-For each IT partner relationship found, return one JSON object:
+Run these searches:
+- "{company_name}" IT partner alliance technology partnership agreement announcement
+- "{company_name}" partner ecosystem reseller integration partner program
+- "{company_name}" strategic alliance OEM technology vendor 2022 OR 2023 OR 2024 OR 2025
+- "{company_name}" partnership program certified partner implementation partner
+- site:businesswire.com OR site:prnewswire.com "{company_name}" partnership alliance
+
+For each IT partner relationship found, return one JSON object with ALL fields populated:
 [
   {{
-    "vendor": "<partner company name>",
-    "deal_type": "<type e.g. Technology Alliance | Reseller | Integration Partner | Strategic Partner | OEM>",
-    "deal_value": "<contract value if known or empty>",
-    "date_signed": "<year or date if known>",
-    "deal_focus": "<technology focus e.g. Cloud, AI, CRM, ERP>",
-    "description": "<one sentence describing the partnership and what it covers>",
-    "source": "<URL of announcement or partner page>"
+    "vendor": "<exact name of the partner company>",
+    "deal_type": "<one of: Technology Alliance | Reseller Partnership | Implementation Partner | OEM Agreement | Integration Partner | Co-sell Agreement | Strategic Partner | Managed Services Partner | Cloud Partner>",
+    "deal_value": "<deal or partnership value if publicly stated, else empty string>",
+    "date_signed": "<announcement date as YYYY-MM-DD or YYYY-MM or YYYY — search press releases to find this>",
+    "deal_focus": "<1-3 specific technology areas covered by this partnership from: AI | ML | Cloud | CRM | ERP | Big Data | Analytics | Cybersecurity | IoT | Automation | DevOps | Digital Transformation | Payments | Infrastructure | SaaS>",
+    "description": "<one clear sentence: what {company_name} and the partner do together and why the partnership exists>",
+    "source": "<direct URL to the press release, partner page, or announcement — must be a real URL>"
   }}
 ]
+
+FIELD RULES:
+- vendor: exact company name, not a product name
+- deal_type: must be one of the options listed above
+- date_signed: always populate if findable — search "[company] [partner] partnership announced"
+- deal_focus: specific technologies e.g. "AI, Cloud" or "CRM, Analytics" — not generic terms
+- description: explain what each company contributes and what customers get
+- source: real URL — press release preferred over generic partner page
 
 Return ONLY the raw JSON array. No prose. No markdown fences.
 """
