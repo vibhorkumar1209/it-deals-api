@@ -26,6 +26,7 @@ TECH_STACK_FIELDS = [
     {"key": "tech_install",        "label": "Install Size (approx)"},
     {"key": "renewal_date",        "label": "Renewal"},
     {"key": "confidence_score",    "label": "Confidence"},
+    {"key": "source_info",         "label": "Source"},
 ]
 
 FIELD_KEYS = [f["key"] for f in TECH_STACK_FIELDS]
@@ -165,10 +166,12 @@ Rules:
 - core_tech_category: Core Enterprise Operations | Customer-Facing & Revenue | Infrastructure & Cloud | Development & Engineering | Data Analytics & AI | Security & Compliance | Unclassified
 - tech_stack_category: use standard names like "ERP & Finance", "CRM & Account Management", "Cloud Hosting" etc., or a descriptive name if none fits
 - integration_partner: SI/consulting firm that implemented it (e.g. "Accenture", "TCS") or "-"
-- last_detected: e.g. "Active – 2025", "2024 job posting"
-- tech_install: estimated seat/license range e.g. "1,000–5,000 seats", "Enterprise-wide"
-- renewal_date: estimated quarter e.g. "Q2 2027"
-- confidence_score: e.g. "85% – job posting", "94% – vendor case study"
+- last_detected: month-year only if known e.g. "Mar 2024", "Jan 2025" — or just year "2024" — or "-"
+- tech_install: numeric range only e.g. "500–2,000", "10,000–50,000", "100,000+" — or "-" if unknown
+- renewal_date: estimated quarter e.g. "Q2 2027" or "-"
+- confidence_score: percentage only e.g. "87%", "94%" — no text, just the number with %
+- source_info: how this was detected e.g. "Job posting", "Vendor case study", "Press release",
+  "Annual report", "Privacy policy", "LinkedIn jobs", "BuiltWith", "G2 review" — or "-"
 
 Return ONLY a raw JSON array, no markdown:
 [{json.dumps(fields_example)}]

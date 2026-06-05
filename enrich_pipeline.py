@@ -20,17 +20,19 @@ GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
 
 # Fixed output schema — matches the IT Deal Details preset in the frontend
 SCHEMA_FIELDS = [
-    {"key": "vendor",      "label": "Vendor Name",  "type": "string",
+    {"key": "vendor",      "label": "Vendor Name",     "type": "string",
      "description": "Technology vendor or service provider name"},
-    {"key": "deal_type",   "label": "Deal Type",    "type": "string",
+    {"key": "deal_type",   "label": "Deal Type",        "type": "string",
      "description": "e.g. ERP, Cloud Migration, Cybersecurity, Outsourcing, Managed Services"},
-    {"key": "deal_value",  "label": "Deal Value",   "type": "string",
+    {"key": "deal_value",  "label": "Deal Value",       "type": "string",
      "description": "Contract value in USD millions if publicly known"},
-    {"key": "date_signed", "label": "Date Signed",  "type": "date",
+    {"key": "date_signed", "label": "Last Detected",    "type": "date",
      "description": "Announcement or contract signing date (YYYY-MM-DD or YYYY-MM or YYYY)"},
-    {"key": "description", "label": "Description",  "type": "string",
+    {"key": "deal_focus",  "label": "Deal Focus",       "type": "string",
+     "description": "Primary technology focus area(s) of the deal, e.g. AI, ML, Cloud, Big Data, Analytics, Cybersecurity, IoT, Automation, ERP, Digital Transformation"},
+    {"key": "description", "label": "Deal Description", "type": "string",
      "description": "One sentence describing what was agreed"},
-    {"key": "source",      "label": "Source URL",   "type": "string",
+    {"key": "source",      "label": "Source",           "type": "string",
      "description": "URL of the press release, news article, or filing"},
 ]
 
@@ -145,6 +147,10 @@ FIELD RULES:
   Joint Venture | Corporate Venture | Disinvestment | Managed Services | Other
 - deal_value: e.g. "$3.2 billion" — omit if not public
 - date_signed: YYYY-MM-DD or YYYY-MM or YYYY
+- deal_focus: 1-3 primary technology focus tags from: AI | ML | Cloud | Big Data | Analytics |
+  Cybersecurity | IoT | Automation | ERP | Digital Transformation | Blockchain | Edge Computing |
+  5G | Robotics | Autonomous | Payments | Open Banking | DevOps | Data Platform | Other
+  e.g. "AI, Cloud" or "Big Data, Analytics" or "ERP"
 - description: one concise sentence — what was agreed and why it matters
 - source: direct URL to press release, article, or filing
 
