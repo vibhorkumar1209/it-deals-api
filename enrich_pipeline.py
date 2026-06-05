@@ -653,10 +653,75 @@ async def enrich_company(
             yield {"type": "heartbeat",
                    "message": f"✅ Fallback found {total_deals} deals via '{brand_name}'"}
 
+    # ── IT-partner fallback: if still 0 deals, search for the company's IT partners ──
     if total_deals == 0:
-        yield {"type": "heartbeat", "message": f"⚠️ No deals found for {company_name}"}
-        row = {"company_name": company_name, "domain": domain,
-               "_status": "no_result", "_sources": 0}
-        for f in SCHEMA_FIELDS:
-            row[f["key"]] = ""
-        yield {"type": "row_done", "row": row}
+        yield {"type": "heartbeat",
+               "message": f"🔄 No deals found — searching IT partner ecosystem for {company_name}…"}
+        await asyncio.sleep(0)
+
+        partner_prompt = f"""You are an IT partnership research analyst with live Google Search.
+
+COMPANY: {company_name} | Website: {domain}
+
+TASK: Find all known IT partners, technology alliances, reseller agreements, and strategic
+technology partnerships that {company_name} has with other companies.
+Search for: "{company_name}" IT partner alliance technology partnership agreement
+Search for: "{company_name}" partner ecosystem reseller integration partner
+Search for: "{company_name}" strategic alliance technology vendor partner
+
+For each IT partner relationship found, return one JSON object:
+[
+  {{
+    "vendor": "<partner company name>",
+    "deal_type": "<type e.g. Technology Alliance | Reseller | Integration Partner | Strategic Partner | OEM>",
+    "deal_value": "<contract value if known or empty>",
+    "date_signed": "<year or date if known>",
+    "deal_focus": "<technology focus e.g. Cloud, AI, CRM, ERP>",
+    "description": "<one sentence describing the partnership and what it covers>",
+    "source": "<URL of announcement or partner page>"
+  }}
+]
+
+Return ONLY the raw JSON array. No prose. No markdown fences.
+"""
+
+        loop = asyncio.get_event_loop()
+        partner_future = loop.run_in_executor(None, _gemini_extract_deals_sync, partner_prompt, company_name)
+        elapsed = 0
+        partner_deals: list[dict] = []
+
+        while elapsed < CALL_TIMEOUT:
+            try:
+                partner_deals = await asyncio.wait_for(asyncio.shield(partner_future), timeout=10)
+                break
+            except asyncio.TimeoutError:
+                elapsed += 10
+                yield {"type": "heartbeat", "message": f"🌐 Searching IT partner ecosystem… ({elapsed}s)"}
+                await asyncio.sleep(0)
+            except Exception as e:
+                logger.error(f"IT partner fallback error for {company_name}: {e}", exc_info=True)
+                partner_deals = []
+                break
+        else:
+            partner_future.cancel()
+
+        if partner_deals:
+            yield {"type": "heartbeat",
+                   "message": f"✅ Found {len(partner_deals)} IT partners for {company_name}"}
+            for deal in partner_deals:
+                dedup_key = f"{deal.get('vendor','').lower()}|partner"
+                if dedup_key in seen_keys:
+                    continue
+                seen_keys.add(dedup_key)
+                row = {"company_name": company_name, "domain": domain, "_status": "ok", "_sources": 1}
+                row.update(deal)
+                yield {"type": "row_done", "row": row}
+                await asyncio.sleep(0.05)
+                total_deals += 1
+        else:
+            yield {"type": "heartbeat", "message": f"⚠️ No deals or IT partners found for {company_name}"}
+            row = {"company_name": company_name, "domain": domain,
+                   "_status": "no_result", "_sources": 0}
+            for f in SCHEMA_FIELDS:
+                row[f["key"]] = ""
+            yield {"type": "row_done", "row": row}
