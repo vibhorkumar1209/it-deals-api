@@ -71,6 +71,17 @@ AGGREGATE_SPEND_FIELDS = [
     {"key": "source",       "label": "Source"},
 ]
 
+# IT Deals & Partnerships (supporting spend rationale)
+SPEND_DEAL_FIELDS = [
+    {"key": "vendor",       "label": "Vendor / Partner"},
+    {"key": "deal_type",    "label": "Deal Type"},
+    {"key": "deal_value",   "label": "Deal Value"},
+    {"key": "date",         "label": "Date"},
+    {"key": "spend_link",   "label": "Linked Spend Category"},
+    {"key": "rationale",    "label": "Spend Rationale"},
+    {"key": "source",       "label": "Source"},
+]
+
 # Competitive (optional)
 COMPETITOR_FIELDS = [
     {"key": "competitor",     "label": "Competitor"},
@@ -292,6 +303,39 @@ Return ONLY the raw JSON array.
 
 # ── Aggregate Spend: IT / AI / Cloud / Aftermarket ────────────────────────────
 
+def _spend_deals_prompt(company_name: str, industry: str) -> str:
+    ind = f" ({industry})" if industry else ""
+    return f"""You are an IT deal research analyst with live Google Search.
+
+COMPANY: {company_name}{ind}
+
+Search for IT deals, contracts, and technology partnerships that reveal or support spend estimates:
+- "{company_name}" IT outsourcing contract deal technology spend
+- "{company_name}" cloud migration AWS Azure Google Cloud deal
+- "{company_name}" AI machine learning platform deal investment
+- "{company_name}" aftermarket service technology vendor deal
+- "{company_name}" digital transformation program spend billion million
+- site:businesswire.com OR site:prnewswire.com "{company_name}" technology deal
+
+For each deal found, identify which spend category (IT / AI / Cloud / Aftermarket) it supports.
+
+Return ONLY a JSON array:
+[
+  {{
+    "vendor": "<vendor or partner name>",
+    "deal_type": "<type e.g. Cloud Migration | Managed Services | AI Platform | IT Outsourcing | Digital Transformation>",
+    "deal_value": "<value e.g. '$45 million' or 'Undisclosed'>",
+    "date": "<year or YYYY-MM>",
+    "spend_link": "<IT Spend | AI Spend | Cloud Spend | Aftermarket Tech Spend>",
+    "rationale": "<one sentence: how this deal supports the spend estimate for that category>",
+    "source": "<URL to press release or announcement>"
+  }}
+]
+
+Return ONLY the raw JSON array. No prose. No markdown.
+"""
+
+
 def _aggregate_spend_prompt(company_name: str, industry: str) -> str:
     ind = f" ({industry})" if industry else ""
     return f"""You are an enterprise IT financial analyst.
@@ -461,6 +505,19 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"✅ Aggregate spend: {len(agg_rows) if isinstance(agg_rows, list) else 0} categories estimated"}
     await asyncio.sleep(0)
 
+    # ── Step 2b: IT Deals & Partnerships supporting spend rationale ───────────
+    yield {"type": "heartbeat", "message": "🤝 Finding IT deals & partnerships to validate spend estimates…"}
+    await asyncio.sleep(0)
+
+    spend_deal_rows = await _run_async(_spend_deals_prompt(company_name, industry), True, "spend_deals", timeout=90)
+    for row in (spend_deal_rows if isinstance(spend_deal_rows, list) else []):
+        if isinstance(row, dict):
+            yield {"type": "spend_deal_row", "row": row}
+            await asyncio.sleep(0.04)
+
+    yield {"type": "heartbeat", "message": f"✅ IT deals: {len(spend_deal_rows) if isinstance(spend_deal_rows, list) else 0} deals found"}
+    await asyncio.sleep(0)
+
     # ── Step 3: Spend by Module (Table 3) ────────────────────────────────────
     yield {"type": "heartbeat", "message": "📊 Table 3: Estimating spend by module with rationale…"}
     await asyncio.sleep(0)
@@ -521,6 +578,7 @@ async def run_aftermarket_deep_dive(
         "gaps": gap_rows if isinstance(gap_rows, list) else [],
         "spend_modules": spend_rows if isinstance(spend_rows, list) else [],
         "aggregate_spend": agg_rows if isinstance(agg_rows, list) else [],
+        "spend_deals": spend_deal_rows if isinstance(spend_deal_rows, list) else [],
         "readiness": readiness_rows if isinstance(readiness_rows, list) else [],
         "competitors": comp_rows if isinstance(comp_rows, list) else [],
     }
