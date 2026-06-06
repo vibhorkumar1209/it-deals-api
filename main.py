@@ -607,6 +607,7 @@ async def debug_tech_stack(company: str = "Kubota North America", call_num: int 
 class GCCIntelRequest(BaseModel):
     company_name: str = Field(..., min_length=1)
     domain: str = Field(default="")
+    location: str = Field(default="")
     target_vendor: str = Field(default="")
     focus_domains: list[str] = Field(default_factory=list)
 
@@ -628,6 +629,7 @@ async def gcc_intel(req: GCCIntelRequest):
             async for event in run_gcc_intelligence(
                 company_name=req.company_name,
                 domain=req.domain,
+                location=req.location,
                 target_vendor=req.target_vendor,
                 focus_domains=req.focus_domains or None,
             ):
