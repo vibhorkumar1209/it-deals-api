@@ -82,6 +82,17 @@ SPEND_DEAL_FIELDS = [
     {"key": "source",       "label": "Source"},
 ]
 
+# Vendor Footprint
+VENDOR_FOOTPRINT_FIELDS = [
+    {"key": "domain",               "label": "Domain"},
+    {"key": "footprint_status",     "label": "Footprint Status"},
+    {"key": "evidence",             "label": "Evidence"},
+    {"key": "product_deployed",     "label": "Product Deployed"},
+    {"key": "opportunity_size",     "label": "Opportunity"},
+    {"key": "opportunity_rationale","label": "Rationale"},
+    {"key": "source",               "label": "Source"},
+]
+
 # Competitive (optional)
 COMPETITOR_FIELDS = [
     {"key": "competitor",     "label": "Competitor"},
@@ -427,6 +438,42 @@ Return ONLY the raw JSON array.
 """
 
 
+# ── Vendor Footprint (optional) ──────────────────────────────────────────────
+
+def _vendor_footprint_prompt(company_name: str, target_vendor: str, industry: str) -> str:
+    ind = f" ({industry})" if industry else ""
+    return f"""You are a vendor intelligence analyst with live Google Search.
+
+TARGET COMPANY: {company_name}{ind}
+TARGET VENDOR: {target_vendor}
+
+Search for evidence of {target_vendor}'s existing presence and footprint at {company_name}:
+- "{company_name}" "{target_vendor}" deal contract implementation
+- "{company_name}" "{target_vendor}" partnership integration
+- "{target_vendor}" case study "{company_name}"
+- site:linkedin.com "{company_name}" "{target_vendor}"
+- "{target_vendor}" customer "{company_name}" success story
+
+For each domain where {target_vendor} has evidence of presence, return one JSON object.
+Also identify domains where {target_vendor} has NO presence but a strong opportunity.
+
+Return ONLY a JSON array:
+[
+  {{
+    "domain": "<aftermarket domain>",
+    "footprint_status": "<Active Deployment | Pilot/POC | No Presence | Competitor Present>",
+    "evidence": "<what evidence was found e.g. 'Case study on tavant.com/customers/dtna'>",
+    "product_deployed": "<specific {target_vendor} product/module if found, else '-'>",
+    "opportunity_size": "<High | Medium | Low>",
+    "opportunity_rationale": "<one sentence why {target_vendor} can expand or displace here>",
+    "source": "<URL to case study, press release, or '-'>"
+  }}
+]
+
+Return ONLY the raw JSON array. No prose. No markdown.
+"""
+
+
 # ── Competitive (optional) ────────────────────────────────────────────────────
 
 def _comp_prompt(company_name: str, industry: str, competitors: str) -> str:
@@ -479,11 +526,12 @@ async def run_aftermarket_deep_dive(
     loop = asyncio.get_event_loop()
 
     # Fire all calls at once
-    cap_futures   = [loop.run_in_executor(None, _gemini_call_sync, _cap_prompt(company_name, dom, industry), True, f"cap_{dom}") for dom in AFTERMARKET_DOMAINS]
-    agg_future    = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend")
-    deals_future  = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals")
-    spend_future  = loop.run_in_executor(None, _gemini_call_sync, _spend_module_prompt(company_name, industry), True, "spend_module")
-    ready_future  = loop.run_in_executor(None, _gemini_call_sync, _readiness_tam_prompt(company_name, industry, target_vendor), True, "readiness_tam")
+    cap_futures    = [loop.run_in_executor(None, _gemini_call_sync, _cap_prompt(company_name, dom, industry), True, f"cap_{dom}") for dom in AFTERMARKET_DOMAINS]
+    agg_future     = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend")
+    deals_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals")
+    spend_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_module_prompt(company_name, industry), True, "spend_module")
+    ready_future   = loop.run_in_executor(None, _gemini_call_sync, _readiness_tam_prompt(company_name, industry, target_vendor), True, "readiness_tam")
+    vendor_future  = loop.run_in_executor(None, _gemini_call_sync, _vendor_footprint_prompt(company_name, target_vendor or "N/A", industry), True, "vendor_footprint") if target_vendor else None
 
     yield {"type": "heartbeat", "message": "🌐 All Gemini searches running in parallel — streaming results as they complete…"}
     await asyncio.sleep(0)
@@ -528,11 +576,8 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"✅ Capabilities: {len(all_cap_rows)} rows"}
     await asyncio.sleep(0)
 
-    # Collect aggregate spend
-    try:
-        agg_rows = agg_future.result() if agg_future.done() else await asyncio.wait_for(asyncio.wrap_future(agg_future), timeout=30)
-    except Exception:
-        agg_rows = []
+    # Collect aggregate spend (use shield so the future keeps running if it needs more time)
+    agg_rows = await _collect(agg_future, "agg_spend", timeout=90)
     for row in (agg_rows if isinstance(agg_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "aggregate_spend_row", "row": row}
@@ -540,11 +585,19 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"✅ Aggregate spend: {len(agg_rows) if isinstance(agg_rows, list) else 0} categories"}
     await asyncio.sleep(0)
 
+    async def _collect(future, label: str, timeout: int = 60) -> list:
+        """Await an asyncio Future from run_in_executor with timeout."""
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(f"{label} timed out after {timeout}s")
+            return []
+        except Exception as e:
+            logger.error(f"{label} error: {e}")
+            return []
+
     # Collect IT deals
-    try:
-        spend_deal_rows = deals_future.result() if deals_future.done() else await asyncio.wait_for(asyncio.wrap_future(deals_future), timeout=30)
-    except Exception:
-        spend_deal_rows = []
+    spend_deal_rows = await _collect(deals_future, "spend_deals", timeout=90)
     for row in (spend_deal_rows if isinstance(spend_deal_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "spend_deal_row", "row": row}
@@ -553,10 +606,7 @@ async def run_aftermarket_deep_dive(
     await asyncio.sleep(0)
 
     # Collect spend by module
-    try:
-        spend_rows = spend_future.result() if spend_future.done() else await asyncio.wait_for(asyncio.wrap_future(spend_future), timeout=30)
-    except Exception:
-        spend_rows = []
+    spend_rows = await _collect(spend_future, "spend_module", timeout=90)
     for row in (spend_rows if isinstance(spend_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "spend_module_row", "row": row}
@@ -564,14 +614,11 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"✅ Spend by module: {len(spend_rows) if isinstance(spend_rows, list) else 0} rows"}
     await asyncio.sleep(0)
 
-    # ── Step 4: Readiness Matrix + TAM (collect from already-fired future) ─────
+    # ── Step 4: Readiness Matrix + TAM ───────────────────────────────────────
     yield {"type": "heartbeat", "message": "🎯 Table 4: Collecting readiness matrix and TAM estimates…"}
     await asyncio.sleep(0)
 
-    try:
-        readiness_rows = ready_future.result() if ready_future.done() else await asyncio.wait_for(asyncio.wrap_future(ready_future), timeout=30)
-    except Exception:
-        readiness_rows = []
+    readiness_rows = await _collect(ready_future, "readiness_tam", timeout=90)
     for row in (readiness_rows if isinstance(readiness_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "readiness_row", "row": row}
@@ -579,6 +626,19 @@ async def run_aftermarket_deep_dive(
 
     yield {"type": "heartbeat", "message": f"✅ Table 4 complete — {len(readiness_rows) if isinstance(readiness_rows, list) else 0} modules assessed"}
     await asyncio.sleep(0)
+
+    # ── Vendor Footprint (collect if target_vendor provided) ─────────────────
+    vendor_rows = []
+    if target_vendor and vendor_future:
+        yield {"type": "heartbeat", "message": f"🎯 Collecting {target_vendor} footprint analysis…"}
+        await asyncio.sleep(0)
+        vendor_rows = await _collect(vendor_future, "vendor_footprint", timeout=90)
+        for row in (vendor_rows if isinstance(vendor_rows, list) else []):
+            if isinstance(row, dict):
+                yield {"type": "vendor_footprint_row", "row": row}
+                await asyncio.sleep(0.04)
+        yield {"type": "heartbeat", "message": f"✅ {target_vendor} footprint: {len(vendor_rows)} domains assessed"}
+        await asyncio.sleep(0)
 
     # ── Step 5: Tech Gaps (Table 2) ───────────────────────────────────────────
     yield {"type": "heartbeat", "message": "🔎 Table 2: Identifying technology gaps…"}
@@ -616,5 +676,6 @@ async def run_aftermarket_deep_dive(
         "aggregate_spend": agg_rows if isinstance(agg_rows, list) else [],
         "spend_deals": spend_deal_rows if isinstance(spend_deal_rows, list) else [],
         "readiness": readiness_rows if isinstance(readiness_rows, list) else [],
+        "vendor_footprint": vendor_rows if isinstance(vendor_rows, list) else [],
         "competitors": comp_rows if isinstance(comp_rows, list) else [],
     }
