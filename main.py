@@ -602,6 +602,47 @@ async def debug_tech_stack(company: str = "Kubota North America", call_num: int 
         return {"error": str(e)}
 
 
+# ── GCC Intelligence Hub ──────────────────────────────────────────────────────
+
+class GCCIntelRequest(BaseModel):
+    company_name: str = Field(..., min_length=1)
+    domain: str = Field(default="")
+    target_vendor: str = Field(default="")
+    focus_domains: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/gcc-intel")
+async def gcc_intel(req: GCCIntelRequest):
+    """SSE stream: two-phase GCC Intelligence Hub."""
+    from gcc_pipeline import run_gcc_intelligence
+
+    async def _generate():
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        if not os.getenv("GOOGLE_AI_API_KEY"):
+            yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set."})
+            return
+
+        try:
+            async for event in run_gcc_intelligence(
+                company_name=req.company_name,
+                domain=req.domain,
+                target_vendor=req.target_vendor,
+                focus_domains=req.focus_domains or None,
+            ):
+                yield _sse(event)
+        except Exception as e:
+            logger.error(f"GCC Intel error: {e}", exc_info=True)
+            yield _sse({"type": "error", "message": str(e)})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=4001, reload=True)
