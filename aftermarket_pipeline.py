@@ -442,35 +442,59 @@ Return ONLY the raw JSON array.
 
 def _vendor_footprint_prompt(company_name: str, target_vendor: str, industry: str) -> str:
     ind = f" ({industry})" if industry else ""
-    return f"""You are a vendor intelligence analyst with live Google Search.
+    domains_list = "\n".join(f"  - {d}" for d in AFTERMARKET_DOMAINS)
+    return f"""You are a vendor competitive intelligence analyst with live Google Search.
 
 TARGET COMPANY: {company_name}{ind}
-TARGET VENDOR: {target_vendor}
+TARGET VENDOR TO EVALUATE: {target_vendor}
 
-Search for evidence of {target_vendor}'s existing presence and footprint at {company_name}:
-- "{company_name}" "{target_vendor}" deal contract implementation
-- "{company_name}" "{target_vendor}" partnership integration
-- "{target_vendor}" case study "{company_name}"
-- site:linkedin.com "{company_name}" "{target_vendor}"
-- "{target_vendor}" customer "{company_name}" success story
+STEP 1 — Identify {target_vendor}'s direct competitors in the aftermarket/field service software space.
+Search: "{target_vendor}" competitors alternatives aftermarket warranty field service software
 
-For each domain where {target_vendor} has evidence of presence, return one JSON object.
-Also identify domains where {target_vendor} has NO presence but a strong opportunity.
+STEP 2 — Search for {target_vendor}'s AND its competitors' footprint at {company_name}.
+Run ALL of the following searches:
 
-Return ONLY a JSON array:
+Target vendor searches (web + social):
+- "{company_name}" "{target_vendor}" implementation deployed partnership
+- "{target_vendor}" case study customer "{company_name}"
+- site:linkedin.com "{company_name}" "{target_vendor}" implementation
+- site:linkedin.com/company "{target_vendor}" "{company_name}"
+- "{target_vendor}" "{company_name}" warranty OR "field service" OR "dealer management"
+- site:{target_vendor.lower().replace(" ", "")}.com "{company_name}"
+
+Competitor searches (for each identified competitor, run similar searches):
+- "{company_name}" [competitor] warranty management system
+- "{company_name}" [competitor] field service dealer platform
+- site:linkedin.com "{company_name}" [competitor] deployed implemented
+
+STEP 3 — For EACH of the following aftermarket modules, return one row per vendor
+({target_vendor} AND each identified competitor) covering their footprint at {company_name}:
+{domains_list}
+
+Return ONLY a JSON array — one object per domain × vendor combination:
 [
   {{
-    "domain": "<aftermarket domain>",
-    "footprint_status": "<Active Deployment | Pilot/POC | No Presence | Competitor Present>",
-    "evidence": "<what evidence was found e.g. 'Case study on tavant.com/customers/dtna'>",
-    "product_deployed": "<specific {target_vendor} product/module if found, else '-'>",
-    "opportunity_size": "<High | Medium | Low>",
-    "opportunity_rationale": "<one sentence why {target_vendor} can expand or displace here>",
-    "source": "<URL to case study, press release, or '-'>"
+    "domain": "<aftermarket module name>",
+    "vendor_name": "<exact vendor name — either {target_vendor} or a competitor>",
+    "is_target_vendor": "<true | false>",
+    "footprint_status": "<Active Deployment | Pilot/POC | No Presence | Likely Present (inferred) | Competitor Present>",
+    "evidence": "<specific evidence found: quote case study title, LinkedIn post, job posting, press release — be specific>",
+    "evidence_sources": "<comma-separated list of where evidence was found: 'LinkedIn', 'Vendor case study', 'Press release', 'Job posting', 'News article'>",
+    "product_deployed": "<specific product/module name if found, else '-'>",
+    "opportunity_size": "<High | Medium | Low | None>",
+    "opportunity_rationale": "<one sentence: opportunity for {target_vendor} given current landscape in this domain>",
+    "source": "<direct URL — LinkedIn profile, case study page, press release, or '-'>"
   }}
 ]
 
-Return ONLY the raw JSON array. No prose. No markdown.
+CRITICAL RULES:
+- Search LinkedIn specifically for job postings mentioning these vendors at {company_name}
+- Search company websites and press release sites for case studies
+- Return one row per domain for {target_vendor} (even if no evidence found — mark as No Presence)
+- Return additional rows for each competitor found with evidence at {company_name}
+- evidence field must be SPECIFIC — not generic statements
+
+Return ONLY the raw JSON array.
 """
 
 
