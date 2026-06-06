@@ -650,6 +650,7 @@ class AftermarketRequest(BaseModel):
     domain: str = Field(default="")
     industry: str = Field(default="")
     competitors: str = Field(default="")
+    target_vendor: str = Field(default="")
 
 
 @app.post("/api/aftermarket-dive")
@@ -671,6 +672,7 @@ async def aftermarket_dive(req: AftermarketRequest):
                 domain=req.domain,
                 industry=req.industry,
                 competitors=req.competitors,
+                target_vendor=req.target_vendor,
             ):
                 yield _sse(event)
         except Exception as e:

@@ -1,11 +1,13 @@
 """
 Aftermarket Deep Dive pipeline — Gemini 2.5 Flash + Google Search.
 
-Analyses a company's aftermarket service operations across:
-- Service maturity & capabilities
-- Technology gaps vs industry benchmarks
-- Competitive positioning
-- Key investment signals
+Tables:
+  Table 1 — Capabilities: domain × capability × technology (sub-rows), use case, install base
+  Table 2 — Tech Gaps: domain, gap, priority, recommended tech, benchmark
+  Table 3 — Spend by Module: domain, current spend estimate, rationale + math shown
+  Table 4 — Readiness Matrix + TAM: domain, current system, readiness score, TAM
+  Bonus  — Competitive positioning (if competitors provided)
+  Bonus  — Aggregate spend estimates: IT / AI / Cloud / Aftermarket spend
 """
 
 import asyncio
@@ -21,31 +23,62 @@ GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
 
 # ── Output schemas ────────────────────────────────────────────────────────────
 
+# Table 1 — Capabilities (one row per capability × technology pair)
 CAPABILITY_FIELDS = [
-    {"key": "domain",           "label": "Domain"},
-    {"key": "capability",       "label": "Capability"},
-    {"key": "maturity_level",   "label": "Maturity"},   # Leading / Established / Developing / Basic / Gap
-    {"key": "technology_used",  "label": "Technology Used"},
-    {"key": "key_finding",      "label": "Key Finding"},
-    {"key": "source",           "label": "Source"},
+    {"key": "domain",        "label": "Domain"},
+    {"key": "capability",    "label": "Capability"},
+    {"key": "technology",    "label": "Technology"},
+    {"key": "use_case",      "label": "Use Case"},
+    {"key": "install_base",  "label": "Install Base"},
+    {"key": "source",        "label": "Source"},
 ]
 
+# Table 2 — Tech Gaps
 GAP_FIELDS = [
     {"key": "domain",           "label": "Domain"},
     {"key": "gap_description",  "label": "Gap / Opportunity"},
-    {"key": "priority",         "label": "Priority"},   # Critical / High / Medium / Low
+    {"key": "priority",         "label": "Priority"},
     {"key": "recommended_tech", "label": "Recommended Technology"},
     {"key": "benchmark",        "label": "Industry Benchmark"},
     {"key": "source",           "label": "Source"},
 ]
 
+# Table 3 — Spend by Module
+SPEND_MODULE_FIELDS = [
+    {"key": "domain",          "label": "Module / Domain"},
+    {"key": "current_spend",   "label": "Current Spend (Est.)"},
+    {"key": "spend_math",      "label": "Calculation / Rationale"},
+    {"key": "market_benchmark","label": "Market Benchmark"},
+    {"key": "source",          "label": "Source"},
+]
+
+# Table 4 — Readiness Matrix + TAM
+READINESS_FIELDS = [
+    {"key": "domain",                "label": "Module / Domain"},
+    {"key": "current_system",        "label": "Current System"},
+    {"key": "readiness_score",       "label": "Readiness Score"},
+    {"key": "displacement_opp",      "label": "Displacement Opportunity"},
+    {"key": "addressable_tam",       "label": "Addressable TAM"},
+    {"key": "tam_rationale",         "label": "TAM Rationale"},
+    {"key": "source",                "label": "Source"},
+]
+
+# Aggregate Spend — IT / AI / Cloud / Aftermarket
+AGGREGATE_SPEND_FIELDS = [
+    {"key": "spend_type",   "label": "Spend Category"},
+    {"key": "estimate",     "label": "Estimate (USD)"},
+    {"key": "basis",        "label": "Calculation Basis"},
+    {"key": "source",       "label": "Source"},
+]
+
+# Competitive (optional)
 COMPETITOR_FIELDS = [
-    {"key": "competitor",       "label": "Competitor"},
-    {"key": "domain",           "label": "Domain"},
-    {"key": "their_advantage",  "label": "Their Advantage"},
-    {"key": "technology",       "label": "Technology"},
-    {"key": "implication",      "label": "Implication"},
-    {"key": "source",           "label": "Source"},
+    {"key": "competitor",     "label": "Competitor"},
+    {"key": "domain",         "label": "Domain"},
+    {"key": "their_advantage","label": "Their Advantage"},
+    {"key": "technology",     "label": "Technology"},
+    {"key": "implication",    "label": "Implication"},
+    {"key": "source",         "label": "Source"},
 ]
 
 AFTERMARKET_DOMAINS = [
@@ -64,7 +97,9 @@ AFTERMARKET_DOMAINS = [
 ]
 
 
-def _gemini_call_sync(prompt: str, use_search: bool, label: str) -> list[dict] | dict:
+# ── Shared Gemini call ────────────────────────────────────────────────────────
+
+def _gemini_call_sync(prompt: str, use_search: bool, label: str):
     try:
         from google import genai
         from google.genai import types
@@ -97,7 +132,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str) -> list[dict] |
             if is_retry and attempt < MAX_RETRIES:
                 _time.sleep(10 * attempt)
                 continue
-            logger.error(f"Aftermarket Gemini error [{label}]: {e}")
+            logger.error(f"Aftermarket Gemini [{label}]: {e}")
             return []
     else:
         return []
@@ -130,11 +165,10 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str) -> list[dict] |
             return json.loads(text)
     except Exception:
         pass
-
     return []
 
 
-async def _run_async(prompt: str, use_search: bool, label: str, timeout: int = 100) -> list:
+async def _run_async(prompt: str, use_search: bool, label: str, timeout: int = 110) -> list:
     loop = asyncio.get_event_loop()
     future = loop.run_in_executor(None, _gemini_call_sync, prompt, use_search, label)
     elapsed = 0
@@ -147,101 +181,72 @@ async def _run_async(prompt: str, use_search: bool, label: str, timeout: int = 1
     return []
 
 
-async def run_aftermarket_deep_dive(
-    company_name: str,
-    domain: str,
-    industry: str = "",
-    competitors: str = "",
-) -> AsyncGenerator[dict, None]:
-    """
-    Yields: heartbeat | capability_row | gap_row | competitor_row | complete
-    """
-    yield {"type": "heartbeat", "message": f"🔍 Starting Aftermarket Deep Dive for {company_name}…"}
-    await asyncio.sleep(0)
+# ── Table 1: Capability Assessment ───────────────────────────────────────────
 
-    industry_hint = f" ({industry})" if industry else ""
-    comp_hint = f" Key competitors: {competitors}." if competitors else ""
+def _cap_prompt(company_name: str, domain: str, industry: str) -> str:
+    ind = f" ({industry})" if industry else ""
+    return f"""You are an aftermarket service technology analyst with live Google Search.
 
-    # ── Step 1: Capability Assessment ────────────────────────────────────────
-    yield {"type": "heartbeat", "message": "📊 Assessing aftermarket service capabilities…"}
-    await asyncio.sleep(0)
+COMPANY: {company_name}{ind}
+DOMAIN: {domain}
 
-    cap_prompt = f"""You are an aftermarket service analyst with live Google Search.
+Search for the specific technologies and platforms used by {company_name} in "{domain}":
+- "{company_name}" {domain} software technology platform
+- "{company_name}" {domain} system vendor tool 2022 OR 2023 OR 2024 OR 2025
+- "{company_name}" {domain} implementation partner case study
 
-COMPANY: {company_name}{industry_hint} | Website: {domain}
-
-Search for information about {company_name}'s aftermarket service operations:
-- "{company_name}" warranty service operations technology platform
-- "{company_name}" field service management software tool
-- "{company_name}" parts inventory management system
-- "{company_name}" dealer network management platform
-- "{company_name}" telematics connected vehicle IoT service
-- "{company_name}" predictive maintenance AI analytics aftermarket
-- "{company_name}" customer support service portal digital
-- site:businesswire.com OR site:prnewswire.com "{company_name}" service aftermarket
-
-Assess the company's maturity in each aftermarket domain based on what you find.
+For each technology found in this domain, return ONE JSON object per capability × technology pair.
+Each row must describe HOW that technology is used (use case) and ROUGHLY how many users/licenses exist.
 
 Return ONLY a JSON array:
 [
   {{
-    "domain": "<one of the aftermarket domains>",
-    "capability": "<specific capability or function assessed>",
-    "maturity_level": "<Leading | Established | Developing | Basic | Gap>",
-    "technology_used": "<specific technology/platform if found, else 'Unknown'>",
-    "key_finding": "<one sentence: what evidence supports this maturity rating>",
-    "source": "<URL supporting this finding or '-'>"
+    "domain": "{domain}",
+    "capability": "<specific business capability e.g. 'Claim Submission', 'Parts Ordering', 'Work Order Management'>",
+    "technology": "<exact product/vendor name e.g. 'Tavant Warranty', 'SAP S/4HANA', 'Salesforce Service Cloud'>",
+    "use_case": "<one sentence: how this technology is specifically used for this capability>",
+    "install_base": "<estimated users/licenses e.g. '~500 dealer users', '2,000-5,000 technicians', 'Enterprise-wide'>",
+    "source": "<URL to press release, case study, or job posting — or '-'>"
   }}
 ]
 
-Domains to cover: {', '.join(AFTERMARKET_DOMAINS)}
-
-Maturity definitions:
-- Leading: best-in-class, advanced AI/ML, fully digital
-- Established: modern systems, good coverage, some automation
-- Developing: partial implementation, transitioning from legacy
-- Basic: manual or minimal technology
-- Gap: no evidence of capability
+Rules:
+- Multiple rows per domain if multiple technologies found
+- install_base: base estimate on dealer count, employee count, or public data
+- If no technology found for a capability, still list the capability with technology="Unknown/Not Disclosed"
+- Return [] only if domain has zero public evidence
 
 Return ONLY the raw JSON array.
 """
 
-    cap_rows = await _run_async(cap_prompt, True, "capability", timeout=120)
-    for row in (cap_rows if isinstance(cap_rows, list) else []):
-        if isinstance(row, dict):
-            yield {"type": "capability_row", "row": row}
-            await asyncio.sleep(0.04)
 
-    yield {"type": "heartbeat", "message": f"✅ Capabilities assessed: {len(cap_rows) if isinstance(cap_rows, list) else 0} findings"}
-    await asyncio.sleep(0)
+# ── Table 2: Gap Analysis ─────────────────────────────────────────────────────
 
-    # ── Step 2: Gap & Opportunity Analysis ───────────────────────────────────
-    yield {"type": "heartbeat", "message": "🔎 Identifying technology gaps & opportunities…"}
-    await asyncio.sleep(0)
+def _gap_prompt(company_name: str, industry: str, cap_data: list) -> str:
+    ind = f" ({industry})" if industry else ""
+    cap_summary = json.dumps(cap_data[:25] if cap_data else [], indent=1)
+    return f"""You are an aftermarket technology consultant.
 
-    cap_summary = json.dumps(cap_rows[:20] if isinstance(cap_rows, list) else [], indent=1)
-    gap_prompt = f"""You are an aftermarket technology consultant.
+COMPANY: {company_name}{ind}
 
-COMPANY: {company_name}{industry_hint}{comp_hint}
-
-CAPABILITY ASSESSMENT DATA:
+CURRENT CAPABILITIES (from research):
 {cap_summary}
 
-Based on the capability assessment above, identify the top technology gaps and investment
-opportunities for {company_name} in aftermarket service operations.
-Also search for industry benchmarks and best practices:
-- aftermarket service technology trends 2024 2025 manufacturing automotive
-- warranty management AI automation best practices
-- predictive maintenance IoT connected service industry benchmark
+Search for aftermarket technology best practices and gaps:
+- aftermarket technology trends 2024 2025 manufacturing automotive service
+- warranty management AI automation benchmark best practice
+- predictive maintenance IoT connected service industry leader
 
-Return ONLY a JSON array of the top 10-15 gaps/opportunities:
+Identify the top 10-15 technology gaps and investment opportunities.
+
+Return ONLY a JSON array:
 [
   {{
     "domain": "<aftermarket domain>",
     "gap_description": "<clear description of the gap or opportunity>",
     "priority": "<Critical | High | Medium | Low>",
-    "recommended_tech": "<specific technology or vendor that could address this>",
-    "benchmark": "<what industry leaders do in this area>",
+    "recommended_tech": "<specific vendor or product that addresses this>",
+    "benchmark": "<what leading companies do in this area>",
     "source": "<URL or '-'>"
   }}
 ]
@@ -249,41 +254,156 @@ Return ONLY a JSON array of the top 10-15 gaps/opportunities:
 Return ONLY the raw JSON array.
 """
 
-    gap_rows = await _run_async(gap_prompt, True, "gaps", timeout=120)
-    for row in (gap_rows if isinstance(gap_rows, list) else []):
-        if isinstance(row, dict):
-            yield {"type": "gap_row", "row": row}
-            await asyncio.sleep(0.04)
 
-    yield {"type": "heartbeat", "message": f"✅ Gaps identified: {len(gap_rows) if isinstance(gap_rows, list) else 0} findings"}
-    await asyncio.sleep(0)
+# ── Table 3: Spend by Module ──────────────────────────────────────────────────
 
-    # ── Step 3: Competitive Positioning (if competitors provided) ─────────────
-    comp_rows = []
-    if competitors:
-        yield {"type": "heartbeat", "message": f"🏆 Competitive benchmarking vs {competitors}…"}
-        await asyncio.sleep(0)
+def _spend_module_prompt(company_name: str, industry: str, cap_data: list) -> str:
+    ind = f" ({industry})" if industry else ""
+    cap_summary = json.dumps(cap_data[:30] if cap_data else [], indent=1)
+    return f"""You are an enterprise IT financial analyst specialising in aftermarket operations.
 
-        comp_list = [c.strip() for c in competitors.split(",") if c.strip()]
-        comp_searches = "\n".join(f'- "{c}" aftermarket service technology platform capability' for c in comp_list[:4])
+COMPANY: {company_name}{ind}
 
-        comp_prompt = f"""You are a competitive intelligence analyst.
+TECHNOLOGY DATA (from research):
+{cap_summary}
 
-TARGET COMPANY: {company_name}{industry_hint}
-COMPETITORS: {competitors}
+Search for {company_name} financial data:
+- "{company_name}" annual report IT spend technology 2023 OR 2024
+- "{company_name}" revenue operating expenses technology budget
+- "{company_name}" aftermarket service revenue spend
 
-Search for competitor aftermarket service capabilities:
-{comp_searches}
+For each aftermarket module, estimate the current technology spend with clear math shown.
 
-Compare each competitor's aftermarket technology advantages vs {company_name}.
+Return ONLY a JSON array — one row per module:
+[
+  {{
+    "domain": "<aftermarket module name>",
+    "current_spend": "<estimated annual spend e.g. '$15M-$25M' or '$3M-$5M'>",
+    "spend_math": "<show your calculation e.g. '500 dealers × $3,000/user/yr + $2M infrastructure = ~$3.5M' or 'Industry avg 0.3% of $16B revenue = $48M for IT, ~8% allocated to warranty = $3.8M'>",
+    "market_benchmark": "<typical spend range for this module at comparable companies>",
+    "source": "<URL to financial filing, analyst report, or '-'>"
+  }}
+]
+
+IMPORTANT: Always show the calculation logic in spend_math — users need to see the reasoning.
+Return ONLY the raw JSON array.
+"""
+
+
+# ── Aggregate Spend: IT / AI / Cloud / Aftermarket ────────────────────────────
+
+def _aggregate_spend_prompt(company_name: str, industry: str) -> str:
+    ind = f" ({industry})" if industry else ""
+    return f"""You are an enterprise IT financial analyst.
+
+COMPANY: {company_name}{ind}
+
+Search for financial data:
+- "{company_name}" annual report technology IT spend 2023 OR 2024
+- "{company_name}" revenue total operating expenses
+- "{company_name}" cloud spend AWS Azure Google Cloud
+- "{company_name}" AI investment artificial intelligence budget
+- "{company_name}" aftermarket service revenue
+
+Estimate the following four spend categories with calculation basis:
 
 Return ONLY a JSON array:
 [
   {{
-    "competitor": "<competitor name>",
-    "domain": "<aftermarket domain where they have advantage>",
+    "spend_type": "IT Spend",
+    "estimate": "<total annual IT spend e.g. '$450M-$500M'>",
+    "basis": "<e.g. '2.8% of $16.2B revenue (manufacturing industry avg per Gartner)'>",
+    "source": "<URL to annual report or analyst benchmark>"
+  }},
+  {{
+    "spend_type": "AI Spend",
+    "estimate": "<AI/ML specific spend>",
+    "basis": "<e.g. '~8% of total IT spend based on 2024 AI adoption benchmarks'>",
+    "source": "<URL>"
+  }},
+  {{
+    "spend_type": "Cloud Spend",
+    "estimate": "<cloud infrastructure spend>",
+    "basis": "<e.g. '~22% of IT budget (industry avg cloud allocation for manufacturing)'>",
+    "source": "<URL>"
+  }},
+  {{
+    "spend_type": "Aftermarket IT Spend",
+    "estimate": "<IT spend specifically on aftermarket/service operations>",
+    "basis": "<e.g. 'Aftermarket = ~18% of revenue; IT for aftermarket ~1.5% of aftermarket revenue'>",
+    "source": "<URL>"
+  }}
+]
+
+Return ONLY the raw JSON array.
+"""
+
+
+# ── Table 4: Readiness Matrix + TAM ──────────────────────────────────────────
+
+def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str, cap_data: list) -> str:
+    ind = f" ({industry})" if industry else ""
+    vendor_hint = f" Evaluate specifically for {target_vendor}." if target_vendor else ""
+    cap_summary = json.dumps(cap_data[:30] if cap_data else [], indent=1)
+    return f"""You are a technology readiness and market sizing analyst.
+
+COMPANY: {company_name}{ind}{vendor_hint}
+
+CURRENT TECHNOLOGY STACK:
+{cap_summary}
+
+Search for market size data:
+- aftermarket technology market size warranty management software market
+- field service management software market size TAM
+- predictive maintenance IoT market size industrial
+- dealer management system DMS market size automotive
+
+For each aftermarket module, assess technology readiness and estimate addressable TAM.
+
+Return ONLY a JSON array — one row per module:
+[
+  {{
+    "domain": "<aftermarket module name>",
+    "current_system": "<current primary technology/vendor in this domain, or 'Legacy/Unknown'>",
+    "readiness_score": <integer 0-100 where 100 = fully modern, 0 = completely legacy/absent>,
+    "displacement_opp": "<High | Medium | Low | None — opportunity to replace/upgrade current system>",
+    "addressable_tam": "<estimated addressable market for this module e.g. '$12M-$20M'>",
+    "tam_rationale": "<show sizing math e.g. '~200 dealer locations × $60k/yr license = $12M base; with expansion 20% uplift = $14.4M'>",
+    "source": "<URL to market data or '-'>"
+  }}
+]
+
+Readiness score guide:
+  80-100: Modern cloud-native, well-integrated, recent implementation
+  60-79: Established system, some modernisation, minor gaps
+  40-59: Partially modernised, legacy components, integration challenges
+  20-39: Predominantly legacy, known replacement need
+  0-19: No clear system or severely outdated
+
+Return ONLY the raw JSON array.
+"""
+
+
+# ── Competitive (optional) ────────────────────────────────────────────────────
+
+def _comp_prompt(company_name: str, industry: str, competitors: str) -> str:
+    ind = f" ({industry})" if industry else ""
+    comp_list = [c.strip() for c in competitors.split(",") if c.strip()]
+    searches = "\n".join(f'- "{c}" aftermarket service technology platform capability 2023 OR 2024' for c in comp_list[:4])
+    return f"""You are a competitive intelligence analyst.
+
+TARGET: {company_name}{ind}
+COMPETITORS: {competitors}
+
+{searches}
+
+Return ONLY a JSON array:
+[
+  {{
+    "competitor": "<name>",
+    "domain": "<aftermarket domain>",
     "their_advantage": "<what they do better>",
-    "technology": "<technology or platform they use>",
+    "technology": "<technology they use>",
     "implication": "<what this means for {company_name}>",
     "source": "<URL or '-'>"
   }}
@@ -292,18 +412,115 @@ Return ONLY a JSON array:
 Return ONLY the raw JSON array.
 """
 
-        comp_rows = await _run_async(comp_prompt, True, "competitors", timeout=120)
+
+# ── Main pipeline ─────────────────────────────────────────────────────────────
+
+async def run_aftermarket_deep_dive(
+    company_name: str,
+    domain: str,
+    industry: str = "",
+    competitors: str = "",
+    target_vendor: str = "",
+) -> AsyncGenerator[dict, None]:
+    """
+    Yields: heartbeat | capability_row | gap_row | spend_module_row |
+            aggregate_spend_row | readiness_row | competitor_row | complete
+    """
+    yield {"type": "heartbeat", "message": f"🔍 Starting Aftermarket Deep Dive for {company_name}…"}
+    await asyncio.sleep(0)
+
+    # ── Step 1: Capability Assessment (Table 1) — per domain ─────────────────
+    yield {"type": "heartbeat", "message": f"📋 Table 1: Researching capabilities across {len(AFTERMARKET_DOMAINS)} domains…"}
+    await asyncio.sleep(0)
+
+    all_cap_rows = []
+    for i, dom in enumerate(AFTERMARKET_DOMAINS):
+        yield {"type": "heartbeat", "message": f"🔎 [{i+1}/{len(AFTERMARKET_DOMAINS)}] {dom}…"}
+        await asyncio.sleep(0)
+
+        rows = await _run_async(_cap_prompt(company_name, dom, industry), True, f"cap_{dom}", timeout=90)
+        for row in (rows if isinstance(rows, list) else []):
+            if isinstance(row, dict):
+                all_cap_rows.append(row)
+                yield {"type": "capability_row", "row": row}
+                await asyncio.sleep(0.04)
+
+    yield {"type": "heartbeat", "message": f"✅ Table 1 complete — {len(all_cap_rows)} capability × technology rows"}
+    await asyncio.sleep(0)
+
+    # ── Step 2: Aggregate Spend (IT / AI / Cloud / Aftermarket) ──────────────
+    yield {"type": "heartbeat", "message": "💰 Estimating aggregate IT / AI / Cloud / Aftermarket spend…"}
+    await asyncio.sleep(0)
+
+    agg_rows = await _run_async(_aggregate_spend_prompt(company_name, industry), True, "agg_spend", timeout=90)
+    for row in (agg_rows if isinstance(agg_rows, list) else []):
+        if isinstance(row, dict):
+            yield {"type": "aggregate_spend_row", "row": row}
+            await asyncio.sleep(0.04)
+
+    yield {"type": "heartbeat", "message": f"✅ Aggregate spend: {len(agg_rows) if isinstance(agg_rows, list) else 0} categories estimated"}
+    await asyncio.sleep(0)
+
+    # ── Step 3: Spend by Module (Table 3) ────────────────────────────────────
+    yield {"type": "heartbeat", "message": "📊 Table 3: Estimating spend by module with rationale…"}
+    await asyncio.sleep(0)
+
+    spend_rows = await _run_async(_spend_module_prompt(company_name, industry, all_cap_rows), True, "spend_module", timeout=100)
+    for row in (spend_rows if isinstance(spend_rows, list) else []):
+        if isinstance(row, dict):
+            yield {"type": "spend_module_row", "row": row}
+            await asyncio.sleep(0.04)
+
+    yield {"type": "heartbeat", "message": f"✅ Table 3 complete — {len(spend_rows) if isinstance(spend_rows, list) else 0} module spend estimates"}
+    await asyncio.sleep(0)
+
+    # ── Step 4: Readiness Matrix + TAM (Table 4) ─────────────────────────────
+    yield {"type": "heartbeat", "message": "🎯 Table 4: Building readiness matrix and TAM estimates…"}
+    await asyncio.sleep(0)
+
+    readiness_rows = await _run_async(_readiness_tam_prompt(company_name, industry, target_vendor, all_cap_rows), True, "readiness_tam", timeout=100)
+    for row in (readiness_rows if isinstance(readiness_rows, list) else []):
+        if isinstance(row, dict):
+            yield {"type": "readiness_row", "row": row}
+            await asyncio.sleep(0.04)
+
+    yield {"type": "heartbeat", "message": f"✅ Table 4 complete — {len(readiness_rows) if isinstance(readiness_rows, list) else 0} modules assessed"}
+    await asyncio.sleep(0)
+
+    # ── Step 5: Tech Gaps (Table 2) ───────────────────────────────────────────
+    yield {"type": "heartbeat", "message": "🔎 Table 2: Identifying technology gaps…"}
+    await asyncio.sleep(0)
+
+    gap_rows = await _run_async(_gap_prompt(company_name, industry, all_cap_rows), True, "gaps", timeout=100)
+    for row in (gap_rows if isinstance(gap_rows, list) else []):
+        if isinstance(row, dict):
+            yield {"type": "gap_row", "row": row}
+            await asyncio.sleep(0.04)
+
+    yield {"type": "heartbeat", "message": f"✅ Table 2 complete — {len(gap_rows) if isinstance(gap_rows, list) else 0} gaps identified"}
+    await asyncio.sleep(0)
+
+    # ── Step 6: Competitive (optional) ────────────────────────────────────────
+    comp_rows = []
+    if competitors:
+        yield {"type": "heartbeat", "message": f"🏆 Competitive benchmarking vs {competitors}…"}
+        await asyncio.sleep(0)
+
+        comp_rows = await _run_async(_comp_prompt(company_name, industry, competitors), True, "competitive", timeout=100)
         for row in (comp_rows if isinstance(comp_rows, list) else []):
             if isinstance(row, dict):
                 yield {"type": "competitor_row", "row": row}
                 await asyncio.sleep(0.04)
 
-        yield {"type": "heartbeat", "message": f"✅ Competitive analysis: {len(comp_rows) if isinstance(comp_rows, list) else 0} findings"}
+        yield {"type": "heartbeat", "message": f"✅ Competitive: {len(comp_rows) if isinstance(comp_rows, list) else 0} findings"}
         await asyncio.sleep(0)
 
     yield {
         "type": "complete",
-        "capabilities": cap_rows if isinstance(cap_rows, list) else [],
+        "capabilities": all_cap_rows,
         "gaps": gap_rows if isinstance(gap_rows, list) else [],
+        "spend_modules": spend_rows if isinstance(spend_rows, list) else [],
+        "aggregate_spend": agg_rows if isinstance(agg_rows, list) else [],
+        "readiness": readiness_rows if isinstance(readiness_rows, list) else [],
         "competitors": comp_rows if isinstance(comp_rows, list) else [],
     }
