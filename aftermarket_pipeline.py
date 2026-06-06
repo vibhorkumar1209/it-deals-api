@@ -472,69 +472,106 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"🔍 Starting Aftermarket Deep Dive for {company_name}…"}
     await asyncio.sleep(0)
 
-    # ── Step 1: Capability Assessment (Table 1) — per domain ─────────────────
-    yield {"type": "heartbeat", "message": f"📋 Table 1: Researching capabilities across {len(AFTERMARKET_DOMAINS)} domains…"}
+    # ── Run all tables in parallel — fire all Gemini calls simultaneously ─────
+    yield {"type": "heartbeat", "message": f"🚀 Launching all 4 tables in parallel for {company_name}…"}
     await asyncio.sleep(0)
 
+    loop = asyncio.get_event_loop()
+
+    # Fire all calls at once
+    cap_futures   = [loop.run_in_executor(None, _gemini_call_sync, _cap_prompt(company_name, dom, industry), True, f"cap_{dom}") for dom in AFTERMARKET_DOMAINS]
+    agg_future    = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend")
+    deals_future  = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals")
+    spend_future  = loop.run_in_executor(None, _gemini_call_sync, _spend_module_prompt(company_name, industry), True, "spend_module")
+    ready_future  = loop.run_in_executor(None, _gemini_call_sync, _readiness_tam_prompt(company_name, industry, target_vendor), True, "readiness_tam")
+
+    yield {"type": "heartbeat", "message": "🌐 All Gemini searches running in parallel — streaming results as they complete…"}
+    await asyncio.sleep(0)
+
+    # Collect capability rows (stream as each domain completes)
     all_cap_rows = []
-    for i, dom in enumerate(AFTERMARKET_DOMAINS):
-        yield {"type": "heartbeat", "message": f"🔎 [{i+1}/{len(AFTERMARKET_DOMAINS)}] {dom}…"}
-        await asyncio.sleep(0)
+    pending_caps = list(enumerate(cap_futures))
+    elapsed = 0
+    PARALLEL_TIMEOUT = 180  # 3 min total for all parallel calls
 
-        rows = await _run_async(_cap_prompt(company_name, dom, industry), True, f"cap_{dom}", timeout=90)
-        for row in (rows if isinstance(rows, list) else []):
-            if isinstance(row, dict):
-                all_cap_rows.append(row)
-                yield {"type": "capability_row", "row": row}
-                await asyncio.sleep(0.04)
+    # Poll until all futures done or timeout
+    completed_caps = set()
+    while pending_caps and elapsed < PARALLEL_TIMEOUT:
+        try:
+            await asyncio.sleep(5)
+            elapsed += 5
+            newly_done = []
+            for idx, fut in pending_caps:
+                if fut.done():
+                    newly_done.append(idx)
+                    try:
+                        rows = fut.result()
+                        for row in (rows if isinstance(rows, list) else []):
+                            if isinstance(row, dict):
+                                all_cap_rows.append(row)
+                                yield {"type": "capability_row", "row": row}
+                                await asyncio.sleep(0)
+                    except Exception as e:
+                        logger.error(f"Cap domain {idx} error: {e}")
+            pending_caps = [(i, f) for i, f in pending_caps if i not in newly_done]
+            done_count = len(AFTERMARKET_DOMAINS) - len(pending_caps)
+            if pending_caps:
+                yield {"type": "heartbeat", "message": f"🌐 Researching… {done_count}/{len(AFTERMARKET_DOMAINS)} domains done, {len(all_cap_rows)} capabilities found ({elapsed}s)"}
+                await asyncio.sleep(0)
+        except Exception:
+            break
 
-    yield {"type": "heartbeat", "message": f"✅ Table 1 complete — {len(all_cap_rows)} capability × technology rows"}
+    # Cancel any remaining cap futures
+    for _, fut in pending_caps:
+        fut.cancel()
+
+    yield {"type": "heartbeat", "message": f"✅ Capabilities: {len(all_cap_rows)} rows"}
     await asyncio.sleep(0)
 
-    # ── Step 2: Aggregate Spend (IT / AI / Cloud / Aftermarket) ──────────────
-    yield {"type": "heartbeat", "message": "💰 Estimating aggregate IT / AI / Cloud / Aftermarket spend…"}
-    await asyncio.sleep(0)
-
-    agg_rows = await _run_async(_aggregate_spend_prompt(company_name, industry), True, "agg_spend", timeout=90)
+    # Collect aggregate spend
+    try:
+        agg_rows = agg_future.result() if agg_future.done() else await asyncio.wait_for(asyncio.wrap_future(agg_future), timeout=30)
+    except Exception:
+        agg_rows = []
     for row in (agg_rows if isinstance(agg_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "aggregate_spend_row", "row": row}
             await asyncio.sleep(0.04)
-
-    yield {"type": "heartbeat", "message": f"✅ Aggregate spend: {len(agg_rows) if isinstance(agg_rows, list) else 0} categories estimated"}
+    yield {"type": "heartbeat", "message": f"✅ Aggregate spend: {len(agg_rows) if isinstance(agg_rows, list) else 0} categories"}
     await asyncio.sleep(0)
 
-    # ── Step 2b: IT Deals & Partnerships supporting spend rationale ───────────
-    yield {"type": "heartbeat", "message": "🤝 Finding IT deals & partnerships to validate spend estimates…"}
-    await asyncio.sleep(0)
-
-    spend_deal_rows = await _run_async(_spend_deals_prompt(company_name, industry), True, "spend_deals", timeout=90)
+    # Collect IT deals
+    try:
+        spend_deal_rows = deals_future.result() if deals_future.done() else await asyncio.wait_for(asyncio.wrap_future(deals_future), timeout=30)
+    except Exception:
+        spend_deal_rows = []
     for row in (spend_deal_rows if isinstance(spend_deal_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "spend_deal_row", "row": row}
             await asyncio.sleep(0.04)
-
-    yield {"type": "heartbeat", "message": f"✅ IT deals: {len(spend_deal_rows) if isinstance(spend_deal_rows, list) else 0} deals found"}
+    yield {"type": "heartbeat", "message": f"✅ IT deals: {len(spend_deal_rows) if isinstance(spend_deal_rows, list) else 0} deals"}
     await asyncio.sleep(0)
 
-    # ── Step 3: Spend by Module (Table 3) ────────────────────────────────────
-    yield {"type": "heartbeat", "message": "📊 Table 3: Estimating spend by module with rationale…"}
-    await asyncio.sleep(0)
-
-    spend_rows = await _run_async(_spend_module_prompt(company_name, industry), True, "spend_module", timeout=110)
+    # Collect spend by module
+    try:
+        spend_rows = spend_future.result() if spend_future.done() else await asyncio.wait_for(asyncio.wrap_future(spend_future), timeout=30)
+    except Exception:
+        spend_rows = []
     for row in (spend_rows if isinstance(spend_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "spend_module_row", "row": row}
             await asyncio.sleep(0.04)
-
-    yield {"type": "heartbeat", "message": f"✅ Table 3 complete — {len(spend_rows) if isinstance(spend_rows, list) else 0} module spend estimates"}
+    yield {"type": "heartbeat", "message": f"✅ Spend by module: {len(spend_rows) if isinstance(spend_rows, list) else 0} rows"}
     await asyncio.sleep(0)
 
-    # ── Step 4: Readiness Matrix + TAM (Table 4) ─────────────────────────────
-    yield {"type": "heartbeat", "message": "🎯 Table 4: Building readiness matrix and TAM estimates…"}
+    # ── Step 4: Readiness Matrix + TAM (collect from already-fired future) ─────
+    yield {"type": "heartbeat", "message": "🎯 Table 4: Collecting readiness matrix and TAM estimates…"}
     await asyncio.sleep(0)
 
-    readiness_rows = await _run_async(_readiness_tam_prompt(company_name, industry, target_vendor), True, "readiness_tam", timeout=110)
+    try:
+        readiness_rows = ready_future.result() if ready_future.done() else await asyncio.wait_for(asyncio.wrap_future(ready_future), timeout=30)
+    except Exception:
+        readiness_rows = []
     for row in (readiness_rows if isinstance(readiness_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "readiness_row", "row": row}
