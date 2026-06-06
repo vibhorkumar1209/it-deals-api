@@ -643,6 +643,47 @@ async def gcc_intel(req: GCCIntelRequest):
     )
 
 
+# ── Aftermarket Deep Dive ─────────────────────────────────────────────────────
+
+class AftermarketRequest(BaseModel):
+    company_name: str = Field(..., min_length=1)
+    domain: str = Field(default="")
+    industry: str = Field(default="")
+    competitors: str = Field(default="")
+
+
+@app.post("/api/aftermarket-dive")
+async def aftermarket_dive(req: AftermarketRequest):
+    """SSE stream: Aftermarket Deep Dive analysis."""
+    from aftermarket_pipeline import run_aftermarket_deep_dive
+
+    async def _generate():
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        if not os.getenv("GOOGLE_AI_API_KEY"):
+            yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set."})
+            return
+
+        try:
+            async for event in run_aftermarket_deep_dive(
+                company_name=req.company_name,
+                domain=req.domain,
+                industry=req.industry,
+                competitors=req.competitors,
+            ):
+                yield _sse(event)
+        except Exception as e:
+            logger.error(f"Aftermarket dive error: {e}", exc_info=True)
+            yield _sse({"type": "error", "message": str(e)})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=4001, reload=True)
