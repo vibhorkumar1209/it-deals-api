@@ -268,36 +268,35 @@ Return ONLY the raw JSON array.
 
 # ── Table 3: Spend by Module ──────────────────────────────────────────────────
 
-def _spend_module_prompt(company_name: str, industry: str, cap_data: list) -> str:
+def _spend_module_prompt(company_name: str, industry: str) -> str:
     ind = f" ({industry})" if industry else ""
-    cap_summary = json.dumps(cap_data[:30] if cap_data else [], indent=1)
+    domains_list = "\n".join(f"  - {d}" for d in AFTERMARKET_DOMAINS)
     return f"""You are an enterprise IT financial analyst specialising in aftermarket operations.
 
 COMPANY: {company_name}{ind}
 
-TECHNOLOGY DATA (from research):
-{cap_summary}
-
-Search for {company_name} financial data:
+Search for {company_name} financial and technology spend data:
 - "{company_name}" annual report IT spend technology 2023 OR 2024
 - "{company_name}" revenue operating expenses technology budget
-- "{company_name}" aftermarket service revenue spend
+- "{company_name}" aftermarket service revenue technology spend
+- "{company_name}" warranty management system spend cost
+- "{company_name}" dealer management field service technology investment
 
-For each aftermarket module, estimate the current technology spend with clear math shown.
+For EACH of the following aftermarket modules, estimate annual technology spend with explicit math:
+{domains_list}
 
 Return ONLY a JSON array — one row per module:
 [
   {{
-    "domain": "<aftermarket module name>",
-    "current_spend": "<estimated annual spend e.g. '$15M-$25M' or '$3M-$5M'>",
-    "spend_math": "<show your calculation e.g. '500 dealers × $3,000/user/yr + $2M infrastructure = ~$3.5M' or 'Industry avg 0.3% of $16B revenue = $48M for IT, ~8% allocated to warranty = $3.8M'>",
-    "market_benchmark": "<typical spend range for this module at comparable companies>",
-    "source": "<URL to financial filing, analyst report, or '-'>"
+    "domain": "<module name from list above>",
+    "current_spend": "<estimated annual spend e.g. '$15M-$25M'>",
+    "spend_math": "<calculation logic e.g. '500 dealers × $3k/yr + $2M infra = $3.5M' or '0.3% of $16B revenue × 8% aftermarket allocation = $3.8M'>",
+    "market_benchmark": "<typical range for comparable companies>",
+    "source": "<URL to annual report, filing or '-'>"
   }}
 ]
 
-IMPORTANT: Always show the calculation logic in spend_math — users need to see the reasoning.
-Return ONLY the raw JSON array.
+Always show the math in spend_math. Return ONLY the raw JSON array.
 """
 
 
@@ -385,24 +384,24 @@ Return ONLY the raw JSON array.
 
 # ── Table 4: Readiness Matrix + TAM ──────────────────────────────────────────
 
-def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str, cap_data: list) -> str:
+def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str) -> str:
     ind = f" ({industry})" if industry else ""
-    vendor_hint = f" Evaluate specifically for {target_vendor}." if target_vendor else ""
-    cap_summary = json.dumps(cap_data[:30] if cap_data else [], indent=1)
+    vendor_hint = f" Score readiness specifically from {target_vendor}'s perspective." if target_vendor else ""
+    domains_list = "\n".join(f"  - {d}" for d in AFTERMARKET_DOMAINS)
     return f"""You are a technology readiness and market sizing analyst.
 
 COMPANY: {company_name}{ind}{vendor_hint}
 
-CURRENT TECHNOLOGY STACK:
-{cap_summary}
+Search for technology and market size data:
+- "{company_name}" aftermarket technology systems legacy modern platform
+- "{company_name}" warranty field service parts technology readiness
+- aftermarket software market size TAM warranty management field service DMS
+- dealer management system market size manufacturing automotive
 
-Search for market size data:
-- aftermarket technology market size warranty management software market
-- field service management software market size TAM
-- predictive maintenance IoT market size industrial
-- dealer management system DMS market size automotive
+For EACH of the following modules, assess readiness and estimate addressable TAM:
+{domains_list}
 
-For each aftermarket module, assess technology readiness and estimate addressable TAM.
+For each module, assess technology readiness and estimate addressable TAM.
 
 Return ONLY a JSON array — one row per module:
 [
@@ -522,7 +521,7 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": "📊 Table 3: Estimating spend by module with rationale…"}
     await asyncio.sleep(0)
 
-    spend_rows = await _run_async(_spend_module_prompt(company_name, industry, all_cap_rows), True, "spend_module", timeout=100)
+    spend_rows = await _run_async(_spend_module_prompt(company_name, industry), True, "spend_module", timeout=110)
     for row in (spend_rows if isinstance(spend_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "spend_module_row", "row": row}
@@ -535,7 +534,7 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": "🎯 Table 4: Building readiness matrix and TAM estimates…"}
     await asyncio.sleep(0)
 
-    readiness_rows = await _run_async(_readiness_tam_prompt(company_name, industry, target_vendor, all_cap_rows), True, "readiness_tam", timeout=100)
+    readiness_rows = await _run_async(_readiness_tam_prompt(company_name, industry, target_vendor), True, "readiness_tam", timeout=110)
     for row in (readiness_rows if isinstance(readiness_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "readiness_row", "row": row}
@@ -548,7 +547,7 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": "🔎 Table 2: Identifying technology gaps…"}
     await asyncio.sleep(0)
 
-    gap_rows = await _run_async(_gap_prompt(company_name, industry, all_cap_rows), True, "gaps", timeout=100)
+    gap_rows = await _run_async(_gap_prompt(company_name, industry, []), True, "gaps", timeout=100)
     for row in (gap_rows if isinstance(gap_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "gap_row", "row": row}
