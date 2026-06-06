@@ -541,33 +541,44 @@ Return ONLY the raw JSON array.
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
+ALL_SECTIONS = {"capabilities", "agg_spend", "spend_deals", "spend_module", "readiness", "vendor_footprint", "gaps", "competitive"}
+
+
 async def run_aftermarket_deep_dive(
     company_name: str,
     domain: str,
     industry: str = "",
     competitors: str = "",
     target_vendor: str = "",
+    sections_to_run: set | None = None,   # None = all sections
 ) -> AsyncGenerator[dict, None]:
     """
     Yields: heartbeat | capability_row | gap_row | spend_module_row |
             aggregate_spend_row | readiness_row | competitor_row | complete
+
+    sections_to_run: subset of ALL_SECTIONS to regenerate. None = run all.
     """
-    yield {"type": "heartbeat", "message": f"🔍 Starting Aftermarket Deep Dive for {company_name}…"}
+    run = sections_to_run if sections_to_run else ALL_SECTIONS
+    partial = bool(sections_to_run)  # True if only regenerating some sections
+
+    if partial:
+        yield {"type": "heartbeat", "message": f"🔄 Regenerating missing sections for {company_name}: {', '.join(sorted(run))}…"}
+    else:
+        yield {"type": "heartbeat", "message": f"🔍 Starting Aftermarket Deep Dive for {company_name}…"}
     await asyncio.sleep(0)
 
-    # ── Run all tables in parallel — fire all Gemini calls simultaneously ─────
-    yield {"type": "heartbeat", "message": f"🚀 Launching all 4 tables in parallel for {company_name}…"}
+    yield {"type": "heartbeat", "message": f"🚀 Launching {len(run)} section(s) in parallel…"}
     await asyncio.sleep(0)
 
     loop = asyncio.get_event_loop()
 
-    # Fire all calls at once
-    cap_futures    = [loop.run_in_executor(None, _gemini_call_sync, _cap_prompt(company_name, dom, industry), True, f"cap_{dom}") for dom in AFTERMARKET_DOMAINS]
-    agg_future     = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend")
-    deals_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals")
-    spend_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_module_prompt(company_name, industry), True, "spend_module")
-    ready_future   = loop.run_in_executor(None, _gemini_call_sync, _readiness_tam_prompt(company_name, industry, target_vendor), True, "readiness_tam")
-    vendor_future  = loop.run_in_executor(None, _gemini_call_sync, _vendor_footprint_prompt(company_name, target_vendor or "N/A", industry), True, "vendor_footprint") if target_vendor else None
+    # Only fire futures for requested sections
+    cap_futures    = [loop.run_in_executor(None, _gemini_call_sync, _cap_prompt(company_name, dom, industry), True, f"cap_{dom}") for dom in AFTERMARKET_DOMAINS] if "capabilities" in run else []
+    agg_future     = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend") if "agg_spend" in run else None
+    deals_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals") if "spend_deals" in run else None
+    spend_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_module_prompt(company_name, industry), True, "spend_module") if "spend_module" in run else None
+    ready_future   = loop.run_in_executor(None, _gemini_call_sync, _readiness_tam_prompt(company_name, industry, target_vendor), True, "readiness_tam") if "readiness" in run else None
+    vendor_future  = loop.run_in_executor(None, _gemini_call_sync, _vendor_footprint_prompt(company_name, target_vendor, industry), True, "vendor_footprint") if (target_vendor and "vendor_footprint" in run) else None
 
     yield {"type": "heartbeat", "message": "🌐 All Gemini searches running in parallel — streaming results as they complete…"}
     await asyncio.sleep(0)
@@ -669,7 +680,7 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": "🔎 Table 2: Identifying technology gaps…"}
     await asyncio.sleep(0)
 
-    gap_rows = await _run_async(_gap_prompt(company_name, industry, []), True, "gaps", timeout=100)
+    gap_rows = await _run_async(_gap_prompt(company_name, industry, []), True, "gaps", timeout=100) if "gaps" in run else []
     for row in (gap_rows if isinstance(gap_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "gap_row", "row": row}
@@ -680,7 +691,7 @@ async def run_aftermarket_deep_dive(
 
     # ── Step 6: Competitive (optional) ────────────────────────────────────────
     comp_rows = []
-    if competitors:
+    if competitors and "competitive" in run:
         yield {"type": "heartbeat", "message": f"🏆 Competitive benchmarking vs {competitors}…"}
         await asyncio.sleep(0)
 
@@ -695,6 +706,7 @@ async def run_aftermarket_deep_dive(
 
     yield {
         "type": "complete",
+        "sections_ran": list(run),
         "capabilities": all_cap_rows,
         "gaps": gap_rows if isinstance(gap_rows, list) else [],
         "spend_modules": spend_rows if isinstance(spend_rows, list) else [],

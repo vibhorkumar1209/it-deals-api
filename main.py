@@ -653,6 +653,7 @@ class AftermarketRequest(BaseModel):
     industry: str = Field(default="")
     competitors: str = Field(default="")
     target_vendor: str = Field(default="")
+    sections_to_run: list[str] = Field(default_factory=list)  # empty = all sections
 
 
 @app.post("/api/aftermarket-dive")
@@ -669,12 +670,15 @@ async def aftermarket_dive(req: AftermarketRequest):
             return
 
         try:
+            from aftermarket_pipeline import ALL_SECTIONS
+            sections = set(req.sections_to_run) & ALL_SECTIONS if req.sections_to_run else None
             async for event in run_aftermarket_deep_dive(
                 company_name=req.company_name,
                 domain=req.domain,
                 industry=req.industry,
                 competitors=req.competitors,
                 target_vendor=req.target_vendor,
+                sections_to_run=sections,
             ):
                 yield _sse(event)
         except Exception as e:
