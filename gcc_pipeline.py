@@ -39,53 +39,56 @@ GCC_FIELDS = [
 
 
 def _gcc_search_prompt(company_name: str, domain: str, location: str) -> str:
-    loc_hint = f" Focus on {location}." if location else ""
+    loc_filter = f"\nLOCATION FILTER: Only return GCCs in or near: {location}" if location else \
+                 "\nCOVERAGE: Return ALL GCC locations worldwide — do NOT limit to any region."
     return f"""You are a GCC (Global Capability Centre) research analyst with live Google Search.
 
-COMPANY: {company_name}
-TASK: Find ALL Global Capability Centres, Captive Centres, Offshore Development Centres,
-and Technology Hubs operated by {company_name} globally.{loc_hint}
+COMPANY: {company_name} | Website: {domain}
+{loc_filter}
 
-Run these searches:
-- "{company_name}" GCC "Global Capability Centre" location city
+Run ALL of the following searches to ensure complete global coverage:
+- "{company_name}" "Global Capability Centre" location
+- "{company_name}" GCC site:linkedin.com
 - "{company_name}" captive centre offshore development centre
-- "{company_name}" technology hub engineering centre India Poland Germany
-- "{company_name}" GCC headcount employees engineers
-- "{company_name}" GCC CEO head director managing director
-- site:linkedin.com "{company_name}" GCC OR "Global Capability"
-- "{company_name}" GCC technology stack cloud AI projects
+- "{company_name}" engineering centre technology hub India
+- "{company_name}" engineering centre technology hub Poland Germany Romania
+- "{company_name}" engineering centre technology hub Mexico Hungary Czech Republic
+- "{company_name}" engineering centre technology hub China Singapore Philippines
+- "{company_name}" GCC Bengaluru Pune Hyderabad Chennai Mumbai
+- "{company_name}" GCC Warsaw Krakow Budapest Bucharest Prague
+- "{company_name}" technology hub employees headcount engineers
+- "{company_name}" GCC CEO head director managing director executive
+- site:businesswire.com OR site:prnewswire.com "{company_name}" GCC technology centre
 
-For EACH GCC/centre found, extract:
-- Its exact name and location (city + country)
-- Estimated headcount
-- Year established
-- Key technology projects and initiatives
-- Programming languages and frameworks used
-- Cloud platforms and containerisation tools
-- Data and MLOps platforms
-- Top 3 executives (name + title)
+For EACH GCC/centre found, extract ALL of the following in detail:
 
-Return ONLY a JSON array — one object per GCC:
+tech_projects: List SPECIFIC named projects, programmes, and initiatives — not generic categories.
+  Examples of GOOD detail: "Project Phoenix (SAP S/4HANA migration, 2022-2024)",
+  "Connected Truck Platform v2.0 (real-time telematics)", "AI Warranty Fraud Detection (Python, TensorFlow)",
+  "Dealer Portal Modernisation (React, GraphQL)", "Kubernetes migration of 120 microservices"
+  Be specific: include project names, scope, technologies used per project, and year if known.
+
+Return ONLY a JSON array — one object per DISTINCT GCC location:
 [
   {{
     "company_name": "{company_name}",
-    "gcc_name": "<exact name of the GCC or centre e.g. '{company_name} India GCC', '{company_name} Pune Technology Centre'>",
-    "location": "<City, Country e.g. 'Pune, India' or 'Warsaw, Poland'>",
-    "size": "<estimated headcount e.g. '2,000–3,000 engineers' or '500+'>",
-    "established": "<year established e.g. '2018' or '-'>",
-    "tech_projects": "<key technology projects and work e.g. 'Connected vehicle platform, AI warranty analytics, SAP S/4HANA rollout'>",
-    "languages": "<programming languages/frameworks e.g. 'Java, Python, React, Node.js'>",
-    "cloud": "<cloud and container platforms e.g. 'AWS, Azure Kubernetes Service, Docker'>",
-    "data_mlops": "<data/analytics/MLOps tools e.g. 'Databricks, Apache Kafka, MLflow, Snowflake'>",
-    "executives": "<top 3 executives: Name (Title), Name (Title), Name (Title) — search LinkedIn and press releases>",
-    "source": "<URL to LinkedIn page, press release, or news article>"
+    "gcc_name": "<exact centre name e.g. '{company_name} India Technology Centre, Pune'>",
+    "location": "<City, Country>",
+    "size": "<headcount estimate e.g. '2,000–3,000 engineers'>",
+    "established": "<year e.g. '2018'>",
+    "tech_projects": "<SPECIFIC named projects with scope and tech stack per project — minimum 3 projects if found. E.g.: '1) Connected Vehicle Platform: real-time OTA updates using AWS IoT, Go microservices. 2) AI Warranty Analytics: anomaly detection using Python/TensorFlow, reduced fraud by 18%. 3) SAP S/4HANA Global Rollout: finance/logistics modules, 2021-2024'>",
+    "languages": "<e.g. 'Java 17, Python 3.11, TypeScript, Go, Kotlin'>",
+    "cloud": "<e.g. 'AWS (primary), Azure Kubernetes Service, Terraform, Docker, Helm'>",
+    "data_mlops": "<e.g. 'Databricks, Apache Kafka, dbt, MLflow, Snowflake, Airflow'>",
+    "executives": "<Name (Title), Name (Title), Name (Title) — from LinkedIn or press releases>",
+    "source": "<URL>"
   }}
 ]
 
-IMPORTANT:
-- Return one object per DISTINCT GCC location
-- If a company has GCCs in Bengaluru, Pune, Warsaw, and Mexico City — return 4 separate objects
-- Populate every field; use '-' only if genuinely not found after searching
+RULES:
+- One object per distinct city/location
+- tech_projects must be specific and detailed — generic entries like 'cloud projects' are not acceptable
+- Cover ALL global locations unless a location filter is specified
 - Return ONLY the raw JSON array. No prose. No markdown.
 """
 
@@ -213,31 +216,71 @@ async def run_gcc_intelligence(
     yield {"type": "heartbeat", "message": f"🔍 Searching for {company_name} Global Capability Centres worldwide…"}
     await asyncio.sleep(0)
 
-    # Call 1: broad global GCC search
+    # Pass 1: broad global GCC search
     prompt1 = _gcc_search_prompt(company_name, domain, location)
-    yield {"type": "heartbeat", "message": f"🌐 Scanning GCC locations, tech projects & executives…"}
+    yield {"type": "heartbeat", "message": "🌐 Pass 1: Scanning all GCC locations, tech projects & executives…"}
     await asyncio.sleep(0)
 
-    rows1, timed_out = await _run_with_heartbeat(prompt1, company_name, timeout=120)
+    rows1, timed_out1 = await _run_with_heartbeat(prompt1, company_name, timeout=120)
+    yield {"type": "heartbeat", "message": f"✅ Pass 1: {len(rows1)} locations found — running second pass for completeness…"}
+    await asyncio.sleep(0)
 
-    if timed_out:
-        yield {"type": "heartbeat", "message": "⏱ Initial search timed out — trying with focused query…"}
+    # Pass 2: targeted second sweep to catch any missed locations
+    if not location:  # only run second pass in global mode
+        prompt2 = f"""You are a GCC location researcher with live Google Search.
+
+COMPANY: {company_name}
+
+Search specifically for any GCC or technology centre locations NOT commonly listed:
+- "{company_name}" GCC "technology centre" OR "tech hub" 2023 OR 2024 OR 2025
+- "{company_name}" offshore centre Latin America Mexico Brazil Colombia
+- "{company_name}" engineering centre Eastern Europe Portugal Spain
+- "{company_name}" technology hub Southeast Asia Vietnam Malaysia Thailand
+- "{company_name}" new GCC announced opened launched
+
+List any NEW locations not already in this set: {[r.get('location','') for r in rows1][:20]}
+
+Return ONLY a JSON array of NEW GCC locations (same schema):
+[{{
+  "company_name": "{company_name}",
+  "gcc_name": "<name>",
+  "location": "<City, Country>",
+  "size": "<headcount or '-'>",
+  "established": "<year or '-'>",
+  "tech_projects": "<specific projects with tech stack>",
+  "languages": "<languages/frameworks or '-'>",
+  "cloud": "<cloud/containers or '-'>",
+  "data_mlops": "<data/mlops tools or '-'>",
+  "executives": "<executives or '-'>",
+  "source": "<URL or '-'>"
+}}]
+
+Return [] if no new locations found beyond the list above.
+Return ONLY the raw JSON array.
+"""
+        rows2, _ = await _run_with_heartbeat(prompt2, company_name, timeout=100)
+        yield {"type": "heartbeat", "message": f"✅ Pass 2: {len(rows2)} additional locations found"}
         await asyncio.sleep(0)
     else:
-        yield {"type": "heartbeat", "message": f"✅ Found {len(rows1)} GCC locations — enriching executive data…"}
-        await asyncio.sleep(0)
+        rows2 = []
 
+    all_input_rows = rows1 + rows2
     seen = set()
     all_rows = []
-    for row in rows1:
-        key = f"{row.get('location','').lower()}|{row.get('gcc_name','').lower()}"
-        if key in seen:
+    for row in all_input_rows:
+        loc = row.get('location','').lower().strip()
+        name = row.get('gcc_name','').lower().strip()
+        key = f"{loc}|{name}" if name else loc
+        if key in seen or not loc:
             continue
         seen.add(key)
         row["company_name"] = row.get("company_name") or company_name
         all_rows.append(row)
         yield {"type": "gcc_row", "row": row}
         await asyncio.sleep(0.05)
+
+    yield {"type": "heartbeat", "message": f"📍 {len(all_rows)} unique GCC locations identified — enriching executives…"}
+    await asyncio.sleep(0)
 
     # Call 2: executive enrichment pass if we found GCCs
     if all_rows:
