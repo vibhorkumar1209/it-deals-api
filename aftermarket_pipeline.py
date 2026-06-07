@@ -713,7 +713,16 @@ async def run_aftermarket_deep_dive(
     cap_futures    = [loop.run_in_executor(None, _gemini_call_sync, _cap_prompt(company_name, dom, industry, target_vendor), True, f"cap_{dom}") for dom in AFTERMARKET_DOMAINS] if "capabilities" in run else []
     agg_future     = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend") if "agg_spend" in run else None
     deals_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals") if "spend_deals" in run else None
-    # Note: spend_module and readiness are Phase 2 (synthesis after capabilities) — launched after cap collection
+
+    # If spend_module or readiness requested but capabilities not in run,
+    # fire a lightweight search to get enough context for Phase 2 synthesis
+    needs_context = ("spend_module" in run or "readiness" in run) and "capabilities" not in run
+    context_future = loop.run_in_executor(
+        None, _gemini_call_sync,
+        _cap_prompt(company_name, "Warranty Management", industry, target_vendor),
+        True, "cap_context_lite"
+    ) if needs_context else None
+
     spend_future   = None
     ready_future   = None
 
@@ -757,11 +766,29 @@ async def run_aftermarket_deep_dive(
     for _, fut in pending_caps:
         fut.cancel()
 
+    # If we fired a lite context search (partial regen without capabilities), collect it now
+    if context_future and not all_cap_rows:
+        yield {"type": "heartbeat", "message": "🔎 Collecting context for Phase 2 synthesis…"}
+        await asyncio.sleep(0)
+        context_rows = await _collect_future(context_future, "cap_context_lite", timeout=90)
+        all_cap_rows.extend(r for r in (context_rows if isinstance(context_rows, list) else []) if isinstance(r, dict))
+        yield {"type": "heartbeat", "message": f"✅ Context collected: {len(all_cap_rows)} signals for synthesis"}
+        await asyncio.sleep(0)
+
     yield {"type": "heartbeat", "message": f"✅ Capabilities: {len(all_cap_rows)} rows — launching Phase 2 synthesis…"}
     await asyncio.sleep(0)
 
-    # Collect aggregate spend first (needed as context for Phase 2)
-    agg_rows = await _collect_future(agg_future, "agg_spend", timeout=90) if agg_future else []
+    # Collect aggregate spend (needed as context for Phase 2)
+    # If agg_spend not in run, do a quick fetch anyway for Phase 2 context
+    if agg_future:
+        agg_rows = await _collect_future(agg_future, "agg_spend", timeout=90)
+    elif "spend_module" in run or "readiness" in run:
+        # Fetch aggregate spend as context even if not in sections_to_run
+        yield {"type": "heartbeat", "message": "💰 Fetching spend context for Phase 2…"}
+        await asyncio.sleep(0)
+        agg_rows = await _run_async(_aggregate_spend_prompt(company_name, industry), True, "agg_context", timeout=90)
+    else:
+        agg_rows = []
     for row in (agg_rows if isinstance(agg_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "aggregate_spend_row", "row": row}
