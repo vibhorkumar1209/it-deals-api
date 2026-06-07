@@ -789,10 +789,13 @@ async def run_aftermarket_deep_dive(
         agg_rows = await _run_async(_aggregate_spend_prompt(company_name, industry), True, "agg_context", timeout=90)
     else:
         agg_rows = []
-    for row in (agg_rows if isinstance(agg_rows, list) else []):
-        if isinstance(row, dict):
-            yield {"type": "aggregate_spend_row", "row": row}
-            await asyncio.sleep(0.04)
+    # Only emit aggregate_spend_row events if agg_spend is explicitly requested
+    # (otherwise it's just context for Phase 2 — don't add duplicate cards to frontend)
+    if "agg_spend" in run:
+        for row in (agg_rows if isinstance(agg_rows, list) else []):
+            if isinstance(row, dict):
+                yield {"type": "aggregate_spend_row", "row": row}
+                await asyncio.sleep(0.04)
     yield {"type": "heartbeat", "message": f"✅ Aggregate spend: {len(agg_rows) if isinstance(agg_rows, list) else 0} categories — now synthesising spend by module & readiness…"}
     await asyncio.sleep(0)
 
