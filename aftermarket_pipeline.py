@@ -163,9 +163,15 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str):
     try:
         for cand in (response.candidates or []):
             for part in (cand.content.parts or []):
+                # Skip Gemini 2.5 Flash thought/reasoning parts — only take final output
+                if getattr(part, "thought", False):
+                    continue
                 t = getattr(part, "text", None)
                 if t: raw += t
     except Exception:
+        pass
+    # Fallback: response.text excludes thought parts in Google GenAI SDK
+    if not raw:
         try: raw = response.text or ""
         except Exception: pass
 
