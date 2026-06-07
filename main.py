@@ -694,9 +694,14 @@ async def aftermarket_dive(req: AftermarketRequest):
 
 @app.get("/api/debug-aftermarket-section")
 async def debug_aftermarket_section(company: str = "Daimler Truck North America", section: str = "spend_module"):
-    """Debug a specific aftermarket section prompt."""
-    from aftermarket_pipeline import _spend_module_prompt, _readiness_tam_prompt, _gemini_call_sync
+    """Debug a specific aftermarket section — returns rows + raw Gemini response preview."""
+    import re as _re, json as _json
+    from aftermarket_pipeline import _spend_module_prompt, _readiness_tam_prompt
+    from google import genai
+    from google.genai import types
+    import os
 
+    GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
     prompts = {
         "spend_module": _spend_module_prompt(company, ""),
         "readiness": _readiness_tam_prompt(company, "", ""),
@@ -706,18 +711,39 @@ async def debug_aftermarket_section(company: str = "Daimler Truck North America"
         return {"error": f"Unknown section: {section}"}
 
     def _run():
-        result = _gemini_call_sync(prompt, True, section)
-        return result
+        client = genai.Client(api_key=GOOGLE_AI_KEY)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.15,
+                max_output_tokens=8192,
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+            ),
+        )
+        # Collect all parts with metadata
+        parts_info = []
+        raw_no_thoughts = ""
+        raw_all = ""
+        for cand in (response.candidates or []):
+            for part in (cand.content.parts or []):
+                thought = getattr(part, "thought", None)
+                txt = getattr(part, "text", "") or ""
+                parts_info.append({"thought": thought, "text_len": len(txt), "text_preview": txt[:100]})
+                raw_all += txt
+                if not thought:
+                    raw_no_thoughts += txt
+        finish = getattr(response.candidates[0], "finish_reason", None) if response.candidates else None
+        return {
+            "parts": parts_info,
+            "raw_all_preview": raw_all[:500],
+            "raw_no_thoughts_preview": raw_no_thoughts[:500],
+            "finish_reason": str(finish),
+        }
 
     try:
-        rows = await asyncio.wait_for(asyncio.to_thread(_run), timeout=120)
-        return {
-            "company": company,
-            "section": section,
-            "rows_found": len(rows) if isinstance(rows, list) else 0,
-            "preview": rows[:3] if isinstance(rows, list) else rows,
-            "prompt_len": len(prompt),
-        }
+        result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=120)
+        return {"company": company, "section": section, **result}
     except Exception as e:
         return {"error": str(e)}
 
