@@ -305,29 +305,52 @@ Return ONLY the raw JSON array.
 
 # ── Table 3: Spend by Module ──────────────────────────────────────────────────
 
-def _spend_module_prompt(company_name: str, industry: str) -> str:
+def _spend_module_prompt(company_name: str, industry: str, cap_data: list[dict] | None = None, agg_data: list[dict] | None = None) -> str:
     ind = f" ({industry})" if industry else ""
-    return f"""You are an IT financial analyst. Use Google Search to find {company_name}'s{ind} technology spend data.
+    # Phase 2 synthesis — uses capability + aggregate spend data, NO search grounding
+    cap_summary = ""
+    if cap_data:
+        # Group by domain for compact summary
+        from collections import defaultdict
+        by_domain: dict = defaultdict(list)
+        for r in (cap_data or []):
+            by_domain[r.get("domain","")].append(f"{r.get('technology','')} ({r.get('install_base','')})")
+        cap_summary = "\n".join(f"  {d}: {', '.join(tools[:3])}" for d,tools in list(by_domain.items())[:12])
 
-Search: "{company_name}" revenue annual report IT spend technology budget 2023 OR 2024 OR 2025
+    agg_summary = ""
+    if agg_data:
+        agg_summary = "\n".join(f"  {r.get('spend_type')}: {r.get('estimate')} — {r.get('basis','')}" for r in agg_data)
 
-Based on what you find, estimate annual technology spend for each aftermarket service module.
-Use revenue-based benchmarks (e.g. 0.3% of revenue for warranty IT) when specific data unavailable.
+    return f"""You are an IT financial analyst synthesising research findings. No web search needed.
+
+COMPANY: {company_name}{ind}
+
+KNOWN TECHNOLOGY STACK (from research):
+{cap_summary or "  (No capability data available — use industry benchmarks)"}
+
+AGGREGATE IT SPEND CONTEXT:
+{agg_summary or "  (No aggregate data — estimate from industry benchmarks)"}
+
+TASK: For each aftermarket module below, estimate annual technology spend.
+Base calculations on: (a) known technology vendors/products from the tech stack above,
+(b) typical SaaS/license pricing for those specific tools, (c) headcount ratios,
+(d) the aggregate spend context to validate totals.
+
+Example calculation: If Tavant WarrantyXchange is deployed for 500 dealers at ~$5k/dealer/yr = $2.5M + $500k infra.
 
 Return a JSON array. Each object must have exactly these keys:
 [
   {{
     "domain": "Warranty Management",
     "current_spend": "$8M-$15M",
-    "spend_math": "~0.3% of $16B revenue × 15% warranty allocation = ~$7.2M + SI costs",
-    "market_benchmark": "$5M-$20M for Tier-1 OEMs",
-    "source": "URL or industry benchmark"
+    "spend_math": "Tavant WarrantyXchange: 500 dealers × $5k/yr = $2.5M + SAP integration $1M + infra $500k = ~$4M. Add managed services 2×: $8M total",
+    "market_benchmark": "$5M-$20M for Tier-1 OEMs"
   }}
 ]
 
-Cover these modules: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation.
+Modules: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation.
 
-IMPORTANT: Return ONLY the JSON array starting with [ and ending with ]. No prose before or after.
+IMPORTANT: Return ONLY the JSON array starting with [. No prose, no source field needed.
 """
 
 
@@ -415,35 +438,70 @@ Return ONLY the raw JSON array.
 
 # ── Table 4: Readiness Matrix + TAM ──────────────────────────────────────────
 
-def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str) -> str:
+def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str, cap_data: list[dict] | None = None, agg_data: list[dict] | None = None) -> str:
     ind = f" ({industry})" if industry else ""
-    vendor_hint = f" Assess from {target_vendor}'s go-to-market perspective." if target_vendor else ""
-    return f"""You are a technology readiness analyst.{vendor_hint} Use Google Search to research {company_name}'s{ind} aftermarket technology systems.
+    vendor_hint = f" Evaluate from {target_vendor}'s go-to-market perspective." if target_vendor else ""
+    # Phase 2 synthesis — uses capability data as signal intelligence, NO search grounding
+    from collections import defaultdict
+    by_domain: dict = defaultdict(list)
+    for r in (cap_data or []):
+        tech = r.get("technology","")
+        cap = r.get("capability","")
+        install = r.get("install_base","")
+        if tech:
+            by_domain[r.get("domain","")].append(f"{tech} [{cap}] ({install})")
 
-Search: "{company_name}" aftermarket warranty field service dealer technology system platform legacy modern 2023 OR 2024 OR 2025
-Also search: aftermarket software market size TAM warranty management field service DMS
+    signal_intelligence = "\n".join(
+        f"  {d}:\n    " + "\n    ".join(tools[:4])
+        for d, tools in list(by_domain.items())[:12]
+    ) or "  (No capability data — score based on industry benchmarks)"
 
-For each aftermarket module, assess {company_name}'s current technology readiness and estimate addressable market.
+    spend_context = ""
+    if agg_data:
+        spend_context = "Aggregate spend context:\n" + "\n".join(f"  {r.get('spend_type')}: {r.get('estimate')}" for r in agg_data)
+
+    return f"""You are a readiness and TAM analyst synthesising signal intelligence.{vendor_hint} No web search needed.
+
+COMPANY: {company_name}{ind}
+
+SIGNAL INTELLIGENCE (from capability research):
+{signal_intelligence}
+
+{spend_context}
+
+TASK: Using the signal intelligence above, score readiness and estimate addressable TAM for each module.
+
+Readiness Score (0-100) based on signals:
+  90-100: Modern cloud-native, AI-enabled, recent deployment evidence
+  70-89: Established modern system, well-integrated
+  50-69: Partial modernisation, some legacy, gaps visible
+  30-49: Predominantly legacy, known replacement need
+  10-29: Outdated/absent, no evidence of investment
+  0-9: No system detected
+
+Displacement Opportunity:
+  High: Legacy/absent system + active budget signals → prime replacement target
+  Medium: Modern but not best-in-class → upgrade/expansion opportunity
+  Low: Recent investment or best-of-breed incumbent → low near-term opportunity
+  None: Very modern + strong incumbent → no realistic opportunity
+
+TAM calculation: base on install_base signals × market pricing × {company_name}'s scale.
 
 Return a JSON array. Each object must have exactly these keys:
 [
   {{
     "domain": "Warranty Management",
-    "current_system": "SAP Warranty / Tavant WarrantyXchange",
-    "readiness_score": 65,
+    "current_system": "Tavant WarrantyXchange (Active), SAP legacy (partial)",
+    "readiness_score": 72,
     "displacement_opp": "Medium",
-    "addressable_tam": "$15M-$25M",
-    "tam_rationale": "200 dealer locations × $75k/yr + cloud platform = $15M base",
-    "source": "URL or '-'"
+    "addressable_tam": "$12M-$18M",
+    "tam_rationale": "500 dealer users × $24k/yr SaaS = $12M base; expansion to FSM integration adds $6M"
   }}
 ]
 
-Cover these modules: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation.
+Modules: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation.
 
-Readiness score: 80-100=modern cloud-native, 60-79=established, 40-59=partial, 20-39=legacy, 0-19=absent.
-Displacement: High=clear replacement need, Medium=upgrade opportunity, Low=entrenched, None=no opportunity.
-
-IMPORTANT: Return ONLY the JSON array starting with [ and ending with ]. No prose before or after.
+IMPORTANT: Return ONLY the JSON array starting with [. No prose, no source field needed.
 """
 
 
@@ -569,15 +627,15 @@ async def run_aftermarket_deep_dive(
 
     loop = asyncio.get_event_loop()
 
-    # Only fire futures for requested sections
+    # Phase 1: Fire search-grounded calls in parallel (capabilities + aggregate spend + IT deals)
     cap_futures    = [loop.run_in_executor(None, _gemini_call_sync, _cap_prompt(company_name, dom, industry, target_vendor), True, f"cap_{dom}") for dom in AFTERMARKET_DOMAINS] if "capabilities" in run else []
     agg_future     = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend") if "agg_spend" in run else None
     deals_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals") if "spend_deals" in run else None
-    spend_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_module_prompt(company_name, industry), True, "spend_module") if "spend_module" in run else None
-    ready_future   = loop.run_in_executor(None, _gemini_call_sync, _readiness_tam_prompt(company_name, industry, target_vendor), True, "readiness_tam") if "readiness" in run else None
-    # Vendor footprint is now part of capabilities (not separate section)
+    # Note: spend_module and readiness are Phase 2 (synthesis after capabilities) — launched after cap collection
+    spend_future   = None
+    ready_future   = None
 
-    yield {"type": "heartbeat", "message": "🌐 All Gemini searches running in parallel — streaming results as they complete…"}
+    yield {"type": "heartbeat", "message": "🌐 Phase 1: Researching capabilities & tech spend in parallel…"}
     await asyncio.sleep(0)
 
     # Collect capability rows (stream as each domain completes)
@@ -617,19 +675,33 @@ async def run_aftermarket_deep_dive(
     for _, fut in pending_caps:
         fut.cancel()
 
-    yield {"type": "heartbeat", "message": f"✅ Capabilities: {len(all_cap_rows)} rows"}
+    yield {"type": "heartbeat", "message": f"✅ Capabilities: {len(all_cap_rows)} rows — launching Phase 2 synthesis…"}
     await asyncio.sleep(0)
 
-    # Collect aggregate spend (use shield so the future keeps running if it needs more time)
+    # Collect aggregate spend first (needed as context for Phase 2)
     agg_rows = await _collect_future(agg_future, "agg_spend", timeout=90) if agg_future else []
     for row in (agg_rows if isinstance(agg_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "aggregate_spend_row", "row": row}
             await asyncio.sleep(0.04)
-    yield {"type": "heartbeat", "message": f"✅ Aggregate spend: {len(agg_rows) if isinstance(agg_rows, list) else 0} categories"}
+    yield {"type": "heartbeat", "message": f"✅ Aggregate spend: {len(agg_rows) if isinstance(agg_rows, list) else 0} categories — now synthesising spend by module & readiness…"}
     await asyncio.sleep(0)
 
-    # Collect IT deals
+    # Phase 2: Launch spend_module + readiness synthesis using cap + agg data (NO search grounding)
+    if "spend_module" in run:
+        spend_future = loop.run_in_executor(
+            None, _gemini_call_sync,
+            _spend_module_prompt(company_name, industry, all_cap_rows, agg_rows if isinstance(agg_rows, list) else []),
+            False, "spend_module"
+        )
+    if "readiness" in run:
+        ready_future = loop.run_in_executor(
+            None, _gemini_call_sync,
+            _readiness_tam_prompt(company_name, industry, target_vendor, all_cap_rows, agg_rows if isinstance(agg_rows, list) else []),
+            False, "readiness_tam"
+        )
+
+    # Collect IT deals in parallel while Phase 2 synthesises
     spend_deal_rows = await _collect_future(deals_future, "spend_deals", timeout=90) if deals_future else []
     for row in (spend_deal_rows if isinstance(spend_deal_rows, list) else []):
         if isinstance(row, dict):
@@ -638,7 +710,7 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"✅ IT deals: {len(spend_deal_rows) if isinstance(spend_deal_rows, list) else 0} deals"}
     await asyncio.sleep(0)
 
-    # Collect spend by module
+    # Collect spend by module (Phase 2 synthesis result)
     spend_rows = await _collect_future(spend_future, "spend_module", timeout=90) if spend_future else []
     for row in (spend_rows if isinstance(spend_rows, list) else []):
         if isinstance(row, dict):
