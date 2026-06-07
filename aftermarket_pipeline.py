@@ -135,7 +135,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
     if use_search:
         config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
 
-    MAX_RETRIES = 3
+    MAX_RETRIES = 5
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             client = genai.Client(api_key=GOOGLE_AI_KEY)
@@ -148,11 +148,13 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
         except Exception as e:
             err = str(e)
             is_quota = "RESOURCE_EXHAUSTED" in err or "free_tier" in err
-            is_retry = not is_quota and any(x in err for x in ("503", "UNAVAILABLE", "overloaded", "timeout"))
+            is_retry = not is_quota and any(x in err for x in ("503", "UNAVAILABLE", "overloaded", "timeout", "429"))
             if is_quota:
                 raise RuntimeError("Gemini quota exhausted — upgrade to paid API plan.") from e
             if is_retry and attempt < MAX_RETRIES:
-                _time.sleep(10 * attempt)
+                wait = min(15 * attempt, 60)  # 15s, 30s, 45s, 60s
+                logger.warning(f"Gemini [{label}] 503/retry {attempt}/{MAX_RETRIES}, sleeping {wait}s")
+                _time.sleep(wait)
                 continue
             logger.error(f"Aftermarket Gemini [{label}]: {e}")
             return []
