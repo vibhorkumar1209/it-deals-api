@@ -121,7 +121,7 @@ AFTERMARKET_DOMAINS = [
 
 # ── Shared Gemini call ────────────────────────────────────────────────────────
 
-def _gemini_call_sync(prompt: str, use_search: bool, label: str):
+def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_tokens: int = 16384):
     try:
         from google import genai
         from google.genai import types
@@ -131,7 +131,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str):
     if not GOOGLE_AI_KEY:
         return []
 
-    config_kwargs = dict(temperature=0.15, max_output_tokens=8192)
+    config_kwargs = dict(temperature=0.15, max_output_tokens=max_output_tokens)
     if use_search:
         config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
 
@@ -159,53 +159,85 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str):
     else:
         return []
 
-    raw = ""
+    # Collect non-thought text parts. Gemini 2.5 Flash may return multiple parts
+    # (e.g. two identical-start parts when search grounding is active). Try each
+    # part individually so we don't concatenate two separate JSON arrays into one
+    # invalid blob. Return on the first part that parses successfully.
+    text_parts = []
     try:
         for cand in (response.candidates or []):
             for part in (cand.content.parts or []):
-                # Skip Gemini 2.5 Flash thought/reasoning parts — only take final output
                 if getattr(part, "thought", False):
-                    continue
+                    continue  # skip internal reasoning
                 t = getattr(part, "text", None)
-                if t: raw += t
+                if t:
+                    text_parts.append(t)
     except Exception:
         pass
-    # Fallback: response.text excludes thought parts in Google GenAI SDK
-    if not raw:
-        try: raw = response.text or ""
-        except Exception: pass
 
-    if not raw:
+    # Fallback: response.text excludes thought parts in Google GenAI SDK
+    if not text_parts:
+        try:
+            t = response.text
+            if t:
+                text_parts = [t]
+        except Exception:
+            pass
+
+    if not text_parts:
+        logger.warning(f"_gemini_call_sync [{label}]: empty response from Gemini")
         return []
 
-    try:
-        clean = re.sub(r"```(?:json)?\s*", "", raw.strip())
-        clean = re.sub(r"```\s*$", "", clean, flags=re.MULTILINE).strip()
-        parsed = json.loads(clean)
-        return parsed
-    except Exception:
-        pass
+    def _try_parse(raw: str) -> list | None:
+        """Try multiple strategies to extract a JSON array from raw text."""
+        try:
+            clean = re.sub(r"```(?:json)?\s*", "", raw.strip())
+            clean = re.sub(r"```\s*$", "", clean, flags=re.MULTILINE).strip()
+            parsed = json.loads(clean)
+            if isinstance(parsed, list):
+                return parsed
+            if isinstance(parsed, dict):
+                return [parsed]
+        except Exception:
+            pass
+        try:
+            m = re.search(r"\[.*\]", raw, re.DOTALL)
+            if m:
+                text = re.sub(r",\s*([\]}])", r"\1", m.group(0))
+                result = json.loads(text)
+                if isinstance(result, list):
+                    return result
+        except Exception:
+            pass
+        try:
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            if m:
+                text = re.sub(r",\s*([\]}])", r"\1", m.group(0))
+                obj = json.loads(text)
+                if isinstance(obj, dict):
+                    return [obj]
+        except Exception:
+            pass
+        return None
 
-    try:
-        m = re.search(r"\[.*\]", raw, re.DOTALL)
-        if m:
-            text = re.sub(r",\s*([\]}])", r"\1", m.group(0))
-            return json.loads(text)
-    except Exception:
-        pass
+    # Try each part independently first (avoids concatenation of two full arrays)
+    best: list | None = None
+    for part_text in text_parts:
+        result = _try_parse(part_text)
+        if result:
+            if best is None or len(result) > len(best):
+                best = result  # keep the part with the most rows
 
-    # Last resort: find outermost { } object and wrap in list
-    try:
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if m:
-            text = re.sub(r",\s*([\]}])", r"\1", m.group(0))
-            obj = json.loads(text)
-            if isinstance(obj, dict):
-                return [obj]
-    except Exception:
-        pass
+    if best is not None:
+        return best
 
-    logger.warning(f"_gemini_call_sync: no JSON found in response. Preview: {raw[:300]}")
+    # Last resort: concatenate all parts and try again
+    combined = "".join(text_parts)
+    result = _try_parse(combined)
+    if result:
+        return result
+
+    logger.warning(f"_gemini_call_sync [{label}]: no JSON found. Parts={len(text_parts)}, preview: {text_parts[0][:200] if text_parts else ''}")
     return []
 
 
@@ -783,11 +815,13 @@ async def run_aftermarket_deep_dive(
         )
     if "readiness" in run:
         # Readiness needs search grounding — signal intelligence (hiring, RFPs, exec agenda)
-        # requires live web data that Gemini can't synthesise without search
+        # requires live web data. Uses 32768 output tokens because 9 modules × nested
+        # signal arrays easily exceeds the 8192 default.
         ready_future = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_tam_prompt(company_name, industry, target_vendor, all_cap_rows, agg_rows if isinstance(agg_rows, list) else []),
-            True, "readiness_tam"   # search grounded
+            True, "readiness_tam",
+            32768,  # max_output_tokens — readiness is the largest response
         )
 
     # Collect IT deals in parallel while Phase 2 synthesises
