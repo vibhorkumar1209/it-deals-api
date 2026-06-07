@@ -474,117 +474,36 @@ READINESS_FIELDS = [
 
 def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str, cap_data: list[dict] | None = None, agg_data: list[dict] | None = None) -> str:
     ind = f" ({industry})" if industry else ""
-    vendor = target_vendor or "the target vendor"
-    # Build signal intelligence from capability data
+    vendor = target_vendor or "the vendor"
     from collections import defaultdict
     by_domain: dict = defaultdict(list)
     for r in (cap_data or []):
         tech = r.get("technology","")
-        cap  = r.get("capability","")
-        inst = r.get("install_base","")
         if tech and tech not in ("Unknown/Not Disclosed", "-"):
-            by_domain[r.get("domain","")].append(f"{tech} for {cap} ({inst})")
-    cap_intel = "\n".join(f"  {d}: {'; '.join(tools[:3])}" for d,tools in list(by_domain.items())[:12]) or "  (minimal capability data)"
+            by_domain[r.get("domain","")].append(tech)
+    cap_intel = "; ".join(f"{d}: {', '.join(ts[:2])}" for d,ts in list(by_domain.items())[:8]) or "limited data"
+    spend_ref = " | ".join(f"{r.get('spend_type')}: {r.get('estimate','?')}" for r in (agg_data or [])[:4])
 
-    spend_intel = ""
-    if agg_data:
-        spend_intel = "Aggregate spend: " + " | ".join(f"{r.get('spend_type')}: {r.get('estimate','?')}" for r in agg_data)
+    return f"""You are a vendor readiness analyst with Google Search access.
 
-    return f"""You are a Signal Intelligence analyst building a Vendor Readiness Matrix. No web search needed.
+COMPANY: {company_name}{ind} | VENDOR: {vendor}
+KNOWN TECH: {cap_intel}
+SPEND: {spend_ref}
 
-COMPANY: {company_name}{ind}
-TARGET VENDOR BEING EVALUATED: {vendor}
+Search for: "{company_name}" {vendor} warranty service technology signals hiring RFP 2023 OR 2024 OR 2025
 
-TECH STACK (from capability research):
-{cap_intel}
+For each module, score 5 signal categories 0-100, find 2 supporting signals with URLs each.
+Weights: Existing Rel 30%, IT Signals 15%, Company Signals 20%, Exec Signals 15%, Budget Signals 20%.
+weighted_readiness = scores × weights summed.
+vendor_adjusted_tam = total_domain_spend × (weighted_readiness/100).
 
-{spend_intel}
+Return JSON array:
+[{{"domain":"Warranty Management","current_system":"<tech>","existing_rel_score":<n>,"existing_rel_signals":[{{"text":"<s>","source":"<url>"}},{{"text":"<s>","source":"<url>"}}],"it_signals_score":<n>,"it_signals_signals":[{{"text":"<s>","source":"<url>"}},{{"text":"<s>","source":"<url>"}}],"company_signals_score":<n>,"company_signals_signals":[{{"text":"<s>","source":"<url>"}},{{"text":"<s>","source":"<url>"}}],"exec_signals_score":<n>,"exec_signals_signals":[{{"text":"<s>","source":"<url>"}},{{"text":"<s>","source":"<url>"}}],"budget_signals_score":<n>,"budget_signals_signals":[{{"text":"<s>","source":"<url>"}},{{"text":"<s>","source":"<url>"}}],"weighted_readiness":<n>,"displacement_opp":"<High|Medium|Low|None>","total_domain_spend":"<range>","vendor_adjusted_tam":"<range>","tam_rationale":"<math>"}}]
 
-TASK: For each aftermarket module, produce a FULL SIGNAL INTELLIGENCE scorecard for {vendor}.
-Score each of the 5 signal categories 0-100, identify top 3 signals per category, then calculate:
-  Weighted Readiness Score = (existing_rel × 0.30) + (it_signals × 0.15) + (company_signals × 0.20) + (exec_signals × 0.15) + (budget_signals × 0.20)
-  Vendor-Adjusted TAM = Total Domain Spend Range × (Weighted Readiness / 100)
-
-Signal category scoring guide:
-  existing_relationship (30%): {vendor} deployment at {company_name}, partner network, contract history, tech ecosystem fit
-    90-100: {vendor} already deployed and active
-    60-89: {vendor} in ecosystem (partner/competitor present), strong fit signals
-    30-59: Adjacent technology, indirect relationship
-    0-29: No known relationship
-
-  it_signals (15%): hiring trends, AI/cloud announcements, tech stack investments, CIO/CTO agenda
-    80-100: Active modernisation aligned with {vendor}'s product
-    50-79: Some tech investment signals
-    0-49: No or legacy-focused signals
-
-  company_signals (20%): servitization push, warranty cost pressure, supply chain issues, regulatory pressure, M&A activity
-    80-100: Strong operational pressure driving technology investment in this domain
-    50-79: Moderate business pressure
-    0-49: Stable, low urgency
-
-  executive_signals (15%): CIO/CTO agenda, leadership hires, org changes, public thought leadership, strategic disclosures
-    80-100: Executive mandate for transformation in this area
-    50-79: Some leadership attention
-    0-49: No clear executive signal
-
-  budget_signals (20%): RFPs, consulting spend, transformation program scope, capital allocation, active partnerships
-    80-100: Confirmed budget allocation or active RFP
-    50-79: Budget signals from transformation programs
-    0-49: No specific budget signal
-
-Each signal in the *_signals arrays must have: text (what the signal is) AND source (URL evidence).
-Search for press releases, LinkedIn posts, annual reports, job postings to find real URLs for each signal.
-
-Return a JSON array — one object per module with ALL these exact keys:
-[
-  {{
-    "domain": "Warranty Management",
-    "current_system": "<current technology at {company_name} from tech stack>",
-    "existing_rel_score": <0-100>,
-    "existing_rel_signals": [
-      {{"text": "<specific signal e.g. 'Tavant WarrantyXchange deployed at 500 dealer locations'>", "source": "<direct URL or '-'>"}},
-      {{"text": "<signal2>", "source": "<URL>"}},
-      {{"text": "<signal3>", "source": "<URL>"}}
-    ],
-    "it_signals_score": <0-100>,
-    "it_signals_signals": [
-      {{"text": "<e.g. 'Cloud migration to Azure announced Q2 2024'>", "source": "<URL>"}},
-      {{"text": "<signal2>", "source": "<URL>"}},
-      {{"text": "<signal3>", "source": "<URL>"}}
-    ],
-    "company_signals_score": <0-100>,
-    "company_signals_signals": [
-      {{"text": "<e.g. 'Warranty cost reduction program launched 2023'>", "source": "<URL>"}},
-      {{"text": "<signal2>", "source": "<URL>"}},
-      {{"text": "<signal3>", "source": "<URL>"}}
-    ],
-    "exec_signals_score": <0-100>,
-    "exec_signals_signals": [
-      {{"text": "<e.g. 'CTO announced digital transformation roadmap'>", "source": "<URL>"}},
-      {{"text": "<signal2>", "source": "<URL>"}},
-      {{"text": "<signal3>", "source": "<URL>"}}
-    ],
-    "budget_signals_score": <0-100>,
-    "budget_signals_signals": [
-      {{"text": "<e.g. 'RFP issued for warranty management platform Q1 2025'>", "source": "<URL>"}},
-      {{"text": "<signal2>", "source": "<URL>"}},
-      {{"text": "<signal3>", "source": "<URL>"}}
-    ],
-    "weighted_readiness": <calculated: existing_rel×0.30 + it×0.15 + company×0.20 + exec×0.15 + budget×0.20>,
-    "displacement_opp": "<High | Medium | Low | None>",
-    "total_domain_spend": "<from spend data e.g. '$10M-$20M'>",
-    "vendor_adjusted_tam": "<total_spend × weighted_readiness/100 e.g. '$7.2M-$14.4M'>",
-    "tam_rationale": "<show math: weighted_readiness/100 × spend range = TAM>"
-  }}
-]
-
-IMPORTANT: For every signal, provide a real source URL (press release, LinkedIn, annual report, job posting).
-Use '-' only if genuinely no public source exists after searching.
-
-Modules: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation.
-
-IMPORTANT: Return ONLY the JSON array starting with [. No prose.
+Modules: Warranty Management, Service & Repair, Parts & Inventory, Field Service, Dealer Network, Telematics, Predictive Maintenance, Analytics, AI & Automation.
+Return ONLY the JSON array starting with [.
 """
+
 
 
 # ── Vendor Footprint (optional) ──────────────────────────────────────────────
