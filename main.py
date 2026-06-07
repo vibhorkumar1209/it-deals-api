@@ -712,12 +712,13 @@ async def debug_aftermarket_section(company: str = "Daimler Truck North America"
 
     def _run():
         client = genai.Client(api_key=GOOGLE_AI_KEY)
+        max_tok = 32768 if section == "readiness" else 16384
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.15,
-                max_output_tokens=8192,
+                max_output_tokens=max_tok,
                 tools=[types.Tool(google_search=types.GoogleSearch())],
             ),
         )
