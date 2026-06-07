@@ -261,8 +261,10 @@ Return ONLY a JSON array:
 Rules:
 - Multiple rows per domain if multiple technologies found
 - install_base: base estimate on dealer count, employee count, or public data
-- If no technology found for a capability, still list the capability with technology="Unknown/Not Disclosed"
-- Return [] only if domain has zero public evidence
+- Only include a technology row if there is ACTUAL evidence that {company_name} uses it for this domain
+- If the target vendor search returns no evidence of deployment at {company_name}, do NOT add a row for it
+- Do NOT add rows saying "vendor offers products generally" or "no specific deployment found"
+- Return [] if no confirmed technology deployments found in this domain
 
 Return ONLY the raw JSON array.
 """
@@ -438,70 +440,124 @@ Return ONLY the raw JSON array.
 
 # ── Table 4: Readiness Matrix + TAM ──────────────────────────────────────────
 
+SIGNAL_WEIGHTS = {
+    "existing_relationship": 0.30,
+    "it_signals": 0.15,
+    "company_signals": 0.20,
+    "executive_signals": 0.15,
+    "budget_signals": 0.20,
+}
+
+READINESS_FIELDS = [
+    {"key": "domain",               "label": "Module"},
+    {"key": "current_system",       "label": "Current System"},
+    # Signal scores (0-100)
+    {"key": "existing_rel_score",   "label": "Existing Rel. (30%)"},
+    {"key": "it_signals_score",     "label": "IT Signals (15%)"},
+    {"key": "company_signals_score","label": "Company Signals (20%)"},
+    {"key": "exec_signals_score",   "label": "Exec Signals (15%)"},
+    {"key": "budget_signals_score", "label": "Budget Signals (20%)"},
+    # Top 3 signals per category
+    {"key": "existing_rel_top",     "label": "Existing Rel. Evidence"},
+    {"key": "it_signals_top",       "label": "IT Signal Evidence"},
+    {"key": "company_signals_top",  "label": "Company Signal Evidence"},
+    {"key": "exec_signals_top",     "label": "Exec Signal Evidence"},
+    {"key": "budget_signals_top",   "label": "Budget Signal Evidence"},
+    # Calculated outputs
+    {"key": "weighted_readiness",   "label": "Weighted Readiness Score"},
+    {"key": "displacement_opp",     "label": "Displacement Opportunity"},
+    {"key": "total_domain_spend",   "label": "Total Domain Spend"},
+    {"key": "vendor_adjusted_tam",  "label": "Vendor-Adjusted TAM"},
+    {"key": "tam_rationale",        "label": "TAM Rationale"},
+]
+
+
 def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str, cap_data: list[dict] | None = None, agg_data: list[dict] | None = None) -> str:
     ind = f" ({industry})" if industry else ""
-    vendor_hint = f" Evaluate from {target_vendor}'s go-to-market perspective." if target_vendor else ""
-    # Phase 2 synthesis — uses capability data as signal intelligence, NO search grounding
+    vendor = target_vendor or "the target vendor"
+    # Build signal intelligence from capability data
     from collections import defaultdict
     by_domain: dict = defaultdict(list)
     for r in (cap_data or []):
         tech = r.get("technology","")
-        cap = r.get("capability","")
-        install = r.get("install_base","")
-        if tech:
-            by_domain[r.get("domain","")].append(f"{tech} [{cap}] ({install})")
+        cap  = r.get("capability","")
+        inst = r.get("install_base","")
+        if tech and tech not in ("Unknown/Not Disclosed", "-"):
+            by_domain[r.get("domain","")].append(f"{tech} for {cap} ({inst})")
+    cap_intel = "\n".join(f"  {d}: {'; '.join(tools[:3])}" for d,tools in list(by_domain.items())[:12]) or "  (minimal capability data)"
 
-    signal_intelligence = "\n".join(
-        f"  {d}:\n    " + "\n    ".join(tools[:4])
-        for d, tools in list(by_domain.items())[:12]
-    ) or "  (No capability data — score based on industry benchmarks)"
-
-    spend_context = ""
+    spend_intel = ""
     if agg_data:
-        spend_context = "Aggregate spend context:\n" + "\n".join(f"  {r.get('spend_type')}: {r.get('estimate')}" for r in agg_data)
+        spend_intel = "Aggregate spend: " + " | ".join(f"{r.get('spend_type')}: {r.get('estimate','?')}" for r in agg_data)
 
-    return f"""You are a readiness and TAM analyst synthesising signal intelligence.{vendor_hint} No web search needed.
+    return f"""You are a Signal Intelligence analyst building a Vendor Readiness Matrix. No web search needed.
 
 COMPANY: {company_name}{ind}
+TARGET VENDOR BEING EVALUATED: {vendor}
 
-SIGNAL INTELLIGENCE (from capability research):
-{signal_intelligence}
+TECH STACK (from capability research):
+{cap_intel}
 
-{spend_context}
+{spend_intel}
 
-TASK: Using the signal intelligence above, score readiness and estimate addressable TAM for each module.
+TASK: For each aftermarket module, produce a FULL SIGNAL INTELLIGENCE scorecard for {vendor}.
+Score each of the 5 signal categories 0-100, identify top 3 signals per category, then calculate:
+  Weighted Readiness Score = (existing_rel × 0.30) + (it_signals × 0.15) + (company_signals × 0.20) + (exec_signals × 0.15) + (budget_signals × 0.20)
+  Vendor-Adjusted TAM = Total Domain Spend Range × (Weighted Readiness / 100)
 
-Readiness Score (0-100) based on signals:
-  90-100: Modern cloud-native, AI-enabled, recent deployment evidence
-  70-89: Established modern system, well-integrated
-  50-69: Partial modernisation, some legacy, gaps visible
-  30-49: Predominantly legacy, known replacement need
-  10-29: Outdated/absent, no evidence of investment
-  0-9: No system detected
+Signal category scoring guide:
+  existing_relationship (30%): {vendor} deployment at {company_name}, partner network, contract history, tech ecosystem fit
+    90-100: {vendor} already deployed and active
+    60-89: {vendor} in ecosystem (partner/competitor present), strong fit signals
+    30-59: Adjacent technology, indirect relationship
+    0-29: No known relationship
 
-Displacement Opportunity:
-  High: Legacy/absent system + active budget signals → prime replacement target
-  Medium: Modern but not best-in-class → upgrade/expansion opportunity
-  Low: Recent investment or best-of-breed incumbent → low near-term opportunity
-  None: Very modern + strong incumbent → no realistic opportunity
+  it_signals (15%): hiring trends, AI/cloud announcements, tech stack investments, CIO/CTO agenda
+    80-100: Active modernisation aligned with {vendor}'s product
+    50-79: Some tech investment signals
+    0-49: No or legacy-focused signals
 
-TAM calculation: base on install_base signals × market pricing × {company_name}'s scale.
+  company_signals (20%): servitization push, warranty cost pressure, supply chain issues, regulatory pressure, M&A activity
+    80-100: Strong operational pressure driving technology investment in this domain
+    50-79: Moderate business pressure
+    0-49: Stable, low urgency
 
-Return a JSON array. Each object must have exactly these keys:
+  executive_signals (15%): CIO/CTO agenda, leadership hires, org changes, public thought leadership, strategic disclosures
+    80-100: Executive mandate for transformation in this area
+    50-79: Some leadership attention
+    0-49: No clear executive signal
+
+  budget_signals (20%): RFPs, consulting spend, transformation program scope, capital allocation, active partnerships
+    80-100: Confirmed budget allocation or active RFP
+    50-79: Budget signals from transformation programs
+    0-49: No specific budget signal
+
+Return a JSON array — one object per module with ALL these exact keys:
 [
   {{
     "domain": "Warranty Management",
-    "current_system": "Tavant WarrantyXchange (Active), SAP legacy (partial)",
-    "readiness_score": 72,
-    "displacement_opp": "Medium",
-    "addressable_tam": "$12M-$18M",
-    "tam_rationale": "500 dealer users × $24k/yr SaaS = $12M base; expansion to FSM integration adds $6M"
+    "current_system": "<current technology at {company_name} from tech stack, e.g. 'Tavant WarrantyXchange (Active)' or 'Legacy SAP'>",
+    "existing_rel_score": <0-100>,
+    "existing_rel_top": "<signal1> | <signal2> | <signal3>",
+    "it_signals_score": <0-100>,
+    "it_signals_top": "<signal1> | <signal2> | <signal3>",
+    "company_signals_score": <0-100>,
+    "company_signals_top": "<signal1> | <signal2> | <signal3>",
+    "exec_signals_score": <0-100>,
+    "exec_signals_top": "<signal1> | <signal2> | <signal3>",
+    "budget_signals_score": <0-100>,
+    "budget_signals_top": "<signal1> | <signal2> | <signal3>",
+    "weighted_readiness": <calculated 0-100>,
+    "displacement_opp": "<High | Medium | Low | None>",
+    "total_domain_spend": "<from spend data e.g. '$10M-$20M'>",
+    "vendor_adjusted_tam": "<total_spend × weighted_readiness/100 e.g. '$7.2M-$14.4M'>",
+    "tam_rationale": "<show math: weighted_readiness/100 × spend range = TAM>"
   }}
 ]
 
 Modules: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation.
 
-IMPORTANT: Return ONLY the JSON array starting with [. No prose, no source field needed.
+IMPORTANT: Return ONLY the JSON array starting with [. No prose.
 """
 
 
