@@ -484,24 +484,74 @@ def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str, 
     cap_intel = "; ".join(f"{d}: {', '.join(ts[:2])}" for d,ts in list(by_domain.items())[:8]) or "limited data"
     spend_ref = " | ".join(f"{r.get('spend_type')}: {r.get('estimate','?')}" for r in (agg_data or [])[:4])
 
-    return f"""You are a vendor readiness analyst with Google Search access.
+    return f"""You are a vendor readiness analyst. Use Google Search to find live signals.
 
-COMPANY: {company_name}{ind} | VENDOR: {vendor}
-KNOWN TECH: {cap_intel}
-SPEND: {spend_ref}
+COMPANY: {company_name}{ind}
+VENDOR BEING EVALUATED: {vendor}
+KNOWN TECH STACK: {cap_intel}
+AGGREGATE SPEND CONTEXT: {spend_ref}
 
-Search for: "{company_name}" {vendor} warranty service technology signals hiring RFP 2023 OR 2024 OR 2025
+SEARCHES TO RUN:
+- "{company_name}" "{vendor}" deployed OR partnership OR implementation
+- "{company_name}" warranty service technology RFP OR tender 2023 OR 2024 OR 2025
+- "{company_name}" hiring "{vendor}" OR aftermarket technology
+- "{company_name}" CTO OR CIO digital transformation aftermarket 2024 OR 2025
+- "{company_name}" IT budget technology investment aftermarket service
 
-For each module, score 5 signal categories 0-100, find 2 supporting signals with URLs each.
-Weights: Existing Rel 30%, IT Signals 15%, Company Signals 20%, Exec Signals 15%, Budget Signals 20%.
-weighted_readiness = scores × weights summed.
-vendor_adjusted_tam = total_domain_spend × (weighted_readiness/100).
+TASK: For EACH of the 9 modules listed below, assess vendor displacement readiness using 5 scored signal categories.
 
-Return JSON array:
-[{{"domain":"Warranty Management","current_system":"<tech>","existing_rel_score":<n>,"existing_rel_signals":[{{"text":"<s>","source":"<url>"}},{{"text":"<s>","source":"<url>"}}],"it_signals_score":<n>,"it_signals_signals":[{{"text":"<s>","source":"<url>"}},{{"text":"<s>","source":"<url>"}}],"company_signals_score":<n>,"company_signals_signals":[{{"text":"<s>","source":"<url>"}},{{"text":"<s>","source":"<url>"}}],"exec_signals_score":<n>,"exec_signals_signals":[{{"text":"<s>","source":"<url>"}},{{"text":"<s>","source":"<url>"}}],"budget_signals_score":<n>,"budget_signals_signals":[{{"text":"<s>","source":"<url>"}},{{"text":"<s>","source":"<url>"}}],"weighted_readiness":<n>,"displacement_opp":"<High|Medium|Low|None>","total_domain_spend":"<range>","vendor_adjusted_tam":"<range>","tam_rationale":"<math>"}}]
+SCORING RULES:
+- Score each category 0-100 based on evidence found
+- existing_rel_score (weight 0.30): Is vendor already deployed or in a pilot at this company?
+- it_signals_score (weight 0.15): IT job postings, RFPs, tech evaluations mentioning this domain?
+- company_signals_score (weight 0.20): Is company growing, transforming, or investing in this domain?
+- exec_signals_score (weight 0.15): Executive statements, LinkedIn posts, conference talks about this domain?
+- budget_signals_score (weight 0.20): Budget announcements, IT spend news, contract renewals in this domain?
+- weighted_readiness = (existing_rel_score × 0.30) + (it_signals_score × 0.15) + (company_signals_score × 0.20) + (exec_signals_score × 0.15) + (budget_signals_score × 0.20)
+- vendor_adjusted_tam = total_domain_spend × (weighted_readiness / 100)
 
-Modules: Warranty Management, Service & Repair, Parts & Inventory, Field Service, Dealer Network, Telematics, Predictive Maintenance, Analytics, AI & Automation.
-Return ONLY the JSON array starting with [.
+MODULES: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation
+
+Return ONLY a valid JSON array. Each element must follow this exact structure:
+
+[
+  {{
+    "domain": "Warranty Management",
+    "current_system": "<e.g. SAP Warranty or Unknown>",
+    "existing_rel_score": 70,
+    "existing_rel_signals": [
+      {{"text": "<specific evidence found>", "source": "<URL or press release link>"}},
+      {{"text": "<specific evidence found>", "source": "<URL or press release link>"}}
+    ],
+    "it_signals_score": 55,
+    "it_signals_signals": [
+      {{"text": "<job posting or RFP evidence>", "source": "<URL>"}},
+      {{"text": "<job posting or RFP evidence>", "source": "<URL>"}}
+    ],
+    "company_signals_score": 60,
+    "company_signals_signals": [
+      {{"text": "<growth or transformation signal>", "source": "<URL>"}},
+      {{"text": "<growth or transformation signal>", "source": "<URL>"}}
+    ],
+    "exec_signals_score": 45,
+    "exec_signals_signals": [
+      {{"text": "<exec statement or LinkedIn post>", "source": "<URL>"}},
+      {{"text": "<exec statement or LinkedIn post>", "source": "<URL>"}}
+    ],
+    "budget_signals_score": 50,
+    "budget_signals_signals": [
+      {{"text": "<budget or contract signal>", "source": "<URL>"}},
+      {{"text": "<budget or contract signal>", "source": "<URL>"}}
+    ],
+    "weighted_readiness": 58,
+    "displacement_opp": "High",
+    "total_domain_spend": "$10M-$20M",
+    "vendor_adjusted_tam": "$5.8M-$11.6M",
+    "tam_rationale": "$15M midpoint × 58% readiness = $8.7M vendor-adjusted TAM"
+  }}
+]
+
+Return ALL 9 modules. Return ONLY the JSON array starting with [. No prose, no markdown.
 """
 
 
@@ -744,7 +794,7 @@ async def run_aftermarket_deep_dive(
     await asyncio.sleep(0)
 
     # Collect spend by module (Phase 2 synthesis result)
-    spend_rows = await _collect_future(spend_future, "spend_module", timeout=90) if spend_future else []
+    spend_rows = await _collect_future(spend_future, "spend_module", timeout=120) if spend_future else []
     for row in (spend_rows if isinstance(spend_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "spend_module_row", "row": row}
@@ -756,7 +806,7 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": "🎯 Table 4: Collecting readiness matrix and TAM estimates…"}
     await asyncio.sleep(0)
 
-    readiness_rows = await _collect_future(ready_future, "readiness_tam", timeout=90) if ready_future else []
+    readiness_rows = await _collect_future(ready_future, "readiness_tam", timeout=150) if ready_future else []
     for row in (readiness_rows if isinstance(readiness_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "readiness_row", "row": row}
