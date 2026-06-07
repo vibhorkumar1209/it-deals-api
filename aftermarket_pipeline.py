@@ -181,12 +181,25 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str):
         pass
 
     try:
-        m = re.search(r"[\[\{].*[\]\}]", raw, re.DOTALL)
+        m = re.search(r"\[.*\]", raw, re.DOTALL)
         if m:
             text = re.sub(r",\s*([\]}])", r"\1", m.group(0))
             return json.loads(text)
     except Exception:
         pass
+
+    # Last resort: find outermost { } object and wrap in list
+    try:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            text = re.sub(r",\s*([\]}])", r"\1", m.group(0))
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                return [obj]
+    except Exception:
+        pass
+
+    logger.warning(f"_gemini_call_sync: no JSON found in response. Preview: {raw[:300]}")
     return []
 
 
@@ -293,33 +306,27 @@ Return ONLY the raw JSON array.
 
 def _spend_module_prompt(company_name: str, industry: str) -> str:
     ind = f" ({industry})" if industry else ""
-    domains_list = "\n".join(f"  - {d}" for d in AFTERMARKET_DOMAINS)
-    return f"""You are an enterprise IT financial analyst specialising in aftermarket operations.
+    return f"""You are an IT financial analyst. Use Google Search to find {company_name}'s{ind} technology spend data.
 
-COMPANY: {company_name}{ind}
+Search: "{company_name}" revenue annual report IT spend technology budget 2023 OR 2024 OR 2025
 
-Search for {company_name} financial and technology spend data:
-- "{company_name}" annual report IT spend technology 2023 OR 2024
-- "{company_name}" revenue operating expenses technology budget
-- "{company_name}" aftermarket service revenue technology spend
-- "{company_name}" warranty management system spend cost
-- "{company_name}" dealer management field service technology investment
+Based on what you find, estimate annual technology spend for each aftermarket service module.
+Use revenue-based benchmarks (e.g. 0.3% of revenue for warranty IT) when specific data unavailable.
 
-For EACH of the following aftermarket modules, estimate annual technology spend with explicit math:
-{domains_list}
-
-Return ONLY a JSON array — one row per module:
+Return a JSON array. Each object must have exactly these keys:
 [
   {{
-    "domain": "<module name from list above>",
-    "current_spend": "<estimated annual spend e.g. '$15M-$25M'>",
-    "spend_math": "<calculation logic e.g. '500 dealers × $3k/yr + $2M infra = $3.5M' or '0.3% of $16B revenue × 8% aftermarket allocation = $3.8M'>",
-    "market_benchmark": "<typical range for comparable companies>",
-    "source": "<URL to annual report, filing or '-'>"
+    "domain": "Warranty Management",
+    "current_spend": "$8M-$15M",
+    "spend_math": "~0.3% of $16B revenue × 15% warranty allocation = ~$7.2M + SI costs",
+    "market_benchmark": "$5M-$20M for Tier-1 OEMs",
+    "source": "URL or industry benchmark"
   }}
 ]
 
-Always show the math in spend_math. Return ONLY the raw JSON array.
+Cover these modules: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation.
+
+IMPORTANT: Return ONLY the JSON array starting with [ and ending with ]. No prose before or after.
 """
 
 
@@ -409,44 +416,33 @@ Return ONLY the raw JSON array.
 
 def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str) -> str:
     ind = f" ({industry})" if industry else ""
-    vendor_hint = f" Score readiness specifically from {target_vendor}'s perspective." if target_vendor else ""
-    domains_list = "\n".join(f"  - {d}" for d in AFTERMARKET_DOMAINS)
-    return f"""You are a technology readiness and market sizing analyst.
+    vendor_hint = f" Assess from {target_vendor}'s go-to-market perspective." if target_vendor else ""
+    return f"""You are a technology readiness analyst.{vendor_hint} Use Google Search to research {company_name}'s{ind} aftermarket technology systems.
 
-COMPANY: {company_name}{ind}{vendor_hint}
+Search: "{company_name}" aftermarket warranty field service dealer technology system platform legacy modern 2023 OR 2024 OR 2025
+Also search: aftermarket software market size TAM warranty management field service DMS
 
-Search for technology and market size data:
-- "{company_name}" aftermarket technology systems legacy modern platform
-- "{company_name}" warranty field service parts technology readiness
-- aftermarket software market size TAM warranty management field service DMS
-- dealer management system market size manufacturing automotive
+For each aftermarket module, assess {company_name}'s current technology readiness and estimate addressable market.
 
-For EACH of the following modules, assess readiness and estimate addressable TAM:
-{domains_list}
-
-For each module, assess technology readiness and estimate addressable TAM.
-
-Return ONLY a JSON array — one row per module:
+Return a JSON array. Each object must have exactly these keys:
 [
   {{
-    "domain": "<aftermarket module name>",
-    "current_system": "<current primary technology/vendor in this domain, or 'Legacy/Unknown'>",
-    "readiness_score": <integer 0-100 where 100 = fully modern, 0 = completely legacy/absent>,
-    "displacement_opp": "<High | Medium | Low | None — opportunity to replace/upgrade current system>",
-    "addressable_tam": "<estimated addressable market for this module e.g. '$12M-$20M'>",
-    "tam_rationale": "<show sizing math e.g. '~200 dealer locations × $60k/yr license = $12M base; with expansion 20% uplift = $14.4M'>",
-    "source": "<URL to market data or '-'>"
+    "domain": "Warranty Management",
+    "current_system": "SAP Warranty / Tavant WarrantyXchange",
+    "readiness_score": 65,
+    "displacement_opp": "Medium",
+    "addressable_tam": "$15M-$25M",
+    "tam_rationale": "200 dealer locations × $75k/yr + cloud platform = $15M base",
+    "source": "URL or '-'"
   }}
 ]
 
-Readiness score guide:
-  80-100: Modern cloud-native, well-integrated, recent implementation
-  60-79: Established system, some modernisation, minor gaps
-  40-59: Partially modernised, legacy components, integration challenges
-  20-39: Predominantly legacy, known replacement need
-  0-19: No clear system or severely outdated
+Cover these modules: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation.
 
-Return ONLY the raw JSON array.
+Readiness score: 80-100=modern cloud-native, 60-79=established, 40-59=partial, 20-39=legacy, 0-19=absent.
+Displacement: High=clear replacement need, Medium=upgrade opportunity, Low=entrenched, None=no opportunity.
+
+IMPORTANT: Return ONLY the JSON array starting with [ and ending with ]. No prose before or after.
 """
 
 
