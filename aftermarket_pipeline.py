@@ -457,12 +457,12 @@ READINESS_FIELDS = [
     {"key": "company_signals_score","label": "Company Signals (20%)"},
     {"key": "exec_signals_score",   "label": "Exec Signals (15%)"},
     {"key": "budget_signals_score", "label": "Budget Signals (20%)"},
-    # Top 3 signals per category
-    {"key": "existing_rel_top",     "label": "Existing Rel. Evidence"},
-    {"key": "it_signals_top",       "label": "IT Signal Evidence"},
-    {"key": "company_signals_top",  "label": "Company Signal Evidence"},
-    {"key": "exec_signals_top",     "label": "Exec Signal Evidence"},
-    {"key": "budget_signals_top",   "label": "Budget Signal Evidence"},
+    # Top 3 signals per category (array of {text, source})
+    {"key": "existing_rel_signals",     "label": "Existing Rel. Signals"},
+    {"key": "it_signals_signals",       "label": "IT Signal Evidence"},
+    {"key": "company_signals_signals",  "label": "Company Signal Evidence"},
+    {"key": "exec_signals_signals",     "label": "Exec Signal Evidence"},
+    {"key": "budget_signals_signals",   "label": "Budget Signal Evidence"},
     # Calculated outputs
     {"key": "weighted_readiness",   "label": "Weighted Readiness Score"},
     {"key": "displacement_opp",     "label": "Displacement Opportunity"},
@@ -532,28 +532,54 @@ Signal category scoring guide:
     50-79: Budget signals from transformation programs
     0-49: No specific budget signal
 
+Each signal in the *_signals arrays must have: text (what the signal is) AND source (URL evidence).
+Search for press releases, LinkedIn posts, annual reports, job postings to find real URLs for each signal.
+
 Return a JSON array — one object per module with ALL these exact keys:
 [
   {{
     "domain": "Warranty Management",
-    "current_system": "<current technology at {company_name} from tech stack, e.g. 'Tavant WarrantyXchange (Active)' or 'Legacy SAP'>",
+    "current_system": "<current technology at {company_name} from tech stack>",
     "existing_rel_score": <0-100>,
-    "existing_rel_top": "<signal1> | <signal2> | <signal3>",
+    "existing_rel_signals": [
+      {{"text": "<specific signal e.g. 'Tavant WarrantyXchange deployed at 500 dealer locations'>", "source": "<direct URL or '-'>"}},
+      {{"text": "<signal2>", "source": "<URL>"}},
+      {{"text": "<signal3>", "source": "<URL>"}}
+    ],
     "it_signals_score": <0-100>,
-    "it_signals_top": "<signal1> | <signal2> | <signal3>",
+    "it_signals_signals": [
+      {{"text": "<e.g. 'Cloud migration to Azure announced Q2 2024'>", "source": "<URL>"}},
+      {{"text": "<signal2>", "source": "<URL>"}},
+      {{"text": "<signal3>", "source": "<URL>"}}
+    ],
     "company_signals_score": <0-100>,
-    "company_signals_top": "<signal1> | <signal2> | <signal3>",
+    "company_signals_signals": [
+      {{"text": "<e.g. 'Warranty cost reduction program launched 2023'>", "source": "<URL>"}},
+      {{"text": "<signal2>", "source": "<URL>"}},
+      {{"text": "<signal3>", "source": "<URL>"}}
+    ],
     "exec_signals_score": <0-100>,
-    "exec_signals_top": "<signal1> | <signal2> | <signal3>",
+    "exec_signals_signals": [
+      {{"text": "<e.g. 'CTO announced digital transformation roadmap'>", "source": "<URL>"}},
+      {{"text": "<signal2>", "source": "<URL>"}},
+      {{"text": "<signal3>", "source": "<URL>"}}
+    ],
     "budget_signals_score": <0-100>,
-    "budget_signals_top": "<signal1> | <signal2> | <signal3>",
-    "weighted_readiness": <calculated 0-100>,
+    "budget_signals_signals": [
+      {{"text": "<e.g. 'RFP issued for warranty management platform Q1 2025'>", "source": "<URL>"}},
+      {{"text": "<signal2>", "source": "<URL>"}},
+      {{"text": "<signal3>", "source": "<URL>"}}
+    ],
+    "weighted_readiness": <calculated: existing_rel×0.30 + it×0.15 + company×0.20 + exec×0.15 + budget×0.20>,
     "displacement_opp": "<High | Medium | Low | None>",
     "total_domain_spend": "<from spend data e.g. '$10M-$20M'>",
     "vendor_adjusted_tam": "<total_spend × weighted_readiness/100 e.g. '$7.2M-$14.4M'>",
     "tam_rationale": "<show math: weighted_readiness/100 × spend range = TAM>"
   }}
 ]
+
+IMPORTANT: For every signal, provide a real source URL (press release, LinkedIn, annual report, job posting).
+Use '-' only if genuinely no public source exists after searching.
 
 Modules: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation.
 
