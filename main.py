@@ -743,10 +743,11 @@ async def debug_aftermarket_section(company: str = "Daimler Truck North America"
         }
 
     try:
-        result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=120)
+        result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=220)
         return {"company": company, "section": section, **result}
     except Exception as e:
-        return {"error": str(e)}
+        import traceback
+        return {"error": str(e) or type(e).__name__, "tb": traceback.format_exc()[-300:]}
 
 
 if __name__ == "__main__":
