@@ -804,10 +804,12 @@ async def run_aftermarket_deep_dive(
             False, "spend_module"
         )
     if "readiness" in run:
+        # Readiness needs search grounding — signal intelligence (hiring, RFPs, exec agenda)
+        # requires live web data that Gemini can't synthesise without search
         ready_future = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_tam_prompt(company_name, industry, target_vendor, all_cap_rows, agg_rows if isinstance(agg_rows, list) else []),
-            False, "readiness_tam"
+            True, "readiness_tam"   # search grounded
         )
 
     # Collect IT deals in parallel while Phase 2 synthesises
