@@ -624,7 +624,7 @@ async def run_aftermarket_deep_dive(
     await asyncio.sleep(0)
 
     # Collect aggregate spend (use shield so the future keeps running if it needs more time)
-    agg_rows = await _collect_future(agg_future, "agg_spend", timeout=90)
+    agg_rows = await _collect_future(agg_future, "agg_spend", timeout=90) if agg_future else []
     for row in (agg_rows if isinstance(agg_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "aggregate_spend_row", "row": row}
@@ -633,7 +633,7 @@ async def run_aftermarket_deep_dive(
     await asyncio.sleep(0)
 
     # Collect IT deals
-    spend_deal_rows = await _collect_future(deals_future, "spend_deals", timeout=90)
+    spend_deal_rows = await _collect_future(deals_future, "spend_deals", timeout=90) if deals_future else []
     for row in (spend_deal_rows if isinstance(spend_deal_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "spend_deal_row", "row": row}
@@ -642,7 +642,7 @@ async def run_aftermarket_deep_dive(
     await asyncio.sleep(0)
 
     # Collect spend by module
-    spend_rows = await _collect_future(spend_future, "spend_module", timeout=90)
+    spend_rows = await _collect_future(spend_future, "spend_module", timeout=90) if spend_future else []
     for row in (spend_rows if isinstance(spend_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "spend_module_row", "row": row}
@@ -654,7 +654,7 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": "🎯 Table 4: Collecting readiness matrix and TAM estimates…"}
     await asyncio.sleep(0)
 
-    readiness_rows = await _collect_future(ready_future, "readiness_tam", timeout=90)
+    readiness_rows = await _collect_future(ready_future, "readiness_tam", timeout=90) if ready_future else []
     for row in (readiness_rows if isinstance(readiness_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "readiness_row", "row": row}
