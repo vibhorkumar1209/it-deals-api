@@ -692,6 +692,36 @@ async def aftermarket_dive(req: AftermarketRequest):
     )
 
 
+@app.get("/api/debug-aftermarket-section")
+async def debug_aftermarket_section(company: str = "Daimler Truck North America", section: str = "spend_module"):
+    """Debug a specific aftermarket section prompt."""
+    from aftermarket_pipeline import _spend_module_prompt, _readiness_tam_prompt, _gemini_call_sync
+
+    prompts = {
+        "spend_module": _spend_module_prompt(company, ""),
+        "readiness": _readiness_tam_prompt(company, "", ""),
+    }
+    prompt = prompts.get(section)
+    if not prompt:
+        return {"error": f"Unknown section: {section}"}
+
+    def _run():
+        result = _gemini_call_sync(prompt, True, section)
+        return result
+
+    try:
+        rows = await asyncio.wait_for(asyncio.to_thread(_run), timeout=120)
+        return {
+            "company": company,
+            "section": section,
+            "rows_found": len(rows) if isinstance(rows, list) else 0,
+            "preview": rows[:3] if isinstance(rows, list) else rows,
+            "prompt_len": len(prompt),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=4001, reload=True)
