@@ -537,7 +537,7 @@ Return ONLY the raw JSON array.
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
-ALL_SECTIONS = {"capabilities", "agg_spend", "spend_deals", "spend_module", "readiness", "vendor_footprint", "gaps", "competitive"}
+ALL_SECTIONS = {"capabilities", "agg_spend", "spend_deals", "spend_module", "readiness", "gaps", "competitive"}
 
 
 async def run_aftermarket_deep_dive(
@@ -574,7 +574,7 @@ async def run_aftermarket_deep_dive(
     deals_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals") if "spend_deals" in run else None
     spend_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_module_prompt(company_name, industry), True, "spend_module") if "spend_module" in run else None
     ready_future   = loop.run_in_executor(None, _gemini_call_sync, _readiness_tam_prompt(company_name, industry, target_vendor), True, "readiness_tam") if "readiness" in run else None
-    vendor_future  = loop.run_in_executor(None, _gemini_call_sync, _vendor_footprint_prompt(company_name, target_vendor, industry), True, "vendor_footprint") if (target_vendor and "vendor_footprint" in run) else None
+    # Vendor footprint is now part of capabilities (not separate section)
 
     yield {"type": "heartbeat", "message": "🌐 All Gemini searches running in parallel — streaming results as they complete…"}
     await asyncio.sleep(0)
@@ -659,18 +659,7 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"✅ Table 4 complete — {len(readiness_rows) if isinstance(readiness_rows, list) else 0} modules assessed"}
     await asyncio.sleep(0)
 
-    # ── Vendor Footprint (collect if target_vendor provided) ─────────────────
-    vendor_rows = []
-    if target_vendor and vendor_future:
-        yield {"type": "heartbeat", "message": f"🎯 Collecting {target_vendor} footprint analysis…"}
-        await asyncio.sleep(0)
-        vendor_rows = await _collect_future(vendor_future, "vendor_footprint", timeout=90)
-        for row in (vendor_rows if isinstance(vendor_rows, list) else []):
-            if isinstance(row, dict):
-                yield {"type": "vendor_footprint_row", "row": row}
-                await asyncio.sleep(0.04)
-        yield {"type": "heartbeat", "message": f"✅ {target_vendor} footprint: {len(vendor_rows)} domains assessed"}
-        await asyncio.sleep(0)
+    vendor_rows = []  # vendor footprint now integrated into capabilities
 
     # ── Step 5: Tech Gaps (Table 2) ───────────────────────────────────────────
     yield {"type": "heartbeat", "message": "🔎 Table 2: Identifying technology gaps…"}
@@ -709,6 +698,6 @@ async def run_aftermarket_deep_dive(
         "aggregate_spend": agg_rows if isinstance(agg_rows, list) else [],
         "spend_deals": spend_deal_rows if isinstance(spend_deal_rows, list) else [],
         "readiness": readiness_rows if isinstance(readiness_rows, list) else [],
-        "vendor_footprint": vendor_rows if isinstance(vendor_rows, list) else [],
+        "vendor_footprint": [],  # removed as separate section
         "competitors": comp_rows if isinstance(comp_rows, list) else [],
     }
