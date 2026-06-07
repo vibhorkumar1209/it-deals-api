@@ -230,8 +230,9 @@ async def _run_async(prompt: str, use_search: bool, label: str, timeout: int = 1
 
 # ── Table 1: Capability Assessment ───────────────────────────────────────────
 
-def _cap_prompt(company_name: str, domain: str, industry: str) -> str:
+def _cap_prompt(company_name: str, domain: str, industry: str, target_vendor: str = "") -> str:
     ind = f" ({industry})" if industry else ""
+    vendor_search = f'\n- "{company_name}" "{target_vendor}" {domain}' if target_vendor else ""
     return f"""You are an aftermarket service technology analyst with live Google Search.
 
 COMPANY: {company_name}{ind}
@@ -240,7 +241,7 @@ DOMAIN: {domain}
 Search for the specific technologies and platforms used by {company_name} in "{domain}":
 - "{company_name}" {domain} software technology platform
 - "{company_name}" {domain} system vendor tool 2022 OR 2023 OR 2024 OR 2025
-- "{company_name}" {domain} implementation partner case study
+- "{company_name}" {domain} implementation partner case study{vendor_search}
 
 For each technology found in this domain, return ONE JSON object per capability × technology pair.
 Each row must describe HOW that technology is used (use case) and ROUGHLY how many users/licenses exist.
@@ -569,7 +570,7 @@ async def run_aftermarket_deep_dive(
     loop = asyncio.get_event_loop()
 
     # Only fire futures for requested sections
-    cap_futures    = [loop.run_in_executor(None, _gemini_call_sync, _cap_prompt(company_name, dom, industry), True, f"cap_{dom}") for dom in AFTERMARKET_DOMAINS] if "capabilities" in run else []
+    cap_futures    = [loop.run_in_executor(None, _gemini_call_sync, _cap_prompt(company_name, dom, industry, target_vendor), True, f"cap_{dom}") for dom in AFTERMARKET_DOMAINS] if "capabilities" in run else []
     agg_future     = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend") if "agg_spend" in run else None
     deals_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals") if "spend_deals" in run else None
     spend_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_module_prompt(company_name, industry), True, "spend_module") if "spend_module" in run else None
