@@ -848,7 +848,7 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": "🎯 Table 4: Collecting readiness matrix and TAM estimates…"}
     await asyncio.sleep(0)
 
-    readiness_rows = await _collect_future(ready_future, "readiness_tam", timeout=150) if ready_future else []
+    readiness_rows = await _collect_future(ready_future, "readiness_tam", timeout=360) if ready_future else []
     for row in (readiness_rows if isinstance(readiness_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "readiness_row", "row": row}

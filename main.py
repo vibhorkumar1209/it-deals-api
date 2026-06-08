@@ -711,11 +711,8 @@ async def debug_aftermarket_section(company: str = "Daimler Truck North America"
         return {"error": f"Unknown section: {section}"}
 
     def _run():
-        from aftermarket_pipeline import _gemini_call_sync as _gcs
+        import re as _re, json as _json
         max_tok = 32768 if section == "readiness" else 16384
-        # Call via the actual pipeline function so we test the real parsing logic
-        rows = _gcs(prompt, True, f"debug_{section}", max_tok)
-        # Also make a raw call to inspect response structure
         client = genai.Client(api_key=GOOGLE_AI_KEY)
         response = client.models.generate_content(
             model="gemini-2.5-flash",
@@ -727,26 +724,45 @@ async def debug_aftermarket_section(company: str = "Daimler Truck North America"
             ),
         )
         parts_info = []
-        raw_no_thoughts = ""
+        text_parts = []
         for cand in (response.candidates or []):
             for part in (cand.content.parts or []):
                 thought = getattr(part, "thought", None)
                 txt = getattr(part, "text", "") or ""
                 parts_info.append({"thought": thought, "text_len": len(txt)})
-                if not thought:
-                    raw_no_thoughts += txt
+                if not thought and txt:
+                    text_parts.append(txt)
         finish = getattr(response.candidates[0], "finish_reason", None) if response.candidates else None
+        combined = "".join(text_parts)
+        clean = _re.sub(r"```(?:json)?\s*", "", combined.strip())
+        clean = _re.sub(r"```\s*$", "", clean, flags=_re.MULTILINE).strip()
+        parse_err = None
+        rows = []
+        try:
+            rows = _json.loads(clean)
+        except Exception as e:
+            parse_err = str(e)
+            m = _re.search(r"\[.*\]", combined, _re.DOTALL)
+            if m:
+                try:
+                    t2 = _re.sub(r",\s*([\]}])", r"\1", m.group(0))
+                    rows = _json.loads(t2)
+                    parse_err = None
+                except Exception as e2:
+                    parse_err = f"regex: {e2}"
         return {
             "rows_parsed": len(rows) if isinstance(rows, list) else 0,
-            "row_preview": rows[:1] if isinstance(rows, list) else [],
+            "parse_error": parse_err,
             "parts": parts_info,
             "finish_reason": str(finish),
-            "raw_tail": raw_no_thoughts[-400:],
-            "raw_head": raw_no_thoughts[:300],
+            "combined_len": len(combined),
+            "clean_head": clean[:300],
+            "clean_tail": clean[-200:],
+            "row_domains": [r.get("domain") for r in rows[:9]] if isinstance(rows, list) else [],
         }
 
     try:
-        result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=220)
+        result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=300)
         return {"company": company, "section": section, **result}
     except Exception as e:
         import traceback
