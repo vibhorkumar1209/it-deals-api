@@ -284,12 +284,13 @@ Return ONLY the raw JSON array.
 
     # Call 2: executive enrichment pass if we found GCCs
     if all_rows:
+        gcc_location_list = [{"gcc_name": r.get("gcc_name",""), "location": r.get("location","")} for r in all_rows[:10]]
         exec_prompt = f"""You are a GCC executive researcher with live Google Search.
 
 COMPANY: {company_name}
 
 For each of the following GCC locations, find the top 3 executives (name + title):
-{json.dumps([{{"gcc_name": r.get("gcc_name",""), "location": r.get("location","")}} for r in all_rows[:10]], indent=1)}
+{json.dumps(gcc_location_list, indent=1)}
 
 Search LinkedIn, company websites, and news for each location:
 {chr(10).join(f'- "{company_name}" GCC {r.get("location","").split(",")[0]} head director CEO managing' for r in all_rows[:6])}
