@@ -769,6 +769,54 @@ async def debug_aftermarket_section(company: str = "Daimler Truck North America"
         return {"error": str(e) or type(e).__name__, "tb": traceback.format_exc()[-300:]}
 
 
+# ── Signal Intelligence ───────────────────────────────────────────────────────
+
+class SignalCompanyInput(BaseModel):
+    name: str = Field(..., min_length=1)
+    domain: str = Field(default="")
+
+class SignalIntelRequest(BaseModel):
+    target_companies: list[SignalCompanyInput] = Field(..., min_length=1, max_length=100)
+    user_company: str = Field(default="")
+    user_domain: str = Field(default="")
+    key_triggers: str = Field(default="")
+    target_tech: str = Field(default="")
+
+
+@app.post("/api/signal-intel")
+async def signal_intel(req: SignalIntelRequest):
+    """SSE stream: buying signal intelligence for up to 100 target companies."""
+    from signal_pipeline import run_signal_intelligence
+
+    async def _generate():
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        if not os.getenv("GOOGLE_AI_API_KEY"):
+            yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set."})
+            return
+
+        try:
+            companies = [{"name": c.name, "domain": c.domain} for c in req.target_companies]
+            async for event in run_signal_intelligence(
+                target_companies=companies,
+                user_company=req.user_company,
+                user_domain=req.user_domain,
+                key_triggers=req.key_triggers,
+                target_tech=req.target_tech,
+            ):
+                yield _sse(event)
+        except Exception as e:
+            logger.error(f"Signal Intel error: {e}", exc_info=True)
+            yield _sse({"type": "error", "message": str(e)})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=4001, reload=True)
