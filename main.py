@@ -711,8 +711,12 @@ async def debug_aftermarket_section(company: str = "Daimler Truck North America"
         return {"error": f"Unknown section: {section}"}
 
     def _run():
-        client = genai.Client(api_key=GOOGLE_AI_KEY)
+        from aftermarket_pipeline import _gemini_call_sync as _gcs
         max_tok = 32768 if section == "readiness" else 16384
+        # Call via the actual pipeline function so we test the real parsing logic
+        rows = _gcs(prompt, True, f"debug_{section}", max_tok)
+        # Also make a raw call to inspect response structure
+        client = genai.Client(api_key=GOOGLE_AI_KEY)
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
@@ -722,24 +726,23 @@ async def debug_aftermarket_section(company: str = "Daimler Truck North America"
                 tools=[types.Tool(google_search=types.GoogleSearch())],
             ),
         )
-        # Collect all parts with metadata
         parts_info = []
         raw_no_thoughts = ""
-        raw_all = ""
         for cand in (response.candidates or []):
             for part in (cand.content.parts or []):
                 thought = getattr(part, "thought", None)
                 txt = getattr(part, "text", "") or ""
-                parts_info.append({"thought": thought, "text_len": len(txt), "text_preview": txt[:100]})
-                raw_all += txt
+                parts_info.append({"thought": thought, "text_len": len(txt)})
                 if not thought:
                     raw_no_thoughts += txt
         finish = getattr(response.candidates[0], "finish_reason", None) if response.candidates else None
         return {
+            "rows_parsed": len(rows) if isinstance(rows, list) else 0,
+            "row_preview": rows[:1] if isinstance(rows, list) else [],
             "parts": parts_info,
-            "raw_all_preview": raw_all[:500],
-            "raw_no_thoughts_preview": raw_no_thoughts[:500],
             "finish_reason": str(finish),
+            "raw_tail": raw_no_thoughts[-400:],
+            "raw_head": raw_no_thoughts[:300],
         }
 
     try:
