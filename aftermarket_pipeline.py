@@ -782,6 +782,7 @@ async def run_aftermarket_deep_dive(
         True, "cap_context_lite"
     ) if needs_context else None
 
+    spend_future   = None
     # Readiness-only fast path: launch readiness immediately without waiting for
     # context/agg (those add ~105s of serial blocking before readiness even starts).
     if readiness_only:
@@ -791,9 +792,8 @@ async def run_aftermarket_deep_dive(
             True, "readiness_tam",
             32768,
         )
-
-    spend_future   = None
-    ready_future   = None
+    else:
+        ready_future = None
 
     yield {"type": "heartbeat", "message": "🌐 Phase 1: Researching capabilities & tech spend in parallel…"}
     await asyncio.sleep(0)
