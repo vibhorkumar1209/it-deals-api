@@ -609,37 +609,22 @@ SCORING RULES:
 
 MODULES: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation
 
-Return ONLY a valid JSON array. Each element must follow this exact structure:
+Return ONLY a valid JSON array. Each element:
 
 [
   {{
     "domain": "Warranty Management",
     "current_system": "<e.g. SAP Warranty or Unknown>",
     "existing_rel_score": 70,
-    "existing_rel_signals": [
-      {{"text": "<specific evidence found>", "source": "<URL or press release link>"}},
-      {{"text": "<specific evidence found>", "source": "<URL or press release link>"}}
-    ],
+    "existing_rel_evidence": "<one sentence: specific evidence of vendor deployment or absence>",
     "it_signals_score": 55,
-    "it_signals_signals": [
-      {{"text": "<job posting or RFP evidence>", "source": "<URL>"}},
-      {{"text": "<job posting or RFP evidence>", "source": "<URL>"}}
-    ],
+    "it_signals_evidence": "<one sentence: job postings, RFPs, or tech evaluations>",
     "company_signals_score": 60,
-    "company_signals_signals": [
-      {{"text": "<growth or transformation signal>", "source": "<URL>"}},
-      {{"text": "<growth or transformation signal>", "source": "<URL>"}}
-    ],
+    "company_signals_evidence": "<one sentence: growth, M&A, or transformation signal>",
     "exec_signals_score": 45,
-    "exec_signals_signals": [
-      {{"text": "<exec statement or LinkedIn post>", "source": "<URL>"}},
-      {{"text": "<exec statement or LinkedIn post>", "source": "<URL>"}}
-    ],
+    "exec_signals_evidence": "<one sentence: exec statement or LinkedIn post>",
     "budget_signals_score": 50,
-    "budget_signals_signals": [
-      {{"text": "<budget or contract signal>", "source": "<URL>"}},
-      {{"text": "<budget or contract signal>", "source": "<URL>"}}
-    ],
+    "budget_signals_evidence": "<one sentence: budget announcement or contract renewal>",
     "weighted_readiness": 58,
     "displacement_opp": "High",
     "total_domain_spend": "$0.9M-$1.2M",
