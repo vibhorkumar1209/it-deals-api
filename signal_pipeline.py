@@ -163,22 +163,45 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
 
 # ── Prompt builders ───────────────────────────────────────────────────────────
 
+import datetime as _dt
+
+def _date_window() -> str:
+    """Return a human-readable cutoff string, e.g. 'June 2024 – June 2025'."""
+    today = _dt.date.today()
+    cutoff = today.replace(year=today.year - 1)
+    fmt = "%B %Y"
+    return f"{cutoff.strftime(fmt)} – {today.strftime(fmt)}"
+
+def _source_instructions(domain: str) -> str:
+    news_url = f"{domain.rstrip('/')}/news" if domain else ""
+    press_url = f"{domain.rstrip('/')}/press" if domain else ""
+    url_hint = f"  • Company newsroom / press releases: {news_url} or {press_url}\n" if domain else ""
+    return f"""Search the following sources in priority order:
+{url_hint}  • LinkedIn posts, announcements, and job listings for {domain or 'the company'}
+  • Google News and open web search
+  • Business wires: PR Newswire, Business Wire, GlobeNewswire, Businesswire
+  • Industry trade press and analyst reports"""
+
+
 def _exec_leadership_prompt(company: str, domain: str, key_triggers: str, target_tech: str) -> str:
+    window = _date_window()
     extra = ""
     if key_triggers:
         extra += f"\nFocus especially on triggers related to: {key_triggers}"
     if target_tech:
         extra += f"\nHighlight signals relevant to this technology: {target_tech}"
-    return f"""You are a B2B sales intelligence researcher. Using real-time web search, find all recent (last 6 months) Executive & Leadership Shift signals for {company} ({domain}).
+    return f"""You are a B2B sales intelligence researcher. Find Executive & Leadership Shift signals for {company} ({domain}).
+
+STRICT DATE FILTER: Only include events that occurred between {window}. Discard anything older.
 
 Look for:
-1. NEW DECISION-MAKER HIRES — New C-suite, VP, or Director joins in the past 30–90 days. Include: title, name, start date, previous employer.
-2. INTERNAL PROMOTIONS — A manager or director stepped up to a senior decision-making role.
-3. PAST CHAMPION MOVES — A power user or champion from a known IT vendor or competitor joins {company}.
-4. MASS EXECUTIVE EXODUS — Multiple leadership departures from the same team within a short period.
+1. NEW DECISION-MAKER HIRES — New C-suite, VP, or Director joined within the date window. Include: title, name, start date, previous employer.
+2. INTERNAL PROMOTIONS — A manager or director stepped up to a senior decision-making role within the date window.
+3. PAST CHAMPION MOVES — A power user or champion from a known IT vendor or competitor joins {company} within the date window.
+4. MASS EXECUTIVE EXODUS — Multiple leadership departures from the same team within a short period, within the date window.
 {extra}
 
-Search LinkedIn, company press releases, news articles, and business intelligence sources.
+{_source_instructions(domain)}
 
 Return ONLY a JSON array. Each object must have exactly these fields:
 - signal_type: one of "new_hire" | "internal_promotion" | "champion_move" | "mass_exodus"
@@ -186,95 +209,107 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary of the signal and its sales implication
 - person_name: name of executive(s) involved (or "Multiple" for mass exodus)
 - previous_company: where they came from (or "Internal" for promotions)
-- date: best estimate of event date (e.g. "May 2025" or "Q1 2025")
+- date: exact date or month (e.g. "May 2025") — must be within {window}
 - source: URL or publication name
 
-If no signals found for a type, omit it. Return [] if absolutely nothing found.
+Omit any signal whose date falls outside {window}. Return [] if nothing found within the window.
 Return ONLY the JSON array, no commentary."""
 
 
 def _corporate_expansion_prompt(company: str, domain: str, key_triggers: str, target_tech: str) -> str:
+    window = _date_window()
     extra = ""
     if key_triggers:
         extra += f"\nFocus especially on triggers related to: {key_triggers}"
     if target_tech:
         extra += f"\nHighlight signals relevant to this technology: {target_tech}"
-    return f"""You are a B2B sales intelligence researcher. Using real-time web search, find all recent (last 6 months) Corporate Expansion & Growth signals for {company} ({domain}).
+    return f"""You are a B2B sales intelligence researcher. Find Corporate Expansion & Growth signals for {company} ({domain}).
+
+STRICT DATE FILTER: Only include events that occurred between {window}. Discard anything older.
 
 Look for:
-1. HEADCOUNT SURGE — Total employee count or a specific department growing by 20%+ quarter-over-quarter. Cite the numbers.
-2. JOB POSTINGS — Actively publishing jobs that reveal pain points, skill gaps, or new tech initiatives. Include job titles and implied gaps.
-3. NEW OFFICE OPENINGS — Physical geographic expansion or opening a new corporate division/business unit.
-4. PRODUCT LINE LAUNCHES — The company entering a new market segment or launching a major new product line.
+1. HEADCOUNT SURGE — Employee count or a specific department grew by 20%+ quarter-over-quarter within the date window. Cite the numbers.
+2. JOB POSTINGS — Active job listings published within the date window that reveal pain points, skill gaps, or new tech initiatives.
+3. NEW OFFICE OPENINGS — Physical geographic expansion or new corporate division opened within the date window.
+4. PRODUCT LINE LAUNCHES — New product or market segment entered within the date window.
 {extra}
 
-Search LinkedIn, company newsroom, Glassdoor, job boards, and press releases.
+{_source_instructions(domain)}
+Also search: Glassdoor, Indeed, LinkedIn Jobs, Builtin, Lever/Greenhouse job boards.
 
 Return ONLY a JSON array. Each object must have exactly these fields:
 - signal_type: one of "headcount_surge" | "job_postings" | "office_opening" | "product_launch"
 - signal_title: short headline (≤15 words)
 - summary: 2–3 sentence summary including the sales implication
 - magnitude: quantitative detail where available (e.g. "+35% headcount", "15 new roles", "3 new cities")
-- date: best estimate (e.g. "Q2 2025")
+- date: month or quarter — must be within {window}
 - source: URL or publication name
 
-Return [] if nothing found. Return ONLY the JSON array."""
+Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
 
 def _financial_corporate_prompt(company: str, domain: str, key_triggers: str, target_tech: str) -> str:
+    window = _date_window()
     extra = ""
     if key_triggers:
         extra += f"\nFocus especially on triggers related to: {key_triggers}"
     if target_tech:
         extra += f"\nHighlight signals relevant to this technology: {target_tech}"
-    return f"""You are a B2B sales intelligence researcher. Using real-time web search, find all recent (last 12 months) Financial & Corporate Structure signals for {company} ({domain}).
+    return f"""You are a B2B sales intelligence researcher. Find Financial & Corporate Structure signals for {company} ({domain}).
+
+STRICT DATE FILTER: Only include events that occurred between {window}. Discard anything older.
 
 Look for:
-1. FUNDING ROUNDS — Recent VC, PE, or debt financing (Series A/B/C, growth equity, IPO, etc.)
-2. M&A ACTIVITY — Mergers, acquisitions, divestitures, or joint ventures forcing tech consolidation
-3. CORPORATE RELOCATION — Moving HQ or centralizing operations to a new location
-4. EARNINGS SHIFTS — Publicly reported massive profit spike or severe operational drop (>20% swing)
+1. FUNDING ROUNDS — VC, PE, or debt financing (Series A/B/C, growth equity, IPO) announced within the date window.
+2. M&A ACTIVITY — Mergers, acquisitions, divestitures, or joint ventures announced within the date window.
+3. CORPORATE RELOCATION — HQ move or operations consolidation announced within the date window.
+4. EARNINGS SHIFTS — Publicly reported major profit spike or operational drop (>20% swing) within the date window.
 {extra}
 
-Search Crunchbase, PitchBook, SEC filings, press releases, financial news.
+{_source_instructions(domain)}
+Also search: Crunchbase, PitchBook, SEC EDGAR filings, Bloomberg, Reuters, financial news.
 
 Return ONLY a JSON array. Each object must have exactly these fields:
 - signal_type: one of "funding_round" | "merger_acquisition" | "relocation" | "earnings_shift"
 - signal_title: short headline (≤15 words)
 - summary: 2–3 sentence summary including the sales implication
 - financial_detail: amount raised / deal value / revenue change (e.g. "$50M Series B", "Acquired Acme Corp for $200M")
-- date: announcement date (e.g. "March 2025")
+- date: announcement date — must be within {window}
 - source: URL or publication name
 
-Return [] if nothing found. Return ONLY the JSON array."""
+Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
 
 def _tech_legal_prompt(company: str, domain: str, key_triggers: str, target_tech: str) -> str:
+    window = _date_window()
     extra = ""
     if key_triggers:
         extra += f"\nFocus especially on triggers related to: {key_triggers}"
     if target_tech:
         extra += f"\nHighlight signals relevant to this technology: {target_tech}"
-    return f"""You are a B2B sales intelligence researcher. Using real-time web search, find all recent (last 18 months) Tech Stack & Legal Trigger signals for {company} ({domain}).
+    return f"""You are a B2B sales intelligence researcher. Find Tech Stack & Legal Trigger signals for {company} ({domain}).
+
+STRICT DATE FILTER: Only include events that occurred or were announced between {window}. Discard anything older.
 
 Look for:
-1. CONTRACT RENEWALS — Approaching the 2- or 3-year anniversary of known software/IT contracts. Infer from deal announcement dates if available.
-2. REGULATORY COMPLIANCE — Facing a new legal deadline or audit (GDPR, EU AI Act, SOC2, ISO 27001, SEC rules, HIPAA, etc.)
-3. SYSTEM OUTAGE / PUBLIC FAILURE — Highly visible technical outage, data breach, or system failure revealing operational gaps
-4. TECH REFRESH SIGNALS — Known legacy system end-of-life, vendor announcing sunset, or public RFP/RFI issued
+1. CONTRACT RENEWALS — IT/software contracts approaching renewal within the next 12 months, where the original contract was signed ~2–3 years ago (i.e. announced within {window} or inferrable from deal dates in the window).
+2. REGULATORY COMPLIANCE — New legal deadlines or audit requirements facing the company, announced or effective within {window} (GDPR, EU AI Act, SOC2, ISO 27001, SEC rules, HIPAA, etc.)
+3. SYSTEM OUTAGE / PUBLIC FAILURE — Technical outage, data breach, or system failure that became public within {window}.
+4. TECH REFRESH SIGNALS — Legacy system end-of-life, vendor sunset, or public RFP/RFI issued within {window}.
 {extra}
 
-Search news archives, regulatory filings, security databases (HaveIBeenPwned, known breaches), Gartner, industry trade press.
+{_source_instructions(domain)}
+Also search: security breach databases, Gartner, Forrester, industry trade press, regulatory filings.
 
 Return ONLY a JSON array. Each object must have exactly these fields:
 - signal_type: one of "contract_renewal" | "regulatory_compliance" | "system_outage" | "tech_refresh"
 - signal_title: short headline (≤15 words)
 - summary: 2–3 sentence summary including the sales implication
 - urgency: "Immediate" | "Within 6 months" | "Within 12 months" | "Watch"
-- date: date or deadline (e.g. "Renewal due Jan 2026", "Breach: Aug 2024")
+- date: date or deadline — must be within or triggered within {window}
 - source: URL or publication name
 
-Return [] if nothing found. Return ONLY the JSON array."""
+Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
 
 def _ranking_prompt(
