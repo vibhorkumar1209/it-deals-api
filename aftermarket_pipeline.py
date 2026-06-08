@@ -512,24 +512,71 @@ READINESS_FIELDS = [
 ]
 
 
-def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str, cap_data: list[dict] | None = None, agg_data: list[dict] | None = None) -> str:
+def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str,
+                          cap_data: list[dict] | None = None,
+                          agg_data: list[dict] | None = None,
+                          spend_module_rows: list[dict] | None = None) -> str:
     ind = f" ({industry})" if industry else ""
     vendor = target_vendor or "the vendor"
     from collections import defaultdict
-    by_domain: dict = defaultdict(list)
+
+    # Build per-domain context from capabilities: tech + existing vendor relationship
+    cap_by_domain: dict = defaultdict(lambda: {"techs": [], "vendor_hit": False, "vendor_signals": []})
     for r in (cap_data or []):
-        tech = r.get("technology","")
+        d = r.get("domain", "")
+        tech = r.get("technology", "")
         if tech and tech not in ("Unknown/Not Disclosed", "-"):
-            by_domain[r.get("domain","")].append(tech)
-    cap_intel = "; ".join(f"{d}: {', '.join(ts[:2])}" for d,ts in list(by_domain.items())[:8]) or "limited data"
-    spend_ref = " | ".join(f"{r.get('spend_type')}: {r.get('estimate','?')}" for r in (agg_data or [])[:4])
+            cap_by_domain[d]["techs"].append(tech)
+        # Flag if target vendor appears in technology or vendor relationship fields
+        rel = (r.get("vendor_relationship") or r.get("relationship") or "").lower()
+        tech_lower = tech.lower()
+        vendor_lower = vendor.lower()
+        if vendor_lower in tech_lower or vendor_lower in rel:
+            cap_by_domain[d]["vendor_hit"] = True
+            if tech:
+                cap_by_domain[d]["vendor_signals"].append(tech)
+
+    cap_lines = []
+    for d, info in list(cap_by_domain.items())[:9]:
+        techs_str = ", ".join(info["techs"][:3]) or "Unknown"
+        vendor_flag = f" ⚠️ {vendor} ALREADY DEPLOYED" if info["vendor_hit"] else ""
+        cap_lines.append(f"  {d}: {techs_str}{vendor_flag}")
+    cap_intel = "\n".join(cap_lines) or "  limited data"
+
+    # Build per-domain spend reference from Spend by Module (authoritative figures)
+    spend_by_domain: dict[str, str] = {}
+    for r in (spend_module_rows or []):
+        dm = r.get("domain", "")
+        cs = r.get("current_spend", "")
+        if dm and cs:
+            spend_by_domain[dm] = cs
+
+    spend_lines = "\n".join(f"  {d}: {v}" for d, v in spend_by_domain.items()) if spend_by_domain else "  (not available — estimate from market benchmarks)"
+
+    agg_ref = " | ".join(f"{r.get('spend_type')}: {r.get('estimate','?')}" for r in (agg_data or [])[:4])
 
     return f"""You are a vendor readiness analyst. Use Google Search to find live signals.
 
 COMPANY: {company_name}{ind}
 VENDOR BEING EVALUATED: {vendor}
-KNOWN TECH STACK: {cap_intel}
-AGGREGATE SPEND CONTEXT: {spend_ref}
+
+KNOWN TECH STACK (from Capabilities research — use for existing_rel_score):
+{cap_intel}
+
+SPEND BY MODULE — AUTHORITATIVE FIGURES (use these EXACTLY for total_domain_spend):
+{spend_lines}
+
+AGGREGATE SPEND CONTEXT: {agg_ref}
+
+CRITICAL RULES FOR SPEND & TAM:
+1. total_domain_spend MUST copy the range from "SPEND BY MODULE" above for that domain exactly.
+   If a domain is missing from SPEND BY MODULE, use market benchmark but flag it.
+2. vendor_adjusted_tam = total_domain_spend × (weighted_readiness / 100)
+   Apply readiness % to BOTH ends of the range: e.g. $0.9M-$1.2M × 58% = $0.52M-$0.70M
+3. tam_rationale must show: midpoint = (low + high) / 2, then midpoint × readiness%
+4. existing_rel_score: if the KNOWN TECH STACK above shows "{vendor} ALREADY DEPLOYED" for this
+   domain, score must be ≥ 80. If not deployed but pilot/evaluation mentioned, score 40-70.
+   If no evidence, score ≤ 30.
 
 SEARCHES TO RUN:
 - "{company_name}" "{vendor}" deployed OR partnership OR implementation
@@ -542,13 +589,12 @@ TASK: For EACH of the 9 modules listed below, assess vendor displacement readine
 
 SCORING RULES:
 - Score each category 0-100 based on evidence found
-- existing_rel_score (weight 0.30): Is vendor already deployed or in a pilot at this company?
+- existing_rel_score (weight 0.30): Is {vendor} already deployed or in a pilot at this company? (see CRITICAL RULE 4)
 - it_signals_score (weight 0.15): IT job postings, RFPs, tech evaluations mentioning this domain?
 - company_signals_score (weight 0.20): Is company growing, transforming, or investing in this domain?
 - exec_signals_score (weight 0.15): Executive statements, LinkedIn posts, conference talks about this domain?
 - budget_signals_score (weight 0.20): Budget announcements, IT spend news, contract renewals in this domain?
 - weighted_readiness = (existing_rel_score × 0.30) + (it_signals_score × 0.15) + (company_signals_score × 0.20) + (exec_signals_score × 0.15) + (budget_signals_score × 0.20)
-- vendor_adjusted_tam = total_domain_spend × (weighted_readiness / 100)
 
 MODULES: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation
 
@@ -585,9 +631,9 @@ Return ONLY a valid JSON array. Each element must follow this exact structure:
     ],
     "weighted_readiness": 58,
     "displacement_opp": "High",
-    "total_domain_spend": "$10M-$20M",
-    "vendor_adjusted_tam": "$5.8M-$11.6M",
-    "tam_rationale": "$15M midpoint × 58% readiness = $8.7M vendor-adjusted TAM"
+    "total_domain_spend": "$0.9M-$1.2M",
+    "vendor_adjusted_tam": "$0.52M-$0.70M",
+    "tam_rationale": "Midpoint = ($0.9M+$1.2M)/2 = $1.05M × 58% readiness = $0.61M vendor-adjusted TAM"
   }}
 ]
 
@@ -808,25 +854,15 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"✅ Aggregate spend: {len(agg_rows) if isinstance(agg_rows, list) else 0} categories — now synthesising spend by module & readiness…"}
     await asyncio.sleep(0)
 
-    # Phase 2: Launch spend_module + readiness synthesis using cap + agg data (NO search grounding)
+    # Phase 2a: Spend by module (no search grounding — pure synthesis from cap + agg data)
     if "spend_module" in run:
         spend_future = loop.run_in_executor(
             None, _gemini_call_sync,
             _spend_module_prompt(company_name, industry, all_cap_rows, agg_rows if isinstance(agg_rows, list) else []),
             False, "spend_module"
         )
-    if "readiness" in run:
-        # Readiness needs search grounding — signal intelligence (hiring, RFPs, exec agenda)
-        # requires live web data. Uses 32768 output tokens because 9 modules × nested
-        # signal arrays easily exceeds the 8192 default.
-        ready_future = loop.run_in_executor(
-            None, _gemini_call_sync,
-            _readiness_tam_prompt(company_name, industry, target_vendor, all_cap_rows, agg_rows if isinstance(agg_rows, list) else []),
-            True, "readiness_tam",
-            32768,  # max_output_tokens — readiness is the largest response
-        )
 
-    # Collect IT deals in parallel while Phase 2 synthesises
+    # Collect IT deals in parallel while spend_module synthesises
     spend_deal_rows = await _collect_future(deals_future, "spend_deals", timeout=90) if deals_future else []
     for row in (spend_deal_rows if isinstance(spend_deal_rows, list) else []):
         if isinstance(row, dict):
@@ -835,7 +871,7 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"✅ IT deals: {len(spend_deal_rows) if isinstance(spend_deal_rows, list) else 0} deals"}
     await asyncio.sleep(0)
 
-    # Collect spend by module (Phase 2 synthesis result)
+    # Collect spend by module — must complete BEFORE launching readiness so TAM uses real spend figures
     spend_rows = await _collect_future(spend_future, "spend_module", timeout=120) if spend_future else []
     for row in (spend_rows if isinstance(spend_rows, list) else []):
         if isinstance(row, dict):
@@ -843,6 +879,22 @@ async def run_aftermarket_deep_dive(
             await asyncio.sleep(0.04)
     yield {"type": "heartbeat", "message": f"✅ Spend by module: {len(spend_rows) if isinstance(spend_rows, list) else 0} rows"}
     await asyncio.sleep(0)
+
+    # Phase 2b: Readiness Matrix + TAM — launched AFTER spend_module so it can use real spend figures.
+    # Needs search grounding for live signals (hiring, RFPs, exec agenda).
+    # Uses 32768 output tokens: 9 modules × nested signal arrays easily exceeds 8192.
+    if "readiness" in run:
+        ready_future = loop.run_in_executor(
+            None, _gemini_call_sync,
+            _readiness_tam_prompt(
+                company_name, industry, target_vendor,
+                all_cap_rows,
+                agg_rows if isinstance(agg_rows, list) else [],
+                spend_rows if isinstance(spend_rows, list) else [],
+            ),
+            True, "readiness_tam",
+            32768,
+        )
 
     # ── Step 4: Readiness Matrix + TAM ───────────────────────────────────────
     yield {"type": "heartbeat", "message": "🎯 Table 4: Collecting readiness matrix and TAM estimates…"}
