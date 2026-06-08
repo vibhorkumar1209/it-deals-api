@@ -531,7 +531,8 @@ def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str,
         rel = (r.get("vendor_relationship") or r.get("relationship") or "").lower()
         tech_lower = tech.lower()
         vendor_lower = vendor.lower()
-        if vendor_lower in tech_lower or vendor_lower in rel:
+        # Only flag if vendor is non-empty (empty string matches everything via Python's `in`)
+        if vendor_lower and (vendor_lower in tech_lower or vendor_lower in rel):
             cap_by_domain[d]["vendor_hit"] = True
             if tech:
                 cap_by_domain[d]["vendor_signals"].append(tech)
@@ -769,14 +770,27 @@ async def run_aftermarket_deep_dive(
     agg_future     = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend") if "agg_spend" in run else None
     deals_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals") if "spend_deals" in run else None
 
-    # If spend_module or readiness requested but capabilities not in run,
-    # fire a lightweight search to get enough context for Phase 2 synthesis
-    needs_context = ("spend_module" in run or "readiness" in run) and "capabilities" not in run
+    # If spend_module (but NOT readiness-only) is requested without capabilities,
+    # fire a lightweight search to get context for synthesis.
+    # Readiness-only skips context: it uses Google Search grounding internally and
+    # serial context fetching (~105s) eats into the readiness timeout budget.
+    readiness_only = run == {"readiness"}
+    needs_context = ("spend_module" in run) and "capabilities" not in run
     context_future = loop.run_in_executor(
         None, _gemini_call_sync,
         _cap_prompt(company_name, "Warranty Management", industry, target_vendor),
         True, "cap_context_lite"
     ) if needs_context else None
+
+    # Readiness-only fast path: launch readiness immediately without waiting for
+    # context/agg (those add ~105s of serial blocking before readiness even starts).
+    if readiness_only:
+        ready_future = loop.run_in_executor(
+            None, _gemini_call_sync,
+            _readiness_tam_prompt(company_name, industry, target_vendor, [], [], []),
+            True, "readiness_tam",
+            32768,
+        )
 
     spend_future   = None
     ready_future   = None
@@ -834,11 +848,11 @@ async def run_aftermarket_deep_dive(
     await asyncio.sleep(0)
 
     # Collect aggregate spend (needed as context for Phase 2)
-    # If agg_spend not in run, do a quick fetch anyway for Phase 2 context
+    # Readiness-only skips agg gathering — readiness was already launched above.
     if agg_future:
         agg_rows = await _collect_future(agg_future, "agg_spend", timeout=90)
-    elif "spend_module" in run or "readiness" in run:
-        # Fetch aggregate spend as context even if not in sections_to_run
+    elif "spend_module" in run and not readiness_only:
+        # Fetch aggregate spend as context for spend_module synthesis
         yield {"type": "heartbeat", "message": "💰 Fetching spend context for Phase 2…"}
         await asyncio.sleep(0)
         agg_rows = await _run_async(_aggregate_spend_prompt(company_name, industry), True, "agg_context", timeout=90)
@@ -881,9 +895,10 @@ async def run_aftermarket_deep_dive(
     await asyncio.sleep(0)
 
     # Phase 2b: Readiness Matrix + TAM — launched AFTER spend_module so it can use real spend figures.
+    # Exception: readiness-only was already launched at top (fast path) with empty context.
     # Needs search grounding for live signals (hiring, RFPs, exec agenda).
     # Uses 32768 output tokens: 9 modules × nested signal arrays easily exceeds 8192.
-    if "readiness" in run:
+    if "readiness" in run and not readiness_only:
         ready_future = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_tam_prompt(
@@ -900,7 +915,10 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": "🎯 Table 4: Collecting readiness matrix and TAM estimates…"}
     await asyncio.sleep(0)
 
-    readiness_rows = await _collect_future(ready_future, "readiness_tam", timeout=360) if ready_future else []
+    # 480s timeout: readiness-only starts immediately (no serial pre-processing overhead)
+    # Normal path starts after spend_module (~120s); with 5 retries + backoff up to 210s sleep
+    # + 180s call time = 510s worst case — increase if 503s are still hitting.
+    readiness_rows = await _collect_future(ready_future, "readiness_tam", timeout=480) if ready_future else []
     for row in (readiness_rows if isinstance(readiness_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "readiness_row", "row": row}
