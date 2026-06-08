@@ -751,7 +751,7 @@ async def run_aftermarket_deep_dive(
 
     sections_to_run: subset of ALL_SECTIONS to regenerate. None = run all.
     """
-    run = sections_to_run if sections_to_run else ALL_SECTIONS
+    run = set(sections_to_run) if sections_to_run else ALL_SECTIONS
     partial = bool(sections_to_run)  # True if only regenerating some sections
 
     if partial:
