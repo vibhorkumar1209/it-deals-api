@@ -915,10 +915,32 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": "🎯 Table 4: Collecting readiness matrix and TAM estimates…"}
     await asyncio.sleep(0)
 
-    # 480s timeout: readiness-only starts immediately (no serial pre-processing overhead)
-    # Normal path starts after spend_module (~120s); with 5 retries + backoff up to 210s sleep
-    # + 180s call time = 510s worst case — increase if 503s are still hitting.
-    readiness_rows = await _collect_future(ready_future, "readiness_tam", timeout=480) if ready_future else []
+    # Poll with heartbeats every 25s — critical to keep SSE connection alive.
+    # A silent await of up to 480s causes Render/browser to drop the connection,
+    # which is why readiness appeared to always return empty.
+    readiness_rows = []
+    if ready_future:
+        READY_TIMEOUT = 480
+        elapsed_ready = 0
+        POLL_INTERVAL = 25
+        while not ready_future.done() and elapsed_ready < READY_TIMEOUT:
+            try:
+                readiness_rows = await asyncio.wait_for(asyncio.shield(ready_future), timeout=POLL_INTERVAL)
+                break
+            except asyncio.TimeoutError:
+                elapsed_ready += POLL_INTERVAL
+                yield {"type": "heartbeat", "message": f"⏳ Analysing readiness signals… ({elapsed_ready}s)"}
+                await asyncio.sleep(0)
+        else:
+            if ready_future.done():
+                try:
+                    readiness_rows = ready_future.result()
+                except Exception as e:
+                    logger.error(f"readiness_tam result error: {e}")
+            else:
+                ready_future.cancel()
+                logger.warning("readiness_tam: timed out after 480s")
+
     for row in (readiness_rows if isinstance(readiness_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "readiness_row", "row": row}
