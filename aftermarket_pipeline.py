@@ -135,8 +135,13 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
     if use_search:
         config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
 
-    MAX_RETRIES = 10
+    MAX_RETRIES = 6
+    TOTAL_BUDGET = 300  # hard cap: all retries combined must finish within 5 min
+    call_start = _time.time()
     for attempt in range(1, MAX_RETRIES + 1):
+        if _time.time() - call_start > TOTAL_BUDGET:
+            logger.warning(f"Gemini [{label}] total budget {TOTAL_BUDGET}s exceeded — giving up")
+            return []
         try:
             client = genai.Client(api_key=GOOGLE_AI_KEY)
             response = client.models.generate_content(
@@ -152,8 +157,13 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
             if is_quota:
                 raise RuntimeError("Gemini quota exhausted — upgrade to paid API plan.") from e
             if is_retry and attempt < MAX_RETRIES:
-                wait = min(20 * attempt, 120)  # 20s, 40s, 60s, 80s, 100s, 120s…
-                logger.warning(f"Gemini [{label}] transient error attempt {attempt}/{MAX_RETRIES}, sleeping {wait}s: {err[:80]}")
+                elapsed = _time.time() - call_start
+                remaining = TOTAL_BUDGET - elapsed
+                wait = min(20 * attempt, 60, max(0, remaining - 10))
+                if wait <= 0:
+                    logger.warning(f"Gemini [{label}] no time left for retry — giving up")
+                    return []
+                logger.warning(f"Gemini [{label}] transient error attempt {attempt}/{MAX_RETRIES}, sleeping {wait:.0f}s: {err[:80]}")
                 _time.sleep(wait)
                 continue
             logger.error(f"Aftermarket Gemini [{label}]: {e}")
@@ -940,35 +950,6 @@ async def run_aftermarket_deep_dive(
             else:
                 ready_future.cancel()
                 logger.warning("readiness_tam: timed out after 480s")
-
-    # Auto-retry once if first attempt returned empty (503 burst may have cleared)
-    if not readiness_rows and ready_future is not None:
-        yield {"type": "heartbeat", "message": "🔄 Readiness returned empty — waiting 30s then retrying automatically…"}
-        await asyncio.sleep(30)
-        retry_prompt = _readiness_tam_prompt(
-            company_name, industry, target_vendor,
-            all_cap_rows,
-            agg_rows if isinstance(agg_rows, list) else [],
-            spend_rows if isinstance(spend_rows, list) else [],
-        )
-        retry_future = loop.run_in_executor(None, _gemini_call_sync, retry_prompt, True, "readiness_tam_retry", 32768)
-        elapsed_retry = 0
-        while not retry_future.done() and elapsed_retry < 480:
-            try:
-                readiness_rows = await asyncio.wait_for(asyncio.shield(retry_future), timeout=25)
-                break
-            except asyncio.TimeoutError:
-                elapsed_retry += 25
-                yield {"type": "heartbeat", "message": f"⏳ Retry: analysing readiness signals… ({elapsed_retry}s)"}
-                await asyncio.sleep(0)
-        else:
-            if retry_future.done():
-                try:
-                    readiness_rows = retry_future.result()
-                except Exception as e:
-                    logger.error(f"readiness_tam_retry result error: {e}")
-            else:
-                retry_future.cancel()
 
     for row in (readiness_rows if isinstance(readiness_rows, list) else []):
         if isinstance(row, dict):
