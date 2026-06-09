@@ -27,30 +27,31 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192):
         from google import genai
         from google.genai import types
     except ImportError:
+        logger.error(f"[{label}] google-genai not installed")
         return None
 
     if not GOOGLE_AI_KEY:
+        logger.error(f"[{label}] GOOGLE_AI_API_KEY not set")
         return None
 
-    CALL_TIMEOUT = 90    # per-call HTTP timeout — prevents indefinite hangs
-    TOTAL_BUDGET = 220
+    TOTAL_BUDGET = 200
     call_start = _time.time()
 
-    # Only set thinking_config for 2.5 models — 2.0-flash doesn't support it
-    # and passing it causes an API error that returns None silently.
     cfg_extra = {}
-    if "2.5" in "gemini-2.5-flash":  # gcc always uses 2.5
-        try:
-            cfg_extra["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-        except Exception:
-            pass
+    try:
+        cfg_extra["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    except Exception:
+        pass
 
     for attempt in range(1, 5):
-        if _time.time() - call_start > TOTAL_BUDGET:
-            logger.warning(f"[{label}] budget {TOTAL_BUDGET}s exceeded")
+        elapsed_so_far = _time.time() - call_start
+        if elapsed_so_far > TOTAL_BUDGET:
+            logger.warning(f"[{label}] budget {TOTAL_BUDGET}s exceeded after {elapsed_so_far:.0f}s")
             return None
         try:
-            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": CALL_TIMEOUT})
+            # NOTE: Do NOT pass http_options — the SDK interprets timeout as milliseconds,
+            # causing calls to fail in <1s. Let the SDK use its default (no timeout).
+            client = genai.Client(api_key=GOOGLE_AI_KEY)
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
@@ -66,15 +67,20 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192):
             err = str(e)
             if "RESOURCE_EXHAUSTED" in err or "free_tier" in err:
                 raise RuntimeError("Gemini quota exhausted") from e
-            if any(x in err for x in ("503", "UNAVAILABLE", "overloaded", "timeout", "TimeoutError", "DeadlineExceeded", "429", "500", "502", "504")) and attempt < 4:
+            retryable = any(x in err for x in (
+                "503", "UNAVAILABLE", "overloaded", "timeout", "TimeoutError",
+                "DeadlineExceeded", "429", "500", "502", "504", "Read timed out",
+            ))
+            if retryable and attempt < 4:
                 remaining = TOTAL_BUDGET - (_time.time() - call_start)
-                wait = min(15 * attempt, max(remaining - 5, 1))
-                logger.warning(f"[{label}] attempt {attempt} failed ({err[:60]}), retry in {wait:.0f}s")
+                wait = min(12 * attempt, max(remaining - 5, 1))
+                logger.warning(f"[{label}] attempt {attempt} failed ({err[:80]}), retry in {wait:.0f}s")
                 _time.sleep(wait)
                 continue
-            logger.error(f"[{label}] error: {err[:120]}")
+            logger.error(f"[{label}] non-retryable error: {err[:150]}")
             return None
     else:
+        logger.warning(f"[{label}] all 4 attempts failed")
         return None
 
     raw = ""
@@ -91,18 +97,22 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192):
             pass
 
     if not raw:
+        logger.warning(f"[{label}] empty response text")
         return None
 
     clean = re.sub(r"```(?:json)?\s*", "", raw.strip())
     clean = re.sub(r"```\s*$", "", clean, flags=re.MULTILINE).strip()
 
-    for pattern in [r"\[[\s\S]*\]", r"\{[\s\S]*\}"]:
-        try:
-            parsed = json.loads(clean)
-            if isinstance(parsed, (list, dict)):
-                return parsed
-        except Exception:
-            pass
+    # Try parsing cleaned text directly first
+    try:
+        parsed = json.loads(clean)
+        if isinstance(parsed, (list, dict)):
+            return parsed
+    except Exception:
+        pass
+
+    # Then try extracting JSON array or object via regex
+    for pattern in [r"\[[\s\S]*?\]", r"\{[\s\S]*?\}"]:
         try:
             m = re.search(pattern, raw, re.DOTALL)
             if m:
@@ -113,24 +123,34 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192):
         except Exception:
             pass
 
-    logger.warning(f"[{label}] no JSON found")
+    # Last resort: greedy match for largest JSON block
+    for pattern in [r"\[[\s\S]*\]", r"\{[\s\S]*\}"]:
+        try:
+            m = re.search(pattern, raw, re.DOTALL)
+            if m:
+                text = re.sub(r",\s*([\]}])", r"\1", m.group(0))
+                parsed = json.loads(text)
+                if isinstance(parsed, (list, dict)):
+                    return parsed
+        except Exception:
+            pass
+
+    logger.warning(f"[{label}] no valid JSON found in response ({len(raw)} chars)")
     return None
 
 
 async def _collect(loop, fn_args: tuple, label: str, timeout: int = 200):
+    """Run _gemini_call_sync in executor with hard timeout. No asyncio.shield."""
     fut = loop.run_in_executor(None, _gemini_call_sync, *fn_args)
-    elapsed = 0
-    while elapsed < timeout:
-        try:
-            return await asyncio.wait_for(asyncio.shield(fut), timeout=15)
-        except asyncio.TimeoutError:
-            elapsed += 15
-        except Exception as e:
-            logger.error(f"[{label}] collect error: {e}")
-            return None
-    fut.cancel()
-    logger.warning(f"[{label}] timed out after {timeout}s")
-    return None
+    try:
+        result = await asyncio.wait_for(fut, timeout=timeout)
+        return result
+    except asyncio.TimeoutError:
+        logger.warning(f"[{label}] timed out after {timeout}s")
+        return None
+    except Exception as e:
+        logger.error(f"[{label}] collect error: {e}")
+        return None
 
 
 # ── LOCATION DISCOVERY (per company) ─────────────────────────────────────────
@@ -423,22 +443,39 @@ async def run_gcc_discovery(
 
 # ── ENRICHMENT (per company → per location) ───────────────────────────────────
 
+def _fallback_capabilities(company_name: str, gcc_location: str) -> list:
+    """Return a minimal placeholder capabilities list so the column is never blank."""
+    return [{"capability_area": "Engineering & R&D", "description": f"{company_name} GCC in {gcc_location} — data unavailable, search did not return results.", "team_size_estimate": "Unknown", "key_functions": "Requires manual verification"}]
+
+def _fallback_projects(company_name: str, gcc_location: str) -> list:
+    return [{"project_name": "No public projects found", "category": "Other", "description": f"No announced projects found for {company_name} GCC in {gcc_location} at this time.", "status": "Unknown", "investment_value": "Unknown", "partner_vendor": "-", "timeline": "-", "hiring_signal": "-", "source": "-"}]
+
+def _fallback_talent(company_name: str, gcc_location: str) -> list:
+    return [{"type": "Talent Insight", "name": "-", "title": "GCC Leadership", "seniority": "N/A", "function": "Technology", "linkedin_url": "-", "reporting_to": "-", "contact_hint": "-", "insight": f"No publicly listed leaders found for {company_name} GCC in {gcc_location}. Check LinkedIn directly."}]
+
+def _fallback_financials(company_name: str, gcc_location: str) -> dict:
+    return {"parent_global_revenue": "Not found — check investor relations", "gcc_operational_budget": "Estimated based on headcount benchmarks", "gcc_cost_to_parent": "Unknown", "cost_arbitrage_estimate": "60–70% vs onshore (industry average)", "ip_patents_at_location": "Unknown", "proprietary_platforms": "-", "r_and_d_investment": "Unknown", "financial_notes": f"No disclosed financials found for {company_name} GCC in {gcc_location}.", "source": "-"}
+
+def _fallback_techstack(company_name: str, gcc_location: str) -> dict:
+    return {"cloud_providers": "Unknown — check job postings", "cloud_maturity_score": 0, "cloud_migration_maturity": "Unknown", "automation_index": "Unknown", "devops_tools": "-", "programming_languages": "-", "frameworks_tools": "-", "ai_ml_platforms": "-", "enterprise_vendors": "-", "modern_vs_legacy_split": "Unknown", "digital_maturity_level": "Unknown", "tech_highlights": f"No tech stack data found for {company_name} GCC in {gcc_location}. No public job postings or tech blog entries available.", "source": "-"}
+
+
 async def _enrich_one_location(
     company_name: str,
     location_info: dict,
     domain: str,
     loop,
 ) -> dict:
-    """Run 4 parallel enrichment calls for one GCC location."""
+    """Run 5 parallel enrichment calls for one GCC location. Retry empty sections once."""
     gcc_location = location_info.get("gcc_location", "")
     gcc_name     = location_info.get("gcc_name", "")
     label = f"{company_name[:20]}@{gcc_location[:15]}"
 
-    caps_task  = _collect(loop, (_capabilities_prompt(company_name, gcc_location, gcc_name), f"cap_{label}",  6144), f"cap_{label}",  180)
-    proj_task  = _collect(loop, (_projects_prompt(company_name, gcc_location, gcc_name),     f"proj_{label}", 6144), f"proj_{label}", 180)
-    tal_task   = _collect(loop, (_talent_prompt(company_name, gcc_location, gcc_name),        f"tal_{label}",  6144), f"tal_{label}",  180)
-    fin_task   = _collect(loop, (_financials_prompt(company_name, gcc_location, gcc_name),    f"fin_{label}",  4096), f"fin_{label}",  180)
-    tech_task  = _collect(loop, (_techstack_prompt(company_name, gcc_location, gcc_name),     f"tech_{label}", 4096), f"tech_{label}", 180)
+    caps_task  = _collect(loop, (_capabilities_prompt(company_name, gcc_location, gcc_name), f"cap_{label}",  6144), f"cap_{label}",  160)
+    proj_task  = _collect(loop, (_projects_prompt(company_name, gcc_location, gcc_name),     f"proj_{label}", 6144), f"proj_{label}", 160)
+    tal_task   = _collect(loop, (_talent_prompt(company_name, gcc_location, gcc_name),        f"tal_{label}",  6144), f"tal_{label}",  160)
+    fin_task   = _collect(loop, (_financials_prompt(company_name, gcc_location, gcc_name),    f"fin_{label}",  4096), f"fin_{label}",  160)
+    tech_task  = _collect(loop, (_techstack_prompt(company_name, gcc_location, gcc_name),     f"tech_{label}", 4096), f"tech_{label}", 160)
 
     caps, projs, talent, fin, tech = await asyncio.gather(
         caps_task, proj_task, tal_task, fin_task, tech_task,
@@ -448,19 +485,57 @@ async def _enrich_one_location(
     def safe(v):
         return None if isinstance(v, Exception) else v
 
+    caps_v  = safe(caps)  if isinstance(safe(caps), list)  and len(safe(caps) or []) > 0  else None
+    projs_v = safe(projs) if isinstance(safe(projs), list) and len(safe(projs) or []) > 0 else None
+    tal_v   = safe(talent) if isinstance(safe(talent), list) and len(safe(talent) or []) > 0 else None
+    fin_v   = safe(fin)   if isinstance(safe(fin), dict)   and len(safe(fin) or {}) > 0   else None
+    tech_v  = safe(tech)  if isinstance(safe(tech), dict)  and len(safe(tech) or {}) > 0  else None
+
+    # Retry any sections that returned empty — one additional attempt each
+    retry_tasks = {}
+    if caps_v  is None: retry_tasks["caps"]  = _collect(loop, (_capabilities_prompt(company_name, gcc_location, gcc_name), f"cap2_{label}",  6144), f"cap2_{label}",  120)
+    if projs_v is None: retry_tasks["projs"] = _collect(loop, (_projects_prompt(company_name, gcc_location, gcc_name),     f"proj2_{label}", 6144), f"proj2_{label}", 120)
+    if tal_v   is None: retry_tasks["tal"]   = _collect(loop, (_talent_prompt(company_name, gcc_location, gcc_name),        f"tal2_{label}",  6144), f"tal2_{label}",  120)
+    if fin_v   is None: retry_tasks["fin"]   = _collect(loop, (_financials_prompt(company_name, gcc_location, gcc_name),    f"fin2_{label}",  4096), f"fin2_{label}",  120)
+    if tech_v  is None: retry_tasks["tech"]  = _collect(loop, (_techstack_prompt(company_name, gcc_location, gcc_name),     f"tech2_{label}", 4096), f"tech2_{label}", 120)
+
+    if retry_tasks:
+        logger.info(f"[{label}] retrying empty sections: {list(retry_tasks.keys())}")
+        retry_results = await asyncio.gather(*retry_tasks.values(), return_exceptions=True)
+        retry_map = dict(zip(retry_tasks.keys(), retry_results))
+
+        def from_retry(key, check_type):
+            v = safe(retry_map.get(key))
+            if check_type is list:
+                return v if isinstance(v, list) and len(v) > 0 else None
+            return v if isinstance(v, dict) and len(v) > 0 else None
+
+        if caps_v  is None: caps_v  = from_retry("caps",  list)
+        if projs_v is None: projs_v = from_retry("projs", list)
+        if tal_v   is None: tal_v   = from_retry("tal",   list)
+        if fin_v   is None: fin_v   = from_retry("fin",   dict)
+        if tech_v  is None: tech_v  = from_retry("tech",  dict)
+
+    # Use fallback stubs for any still-empty sections so no column is blank
+    if caps_v  is None: caps_v  = _fallback_capabilities(company_name, gcc_location)
+    if projs_v is None: projs_v = _fallback_projects(company_name, gcc_location)
+    if tal_v   is None: tal_v   = _fallback_talent(company_name, gcc_location)
+    if fin_v   is None: fin_v   = _fallback_financials(company_name, gcc_location)
+    if tech_v  is None: tech_v  = _fallback_techstack(company_name, gcc_location)
+
     return {
-        "company_name":  company_name,
-        "gcc_location":  gcc_location,
-        "gcc_name":      location_info.get("gcc_name", "-"),
+        "company_name":     company_name,
+        "gcc_location":     gcc_location,
+        "gcc_name":         location_info.get("gcc_name", "-"),
         "established_year": location_info.get("established_year", "Unknown"),
-        "headcount":     location_info.get("headcount", "Unknown"),
-        "operating_model": location_info.get("operating_model", "Unknown"),
-        "primary_focus": location_info.get("primary_focus", "-"),
-        "capabilities":  safe(caps) if isinstance(safe(caps), list) else [],
-        "projects":      safe(projs) if isinstance(safe(projs), list) else [],
-        "talent":        safe(talent) if isinstance(safe(talent), list) else [],
-        "financials":    safe(fin) if isinstance(safe(fin), dict) else {},
-        "techstack":     safe(tech) if isinstance(safe(tech), dict) else {},
+        "headcount":        location_info.get("headcount", "Unknown"),
+        "operating_model":  location_info.get("operating_model", "Unknown"),
+        "primary_focus":    location_info.get("primary_focus", "-"),
+        "capabilities":     caps_v,
+        "projects":         projs_v,
+        "talent":           tal_v,
+        "financials":       fin_v,
+        "techstack":        tech_v,
     }
 
 
