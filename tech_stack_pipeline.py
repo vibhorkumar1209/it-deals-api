@@ -127,61 +127,134 @@ def _build_tech_stack_prompt(
     call_num: int,
 ) -> str:
     linkedin_block = f" | LinkedIn: {linkedin_url}" if linkedin_url else ""
-
-    # Determine mode
     wide_mode = not focus_categories and not focus_vendors
-    mode_label = "WIDE-SPECTRUM" if wide_mode else "LASER-FOCUSED COMPETITIVE"
+
+    # Wide-mode: 3 calls cover different category slices
+    WIDE_SLICES = {
+        1: {
+            "label": "Business Operations & Enterprise Planning, HR & Talent",
+            "categories": [
+                "ERP & Core Financials", "CRM & Account Management", "Billing & Subscription",
+                "HR & Payroll", "Applicant Tracking / ATS", "Total Rewards & Benefits",
+                "Contract Lifecycle Management", "Procurement & Source-to-Pay",
+            ],
+        },
+        2: {
+            "label": "Engineering, Cloud Infrastructure, Security & Observability",
+            "categories": [
+                "Cloud Hosting", "Databases", "DevOps, CI/CD & Orchestration",
+                "Container & Orchestration", "Identity & IAM", "Cybersecurity / EDR",
+                "SIEM & Threat Detection", "GRC & Compliance", "APM & Monitoring",
+                "Version Control", "API Management", "Network & VPN", "Device Management / MDM",
+            ],
+        },
+        3: {
+            "label": "AI/Data, Sales, Marketing, Support & Workplace Productivity",
+            "categories": [
+                "Data Warehousing", "Data Integration & ETL", "Business Intelligence",
+                "Product Analytics", "AI/ML Infrastructure",
+                "Marketing Automation", "Sales Intelligence",
+                "Customer Support & Helpdesk", "E-Commerce Platform",
+                "ITSM & Service Desk", "Project & Knowledge Management",
+                "Collaboration & Productivity", "iPaaS & Integration",
+            ],
+        },
+    }
 
     if wide_mode:
-        scope_block = f"""MODE: WIDE-SPECTRUM — sweep ALL tech stack categories below.
-{WIDE_CATEGORIES}"""
+        slice_info = WIDE_SLICES.get(call_num, WIDE_SLICES[1])
+        focus_label = slice_info["label"]
+        cats_to_search = slice_info["categories"]
+        scope_block = f"""MODE: WIDE-SPECTRUM — sweep these tech stack categories:
+{chr(10).join(f'  - {c}' for c in cats_to_search)}"""
     else:
-        cat_block = ""
+        cats_to_search = focus_categories or []
+        scope_block_parts = []
         if focus_categories:
-            cat_block = "Focus categories: " + ", ".join(focus_categories)
-        vendor_block = ""
+            scope_block_parts.append("Focus categories:\n" + "\n".join(f"  - {c}" for c in focus_categories))
         if focus_vendors:
-            vendor_block = (
-                "Focus vendors (and their direct competitors): " + ", ".join(focus_vendors)
-            )
-        scope_block = f"""MODE: LASER-FOCUSED — research ONLY these areas.
-{cat_block}
-{vendor_block}
-For each listed vendor, also look for direct market competitors in the same functional bucket."""
+            scope_block_parts.append("Focus vendors (also find direct competitors in the same category):\n" + "\n".join(f"  - {v}" for v in focus_vendors))
+        scope_block = "MODE: LASER-FOCUSED\n" + "\n".join(scope_block_parts)
+        focus_label = ", ".join(focus_categories[:3] or focus_vendors[:3]) or "specified categories"
 
-    FOCUS_MAP = {
-        1: f'enterprise software stack of {company_name}: ERP, HR, finance, ITSM, communications, project management, collaboration tools',
-        2: f'technology vendors used by {company_name}: CRM, cloud infrastructure, cybersecurity, identity, databases, marketing tools',
-        3: f'software tools at {company_name}: DevOps, data analytics, AI/ML, BI, API management, integration platforms, security',
-    }
-    focus = FOCUS_MAP.get(call_num, f'complete software tool stack of {company_name}')
+    # Build category-driven searches — open-ended, no hardcoded vendor names
+    cat_searches = []
+    for i, cat in enumerate(cats_to_search[:8], 1):
+        cat_searches.append(f'C{i}. "{company_name}" "{cat}" software OR vendor OR platform OR tool 2022 OR 2023 OR 2024 OR 2025')
+        cat_searches.append(f'C{i}b. site:linkedin.com/jobs "{company_name}" {cat.split("/")[0].strip().lower()} — extract required tools from job descriptions')
+
+    # Vendor-specific searches if focus_vendors provided
+    vendor_searches = []
+    for v in (focus_vendors or [])[:6]:
+        vendor_searches.append(f'V1. "{company_name}" "{v}" deployed OR implemented OR using OR "go-live" OR case study')
+        vendor_searches.append(f'V2. "{company_name}" "{v}" OR competitor alternative — what is in use in the same category?')
+
+    # Implementation partner searches
+    si_firms = "Accenture OR TCS OR Infosys OR Wipro OR Cognizant OR Deloitte OR IBM OR Capgemini OR HCL OR PwC OR EY OR KPMG OR BCG OR Slalom OR Atos OR CGI OR DXC"
+    impl_searches = [
+        f'P1. "{company_name}" implementation partner OR "system integrator" OR "SI partner" OR "consulting partner" {si_firms}',
+        f'P2. "{company_name}" software "implemented by" OR "delivered by" OR "go-live" OR "rollout" partner 2022 OR 2023 OR 2024 OR 2025',
+        f'P3. site:linkedin.com/jobs "{company_name}" implementation OR "system integrator" consulting 2024 OR 2025',
+        f'P4. "{company_name}" ERP OR CRM OR cloud implementation "{si_firms.split(" OR ")[0]}" OR "{si_firms.split(" OR ")[1]}" case study press release',
+    ]
+
+    # Install size + renewal searches
+    install_renewal_searches = [
+        f'R1. "{company_name}" software "enterprise agreement" OR "multi-year contract" OR "enterprise license" 2022 OR 2023 OR 2024 OR 2025',
+        f'R2. "{company_name}" employees headcount seats licenses software — to estimate install size from employee count',
+        f'R3. "{company_name}" software renewal OR "contract renewal" OR "new agreement" 2024 OR 2025 OR 2026',
+        f'R4. site:g2.com OR site:trustradius.com OR site:gartner.com/reviews "{company_name}" — user reviews revealing tools + scale',
+        f'R5. "{company_name}" annual report OR 10-K 2024 — technology spend, vendor names, contract commitments',
+    ]
+
+    cat_block = "\n".join(cat_searches) if cat_searches else ""
+    vendor_block = "\nVENDOR-SPECIFIC SEARCHES:\n" + "\n".join(vendor_searches) if vendor_searches else ""
 
     fields_desc = "\n".join(f'  "{f["key"]}": "{f["label"]}"' for f in TECH_STACK_FIELDS)
     fields_example = {f["key"]: f"<{f['label']}>" for f in TECH_STACK_FIELDS}
 
-    return f"""You are a technographic research analyst. Use Google Search to find the technology stack of {company_name}.
+    return f"""You are a technographic research analyst. Use Google Search to build the technology stack of {company_name}.
 
 COMPANY: {company_name}{f" | {domain}" if domain else ""}{linkedin_block}
 
-RESEARCH FOCUS: Find the {focus} (last 5 years, 2021–2026).
+RESEARCH FOCUS (call {call_num}): {focus_label} — 2021 to 2026.
 
-Search for: job postings mentioning required tools, vendor case studies, press releases, privacy policies listing third-party software, technology partnerships, and annual reports.
+{scope_block}
 
-For each software tool found, return one JSON object with these EXACT keys:
+MANDATORY SEARCHES — run ALL of the following:
+
+BROAD BASELINE (run first):
+B1. "{company_name}" software technology vendors tools 2024 2025 — full stack overview
+B2. "{company_name}" job postings engineer developer OR architect required skills 2024 2025 site:linkedin.com/jobs
+B3. "{company_name}" privacy policy OR "cookie policy" third-party software — reveals tracking/analytics/support tools
+B4. "{company_name}" technology partner OR "strategic partnership" OR "preferred vendor" announcement 2023 OR 2024 OR 2025
+B5. site:builtwith.com OR site:wappalyzer.com OR site:stackshare.io "{company_name}" OR "{domain}" — public technographic data
+
+CATEGORY-SPECIFIC SEARCHES:
+{cat_block}
+{vendor_block}
+
+IMPLEMENTATION PARTNER SEARCHES:
+{chr(10).join(impl_searches)}
+
+INSTALL SIZE & RENEWAL DATE SEARCHES:
+{chr(10).join(install_renewal_searches)}
+
+For each software tool found, return ONE JSON object per tool. Aim for MAXIMUM coverage.
+
+Fields (EXACT keys required):
 {fields_desc}
 
-Rules:
-- tech_level3: pick the BEST matching Level 3 from this taxonomy (use exact name):
+Field rules:
+- tech_level3: exact name from this taxonomy:
 {TECH_L3_LIST}
-- tech_level2: leave empty string — derived automatically from taxonomy
-- tech_level1: leave empty string — derived automatically from taxonomy
-- integration_partner: SI/consulting firm that implemented it (e.g. "Accenture", "TCS") or "-"
-- last_detected: month-year only if known e.g. "Mar 2024", "Jan 2025" — or just year "2024" — or "-"
-- tech_install: numeric range only e.g. "500–2,000", "10,000–50,000", "100,000+" — or "-" if unknown
-- renewal_date: estimated quarter e.g. "Q2 2027" or "-"
-- confidence_score: percentage only e.g. "87%", "94%" — no text, just the number with %
-- source_info: how this was detected e.g. "Job posting", "Vendor case study", "Press release",
-  "Annual report", "Privacy policy", "LinkedIn jobs", "BuiltWith", "G2 review" — or "-"
+- tech_level2 / tech_level1: leave as empty string — derived automatically
+- integration_partner: SI/consulting firm that IMPLEMENTED it (e.g. "Accenture", "TCS", "Deloitte") — from P1–P4 searches — or "-"
+- last_detected: "Mon YYYY" if known, or just "YYYY", or "-"
+- tech_install: numeric estimate of licensed users/seats based on company headcount and deployment scope (e.g. "500–2,000", "10,000–50,000", "100,000+") — or "-"
+- renewal_date: estimated contract renewal quarter (e.g. "Q2 2027") — infer from: contract age (typical 3-5yr enterprise), press release dates, or R1/R3 search results — or "-"
+- confidence_score: "87%" etc — 95-99% for DNS/pixel/public API key; 85-94% for vendor case study/press release; 75-84% for job posting; 60-74% for industry inference
+- source_info: "Job posting", "Vendor case study", "Press release", "Annual report", "Privacy policy", "LinkedIn jobs", "BuiltWith", "G2 review", etc.
 
 Return ONLY a raw JSON array, no markdown:
 [{json.dumps(fields_example)}]
@@ -216,7 +289,7 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
                     temperature=0.1,
-                    max_output_tokens=8192,
+                    max_output_tokens=16384,
                 ),
             )
             break   # success
