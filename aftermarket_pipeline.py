@@ -134,16 +134,17 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
     config_kwargs = dict(temperature=0.15, max_output_tokens=max_output_tokens)
     if use_search:
         config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-    # Disable thinking — Gemini 2.5 Flash thinking burns 60-120s per call with no benefit
-    # for structured JSON extraction tasks.
-    try:
-        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-    except Exception:
-        pass  # older SDK version — skip
+    # Only disable thinking for 2.5 models — 2.0-flash has no thinking capability
+    # and passing ThinkingConfig to it causes an API error.
+    if "2.5" in model:
+        try:
+            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        except Exception:
+            pass  # older SDK version — skip
 
     MAX_RETRIES = 4
-    CALL_TIMEOUT = 100   # hard per-call HTTP timeout in seconds
-    TOTAL_BUDGET = 280   # all attempts combined must finish within this
+    CALL_TIMEOUT = 120   # hard per-call HTTP timeout in seconds
+    TOTAL_BUDGET = 300   # all attempts combined must finish within this
     call_start = _time.time()
     for attempt in range(1, MAX_RETRIES + 1):
         if _time.time() - call_start > TOTAL_BUDGET:

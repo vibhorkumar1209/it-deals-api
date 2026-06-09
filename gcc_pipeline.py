@@ -36,11 +36,14 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192):
     TOTAL_BUDGET = 220
     call_start = _time.time()
 
+    # Only set thinking_config for 2.5 models — 2.0-flash doesn't support it
+    # and passing it causes an API error that returns None silently.
     cfg_extra = {}
-    try:
-        cfg_extra["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-    except Exception:
-        pass
+    if "2.5" in "gemini-2.5-flash":  # gcc always uses 2.5
+        try:
+            cfg_extra["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        except Exception:
+            pass
 
     for attempt in range(1, 5):
         if _time.time() - call_start > TOTAL_BUDGET:
