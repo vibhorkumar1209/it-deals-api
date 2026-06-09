@@ -17,6 +17,13 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
 
+# Import shared taxonomy from enrich_pipeline
+try:
+    from enrich_pipeline import classify_tech, TECH_L3_LIST
+except ImportError:
+    def classify_tech(l3): return ("", "", l3)
+    TECH_L3_LIST = ""
+
 TECH_STACK_FIELDS = [
     {"key": "tech_level1",         "label": "Level 1"},
     {"key": "tech_level2",         "label": "Level 2"},
@@ -164,9 +171,10 @@ For each software tool found, return one JSON object with these EXACT keys:
 {fields_desc}
 
 Rules:
-- tech_level3: most specific technology category (e.g. "Core Banking Platform", "CRM", "Warranty Management", "Cloud IaaS", "SIEM", "Data Warehouse", "HR Management")
-- tech_level2: mid-level grouping of the tool's tech_level3 (e.g. "Enterprise Applications", "Aftermarket Technology", "Cloud Infrastructure", "Security Operations", "Analytics Platforms", "Human Capital Management")
-- tech_level1: top-level category (e.g. "Business Applications", "Operations Technology", "Infrastructure & Cloud", "Data & Analytics", "Security & Compliance", "People & Workforce")
+- tech_level3: pick the BEST matching Level 3 from this taxonomy (use exact name):
+{TECH_L3_LIST}
+- tech_level2: leave empty string — derived automatically from taxonomy
+- tech_level1: leave empty string — derived automatically from taxonomy
 - integration_partner: SI/consulting firm that implemented it (e.g. "Accenture", "TCS") or "-"
 - last_detected: month-year only if known e.g. "Mar 2024", "Jan 2025" — or just year "2024" — or "-"
 - tech_install: numeric range only e.g. "500–2,000", "10,000–50,000", "100,000+" — or "-" if unknown
@@ -329,6 +337,13 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
             for fk in FIELD_KEYS:
                 if fk not in row:
                     row[fk] = "-"
+            # Enforce taxonomy: derive L1/L2 from L3
+            l3_raw = row.get("tech_level3", "-")
+            if l3_raw and l3_raw != "-":
+                l1, l2, l3_canon = classify_tech(l3_raw)
+                row["tech_level1"] = l1 or row.get("tech_level1", "-")
+                row["tech_level2"] = l2 or row.get("tech_level2", "-")
+                row["tech_level3"] = l3_canon or l3_raw
             # Skip rows with fewer than 2 real values (likely parsing artifacts)
             real_vals = sum(1 for v in row.values() if v and v != "-")
             if real_vals < 2:

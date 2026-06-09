@@ -18,6 +18,165 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
 
+# ── Tech Taxonomy (from Tech Categorization.xlsx) ────────────────────────────
+# Maps Level 3 → (Level 1, Level 2). Used for post-processing classification.
+TECH_TAXONOMY: dict[str, tuple[str, str]] = {
+    # Communications
+    "Fixed Data": ("Communications", "Fixed Data"),
+    "Fixed Voice": ("Communications", "Fixed Voice"),
+    "Mobile Services": ("Communications", "Mobile Services"),
+    "Satellite Communications Services": ("Communications", "Satellite Communications Services"),
+    # Hardware – Client Computing
+    "Components": ("Hardware", "Client Computing"),
+    "Computing Device": ("Hardware", "Client Computing"),
+    "Peripherals": ("Hardware", "Client Computing"),
+    # Hardware – Network Infrastructure
+    "Customer Premise Equipment": ("Hardware", "Network Infrastructure"),
+    "Telecommunication Equipment": ("Hardware", "Network Infrastructure"),
+    # Hardware – Security
+    "Content Filtering and Anti-spam Appliances": ("Hardware", "Security"),
+    "Encryption and SSL Accelerators": ("Hardware", "Security"),
+    "Firewall Appliance": ("Hardware", "Security"),
+    "Physical Security Devices": ("Hardware", "Security"),
+    # Hardware – Server Computing
+    "High End Servers": ("Hardware", "Server Computing"),
+    "Mid Range Servers": ("Hardware", "Server Computing"),
+    # Hardware – Storage
+    "Direct Attached Storage": ("Hardware", "Storage"),
+    "Network Attached Storage": ("Hardware", "Storage"),
+    "Storage Area Networks": ("Hardware", "Storage"),
+    "Tape Systems": ("Hardware", "Storage"),
+    "Unclassified Storage": ("Hardware", "Storage"),
+    # Services – Application-Led Outsourcing
+    "Application Development and Maintenance": ("Services", "Application-Led Outsourcing"),
+    "Application Hosting": ("Services", "Application-Led Outsourcing"),
+    "Application Management": ("Services", "Application-Led Outsourcing"),
+    "Application Testing / Quality Management": ("Services", "Application-Led Outsourcing"),
+    # Services – Business Process Outsourcing
+    "Analytics / Business Intelligence": ("Services", "Business Process Outsourcing"),
+    "Customer Relationship Management (CRM) BPO": ("Services", "Business Process Outsourcing"),
+    "Finance and Accounting (F&A) BPO": ("Services", "Business Process Outsourcing"),
+    "Human Resources (HR) BPO": ("Services", "Business Process Outsourcing"),
+    "Industry-specific BPO": ("Services", "Business Process Outsourcing"),
+    "KPO": ("Services", "Business Process Outsourcing"),
+    "Legal Services Outsourcing": ("Services", "Business Process Outsourcing"),
+    "Processing Services": ("Services", "Business Process Outsourcing"),
+    "Procurement BPO": ("Services", "Business Process Outsourcing"),
+    "Robotic Process Automation (RPA)": ("Services", "Business Process Outsourcing"),
+    # Services – Cloud Services
+    "Business-Process-as-a-Service (BPaaS)": ("Services", "Cloud Services"),
+    "Desktop-as-a-Service (DaaS) / Workplace-as-a-Service (WaaS)": ("Services", "Cloud Services"),
+    "Infrastructure-as-a-Service (IaaS)": ("Services", "Cloud Services"),
+    "Platform-as-a-Service (PaaS)": ("Services", "Cloud Services"),
+    "Software-as-a-Service (SaaS)": ("Services", "Cloud Services"),
+    # Services – Consulting & System Integration
+    "Automation Advisory": ("Services", "Consulting & System Integration"),
+    "Business Consulting": ("Services", "Consulting & System Integration"),
+    "IT Consulting": ("Services", "Consulting & System Integration"),
+    "Sourcing Advisory": ("Services", "Consulting & System Integration"),
+    "System Integration": ("Services", "Consulting & System Integration"),
+    # Services – Digital Enterprise
+    "Blockchain": ("Services", "Digital Enterprise"),
+    "Digital Transformation": ("Services", "Digital Enterprise"),
+    "Enterprise Mobility": ("Services", "Digital Enterprise"),
+    "Social Collaboration / Enterprise Social Networking / Enterprise 2.0": ("Services", "Digital Enterprise"),
+    "Unified Communications and Collaboration": ("Services", "Digital Enterprise"),
+    "Content Services": ("Services", "Digital Enterprise"),
+    # Services – End User Services
+    "Desktop Management": ("Services", "End User Services"),
+    "Helpdesk Management": ("Services", "End User Services"),
+    "Managed Print Services": ("Services", "End User Services"),
+    "Managed Security Services": ("Services", "End User Services"),
+    "Professional Services": ("Services", "End User Services"),
+    "Service Desk": ("Services", "End User Services"),
+    # Services – Infrastructure-Led Outsourcing
+    "Business Continuity / Disaster Recovery": ("Services", "Infrastructure-Led Outsourcing"),
+    "Colocation Services": ("Services", "Infrastructure-Led Outsourcing"),
+    "Data Center Outsourcing": ("Services", "Infrastructure-Led Outsourcing"),
+    "Hardware Integration": ("Services", "Infrastructure-Led Outsourcing"),
+    "Infrastructure Hosting": ("Services", "Infrastructure-Led Outsourcing"),
+    "Infrastructure Management": ("Services", "Infrastructure-Led Outsourcing"),
+    "Infrastructure Testing": ("Services", "Infrastructure-Led Outsourcing"),
+    "Server Management": ("Services", "Infrastructure-Led Outsourcing"),
+    "Storage Services": ("Services", "Infrastructure-Led Outsourcing"),
+    # Services – IoT
+    "Industry Specific IoT Applications": ("Services", "Internet of Things (IoT)"),
+    "Smart Energy (Energy Management Application)": ("Services", "Internet of Things (IoT)"),
+    "Smart Factory / Industry 4.0": ("Services", "Internet of Things (IoT)"),
+    "Smart Health": ("Services", "Internet of Things (IoT)"),
+    "Smart Transportation / Car IT": ("Services", "Internet of Things (IoT)"),
+    # Services – Network Services
+    "Network Consulting": ("Services", "Network Services"),
+    "Network Infrastructure": ("Services", "Network Services"),
+    "Network Integration": ("Services", "Network Services"),
+    "Network Management": ("Services", "Network Services"),
+    # Software – Application Development & Deployment
+    "Application Development Software": ("Software", "Application Development & Deployment"),
+    "Application Infrastructure Middleware": ("Software", "Application Development & Deployment"),
+    "Application Life Cycle Management": ("Software", "Application Development & Deployment"),
+    "Business Process Management": ("Software", "Application Development & Deployment"),
+    "Database Management System": ("Software", "Application Development & Deployment"),
+    "Managed File Transfer": ("Software", "Application Development & Deployment"),
+    # Software – Enterprise Applications
+    "Business Intelligence and Analytics Tools": ("Software", "Enterprise Applications"),
+    "Business Risk and Compliance": ("Software", "Enterprise Applications"),
+    "Collaboration": ("Software", "Enterprise Applications"),
+    "Commerce Applications": ("Software", "Enterprise Applications"),
+    "Content Management and Creation": ("Software", "Enterprise Applications"),
+    "Engineering Applications": ("Software", "Enterprise Applications"),
+    "Enterprise Asset Management": ("Software", "Enterprise Applications"),
+    "ERP Financials": ("Software", "Enterprise Applications"),
+    "ERP Human Capital Management": ("Software", "Enterprise Applications"),
+    "ERP Procurement": ("Software", "Enterprise Applications"),
+    "ERP Order Management": ("Software", "Enterprise Applications"),
+    "ERP Manufacturing": ("Software", "Enterprise Applications"),
+    "ERP Supply Chain Planning": ("Software", "Enterprise Applications"),
+    "ERP Projects / PSA": ("Software", "Enterprise Applications"),
+    "ERP GRC": ("Software", "Enterprise Applications"),
+    "Industry Specific Applications": ("Software", "Enterprise Applications"),
+    "Office Productivity Applications and Suites": ("Software", "Enterprise Applications"),
+    "Performance Management and Analytic Applications": ("Software", "Enterprise Applications"),
+    "Sales Automation": ("Software", "Enterprise Applications"),
+    "Marketing Automation": ("Software", "Enterprise Applications"),
+    # Software – Software Infrastructure
+    "Master Data Management (MDM)": ("Software", "Software Infrastructure"),
+    "API Management": ("Software", "Software Infrastructure"),
+    "Information Management": ("Software", "Software Infrastructure"),
+    "Operating Systems": ("Software", "Software Infrastructure"),
+    "Operations Management": ("Software", "Software Infrastructure"),
+    "Security": ("Software", "Software Infrastructure"),
+    "Storage Management": ("Software", "Software Infrastructure"),
+    "Virtualisation": ("Software", "Software Infrastructure"),
+}
+
+# Build normalised lookup (lowercase → canonical) for fuzzy matching
+_TAXONOMY_LOWER: dict[str, str] = {k.lower(): k for k in TECH_TAXONOMY}
+
+TECH_L3_LIST = "\n".join(
+    f"  [{l1} > {l2}] {l3}"
+    for l3, (l1, l2) in TECH_TAXONOMY.items()
+)
+
+
+def classify_tech(level3_raw: str) -> tuple[str, str, str]:
+    """Return (level1, level2, canonical_level3) from a raw model output string."""
+    if not level3_raw:
+        return ("", "", "")
+    key = level3_raw.strip().lower()
+    # Exact match
+    canonical = _TAXONOMY_LOWER.get(key)
+    if not canonical:
+        # Partial match — find best substring hit
+        for lk, lv in _TAXONOMY_LOWER.items():
+            if key in lk or lk in key:
+                canonical = lv
+                break
+    if canonical and canonical in TECH_TAXONOMY:
+        l1, l2 = TECH_TAXONOMY[canonical]
+        return (l1, l2, canonical)
+    # No match — return raw value with blanks for L1/L2
+    return ("", "", level3_raw)
+
 # Fixed output schema — matches the IT Deal Details preset in the frontend
 SCHEMA_FIELDS = [
     {"key": "vendor",          "label": "Vendor Name",        "type": "string",
@@ -152,9 +311,10 @@ Return ONLY a valid JSON array:
 
 FIELD RULES:
 - vendor: exact name (e.g. "Infosys", "SAP S/4HANA", "Microsoft Azure", "Trimble")
-- tech_level3: most specific technology category name (e.g. "Warranty Management", "Core Banking Platform", "CRM", "Cloud IaaS", "Cybersecurity - Endpoint")
-- tech_level2: mid-level grouping of tech_level3 (e.g. "Aftermarket Technology", "Enterprise Applications", "Cloud Infrastructure", "Security")
-- tech_level1: top-level grouping (e.g. "Operations Technology", "Business Applications", "Infrastructure & Cloud", "Data & Analytics")
+- tech_level3: pick the BEST matching Level 3 from this taxonomy (use exact name):
+{TECH_L3_LIST}
+- tech_level2: leave empty string — derived automatically from taxonomy
+- tech_level1: leave empty string — derived automatically from taxonomy
 - deal_value: ALWAYS provide a value — use public figure if stated (e.g. "$3.2 billion"), otherwise ESTIMATE using industry benchmarks:
   * Large IT outsourcing (5+ yr, major vendor): $100M–$2B
   * Mid-size ERP/platform implementation: $10M–$100M
@@ -524,6 +684,12 @@ def _gemini_extract_deals_sync(
             for key in field_keys:
                 val = item.get(key)
                 row[key] = str(val) if val not in (None, "null", "None", "") else ""
+            # Enforce taxonomy: derive L1/L2 from L3
+            l3_raw = row.get("tech_level3", "")
+            l1, l2, l3_canon = classify_tech(l3_raw)
+            row["tech_level1"] = l1
+            row["tech_level2"] = l2
+            row["tech_level3"] = l3_canon
             out.append(row)
 
         logger.info(f"Parsed {len(out)} deals for {company_name}")
