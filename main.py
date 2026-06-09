@@ -645,6 +645,84 @@ async def gcc_intel(req: GCCIntelRequest):
     )
 
 
+# ── GCC Discovery ────────────────────────────────────────────────────────────
+
+class GCCDiscoverRequest(BaseModel):
+    industry: str = Field(..., min_length=1)
+    location: str = Field(default="")
+
+
+@app.post("/api/gcc-discover")
+async def gcc_discover(req: GCCDiscoverRequest):
+    """SSE stream: discover companies with GCCs in a given industry/location."""
+    from gcc_pipeline import run_gcc_discovery
+
+    async def _generate():
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        if not os.getenv("GOOGLE_AI_API_KEY"):
+            yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set."})
+            return
+
+        try:
+            async for event in run_gcc_discovery(
+                industry=req.industry,
+                location=req.location,
+            ):
+                yield _sse(event)
+        except Exception as e:
+            logger.error(f"GCC Discover error: {e}", exc_info=True)
+            yield _sse({"type": "error", "message": str(e)})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+# ── GCC Enrichment ────────────────────────────────────────────────────────────
+
+class GCCEnrichCompany(BaseModel):
+    company_name: str
+    gcc_location: str = Field(default="")
+    domain: str = Field(default="")
+
+
+class GCCEnrichRequest(BaseModel):
+    companies: list[GCCEnrichCompany] = Field(..., min_length=1)
+
+
+@app.post("/api/gcc-enrich")
+async def gcc_enrich(req: GCCEnrichRequest):
+    """SSE stream: enrich each company with 6 GCC intelligence sections."""
+    from gcc_pipeline import run_gcc_enrichment
+
+    async def _generate():
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        if not os.getenv("GOOGLE_AI_API_KEY"):
+            yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set."})
+            return
+
+        try:
+            async for event in run_gcc_enrichment(
+                companies=[c.model_dump() for c in req.companies],
+            ):
+                yield _sse(event)
+        except Exception as e:
+            logger.error(f"GCC Enrich error: {e}", exc_info=True)
+            yield _sse({"type": "error", "message": str(e)})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
 # ── Aftermarket Deep Dive ─────────────────────────────────────────────────────
 
 class AftermarketRequest(BaseModel):
