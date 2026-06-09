@@ -297,44 +297,52 @@ async def _run_async(prompt: str, use_search: bool, label: str, timeout: int = 1
 
 # ── Table 1: Capability Assessment ───────────────────────────────────────────
 
-def _cap_prompt(company_name: str, domain: str, industry: str, target_vendor: str = "") -> str:
+def _cap_batch_prompt(company_name: str, domains: list[str], industry: str, target_vendor: str = "") -> str:
+    """Single prompt covering multiple domains — reduces simultaneous Gemini calls from 12 to 4."""
     ind = f" ({industry})" if industry else ""
-    vendor_search = f'\n- "{company_name}" "{target_vendor}" {domain}' if target_vendor else ""
+    domains_list = "\n".join(f"  - {d}" for d in domains)
+    vendor_line = f'\n- "{company_name}" "{target_vendor}" aftermarket technology platform' if target_vendor else ""
     return f"""You are an aftermarket service technology analyst with live Google Search.
 
 COMPANY: {company_name}{ind}
-DOMAIN: {domain}
 
-Search for the specific technologies and platforms used by {company_name} in "{domain}":
-- "{company_name}" {domain} software technology platform
-- "{company_name}" {domain} system vendor tool 2022 OR 2023 OR 2024 OR 2025
-- "{company_name}" {domain} implementation partner case study{vendor_search}
+Search for technologies used by {company_name} across these aftermarket domains:
+{domains_list}
 
-For each technology found in this domain, return ONE JSON object per capability × technology pair.
-Each row must describe HOW that technology is used (use case) and ROUGHLY how many users/licenses exist.
+Run these searches:
+- "{company_name}" aftermarket service technology platform software vendor
+- "{company_name}" warranty OR "field service" OR "spare parts" OR "dealer management" system 2022 OR 2023 OR 2024 OR 2025
+- "{company_name}" ERP CRM service software implementation SAP OR Salesforce OR ServiceMax OR Oracle OR Microsoft
+- "{company_name}" aftermarket digital transformation technology investment{vendor_line}
+- site:linkedin.com/jobs "{company_name}" aftermarket service software systems
+
+For each technology found, return ONE JSON object per domain × capability × technology combination.
 
 Return ONLY a JSON array:
 [
   {{
-    "domain": "{domain}",
-    "capability": "<specific business capability e.g. 'Claim Submission', 'Parts Ordering', 'Work Order Management'>",
-    "technology": "<exact product/vendor name e.g. 'Tavant Warranty', 'SAP S/4HANA', 'Salesforce Service Cloud'>",
-    "use_case": "<one sentence: how this technology is specifically used for this capability>",
-    "install_base": "<estimated users/licenses e.g. '~500 dealer users', '2,000-5,000 technicians', 'Enterprise-wide'>",
+    "domain": "<one of the domains listed above — must match exactly>",
+    "capability": "<specific capability e.g. 'Claim Submission', 'Parts Ordering', 'Work Order Management', 'Fleet Telematics'>",
+    "technology": "<exact product/vendor name e.g. 'Tavant Warranty', 'SAP S/4HANA', 'Salesforce Service Cloud', 'ServiceMax'>",
+    "use_case": "<one sentence: how this technology is used at {company_name} for this capability>",
+    "install_base": "<estimated scope e.g. '~500 dealer users', 'Global deployment', 'Enterprise-wide'>",
     "source": "<URL to press release, case study, or job posting — or '-'>"
   }}
 ]
 
 Rules:
+- Cover ALL domains listed above — include at least one row per domain if evidence exists
+- Only include a technology if there is actual evidence {company_name} uses it
+- Do not include rows for "vendor offers products generally" or "no deployment found"
+- If no evidence for a domain, omit it entirely (do not add empty/speculative rows)
 - Multiple rows per domain if multiple technologies found
-- install_base: base estimate on dealer count, employee count, or public data
-- Only include a technology row if there is ACTUAL evidence that {company_name} uses it for this domain
-- If the target vendor search returns no evidence of deployment at {company_name}, do NOT add a row for it
-- Do NOT add rows saying "vendor offers products generally" or "no specific deployment found"
-- Return [] if no confirmed technology deployments found in this domain
 
-Return ONLY the raw JSON array.
-"""
+Return ONLY the raw JSON array. No prose."""
+
+
+def _cap_prompt(company_name: str, domain: str, industry: str, target_vendor: str = "") -> str:
+    """Single-domain cap prompt — kept for backward compat but not used in main pipeline."""
+    return _cap_batch_prompt(company_name, [domain], industry, target_vendor)
 
 
 # ── Table 2: Gap Analysis ─────────────────────────────────────────────────────
@@ -1046,10 +1054,19 @@ async def run_aftermarket_deep_dive(
 
     loop = asyncio.get_event_loop()
 
-    # Phase 1: Fire search-grounded calls in parallel (capabilities + aggregate spend + IT deals)
-    cap_futures    = [loop.run_in_executor(None, _gemini_call_sync, _cap_prompt(company_name, dom, industry, target_vendor), True, f"cap_{dom}") for dom in AFTERMARKET_DOMAINS] if "capabilities" in run else []
-    agg_future     = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend", 4096, "gemini-2.5-flash", False, 0.0) if "agg_spend" in run else None
-    deals_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals") if "spend_deals" in run else None
+    # Phase 1: Fire search-grounded calls in parallel
+    # Capabilities: 4 batched calls (3 domains each) instead of 12 individual calls.
+    # This reduces simultaneous Gemini requests from 15 to 7, preventing thread pool
+    # exhaustion and rate limiting that caused "0/12 done" stalls.
+    _CAP_BATCHES = [AFTERMARKET_DOMAINS[i:i+3] for i in range(0, len(AFTERMARKET_DOMAINS), 3)]
+    cap_futures = [
+        loop.run_in_executor(None, _gemini_call_sync,
+                             _cap_batch_prompt(company_name, batch, industry, target_vendor),
+                             True, f"cap_batch_{bi}")
+        for bi, batch in enumerate(_CAP_BATCHES)
+    ] if "capabilities" in run else []
+    agg_future  = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend", 4096, "gemini-2.5-flash", False, 0.0) if "agg_spend" in run else None
+    deals_future = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals") if "spend_deals" in run else None
 
     # If spend_module (but NOT readiness-only) is requested without capabilities,
     # fire a lightweight search to get context for synthesis.
@@ -1087,18 +1104,17 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": "🌐 Phase 1: Researching capabilities & tech spend in parallel…"}
     await asyncio.sleep(0)
 
-    # Collect capability rows (stream as each domain completes)
+    # Collect capability rows (stream as each batch completes)
     all_cap_rows = []
     pending_caps = list(enumerate(cap_futures))
     elapsed = 0
-    PARALLEL_TIMEOUT = 90  # 90s max — slow domains are dropped, pipeline moves on
+    N_BATCHES = len(_CAP_BATCHES) if cap_futures else 0
+    PARALLEL_TIMEOUT = 120  # 4 batched calls — generous timeout per batch
 
-    # Poll until all futures done or timeout
-    completed_caps = set()
     while pending_caps and elapsed < PARALLEL_TIMEOUT:
         try:
-            await asyncio.sleep(5)
-            elapsed += 5
+            await asyncio.sleep(8)
+            elapsed += 8
             newly_done = []
             for idx, fut in pending_caps:
                 if fut.done():
@@ -1111,11 +1127,12 @@ async def run_aftermarket_deep_dive(
                                 yield {"type": "capability_row", "row": row}
                                 await asyncio.sleep(0)
                     except Exception as e:
-                        logger.error(f"Cap domain {idx} error: {e}")
+                        logger.error(f"Cap batch {idx} error: {e}")
             pending_caps = [(i, f) for i, f in pending_caps if i not in newly_done]
-            done_count = len(AFTERMARKET_DOMAINS) - len(pending_caps)
+            done_batches = N_BATCHES - len(pending_caps)
+            done_domains = done_batches * 3
             if pending_caps:
-                yield {"type": "heartbeat", "message": f"🌐 Researching… {done_count}/{len(AFTERMARKET_DOMAINS)} domains done, {len(all_cap_rows)} capabilities found ({elapsed}s)"}
+                yield {"type": "heartbeat", "message": f"🌐 Researching… {done_domains}/{len(AFTERMARKET_DOMAINS)} domains done, {len(all_cap_rows)} capabilities found ({elapsed}s)"}
                 await asyncio.sleep(0)
         except Exception:
             break
