@@ -151,12 +151,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
             logger.warning(f"Gemini [{label}] total budget {TOTAL_BUDGET}s exceeded — giving up")
             return []
         try:
-            # Build http_options — try typed class first, fall back to dict.
-            try:
-                http_opts = types.HttpOptions(timeout=CALL_TIMEOUT)
-            except Exception:
-                http_opts = {"timeout": CALL_TIMEOUT}
-            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options=http_opts)
+            client = genai.Client(api_key=GOOGLE_AI_KEY)
             logger.info(f"Gemini [{label}] attempt {attempt}/{MAX_RETRIES} starting (model={model})")
             response = client.models.generate_content(
                 model=model,
