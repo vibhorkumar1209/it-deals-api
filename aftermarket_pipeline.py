@@ -121,7 +121,7 @@ AFTERMARKET_DOMAINS = [
 
 # ── Shared Gemini call ────────────────────────────────────────────────────────
 
-def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_tokens: int = 16384, model: str = "gemini-2.5-flash"):
+def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_tokens: int = 16384, model: str = "gemini-2.5-flash", return_raw: bool = False):
     try:
         from google import genai
         from google.genai import types
@@ -207,7 +207,11 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
 
     if not text_parts:
         logger.warning(f"_gemini_call_sync [{label}]: empty response from Gemini")
-        return []
+        return "" if return_raw else []
+
+    # return_raw: caller wants the raw text, not parsed JSON (e.g. research step)
+    if return_raw:
+        return "\n\n".join(text_parts)
 
     def _try_parse(raw: str) -> list | None:
         """Try multiple strategies to extract a JSON array from raw text."""
@@ -531,6 +535,89 @@ READINESS_FIELDS = [
 ]
 
 
+def _readiness_research_prompt(company_name: str, industry: str, target_vendor: str) -> str:
+    """Step 1: Search-grounded evidence gathering — short focused prompt, returns raw text."""
+    vendor = target_vendor or "the vendor"
+    return f"""You are a technology intelligence analyst. Use Google Search to find REAL evidence.
+
+COMPANY: {company_name} ({industry})
+VENDOR: {vendor}
+
+Run these specific searches and report ONLY what you actually find:
+1. "{company_name}" "{vendor}" — any deployment, partnership, case study, or contract
+2. "{company_name}" aftermarket OR warranty OR "field service" OR "dealer management" technology 2023 OR 2024 OR 2025
+3. "{company_name}" CTO OR CIO OR "digital transformation" OR "technology investment" 2024 OR 2025
+4. "{company_name}" IT budget OR technology spend OR RFP OR tender 2024
+5. "{company_name}" hiring "software engineer" OR "technology" OR "digital" job postings
+
+For each search, report ONLY confirmed findings with their source URL.
+Format: [CATEGORY] Finding. Source: URL
+
+Categories to use: VENDOR_DEPLOYMENT, IT_INVESTMENT, EXEC_AGENDA, BUDGET_SIGNAL, HIRING_SIGNAL
+
+If a search returns nothing relevant, write: [CATEGORY] No evidence found.
+
+Do NOT invent or infer. Only report what search results actually show."""
+
+
+def _readiness_score_prompt(company_name: str, industry: str, target_vendor: str,
+                             research_text: str, modules: list[str],
+                             spend_lines: str, agg_ref: str) -> str:
+    """Step 2: No-search scoring — takes real evidence from step 1, scores each module."""
+    vendor = target_vendor or "the vendor"
+    n = len(modules)
+    modules_list = ", ".join(modules)
+    return f"""You are a vendor displacement readiness analyst.
+
+COMPANY: {company_name} ({industry})
+VENDOR BEING EVALUATED: {vendor}
+
+REAL EVIDENCE FROM SEARCH (use ONLY this — do not add anything not listed here):
+{research_text or "No search evidence available."}
+
+SPEND BY MODULE:
+{spend_lines}
+
+SCORING RULES — base scores ONLY on the evidence above:
+- existing_rel_score (weight 0.30): Is {vendor} shown as deployed/piloted at {company_name} in evidence? Yes→≥70. Mentioned→40-70. No evidence→≤25.
+- it_signals_score (weight 0.15): IT job postings, RFPs, or tech evaluations found in evidence for this domain?
+- company_signals_score (weight 0.20): Growth, transformation, or investment signals found in evidence for this domain?
+- exec_signals_score (weight 0.15): Executive technology agenda items found in evidence for this domain?
+- budget_signals_score (weight 0.20): Budget announcements or IT spend signals found in evidence for this domain?
+- weighted_readiness = (existing_rel_score×0.30)+(it_signals_score×0.15)+(company_signals_score×0.20)+(exec_signals_score×0.15)+(budget_signals_score×0.20)
+- displacement_opp: "High" if weighted_readiness≥65, "Medium" if 40-64, "Low" if <40
+- For evidence fields: quote the actual finding from REAL EVIDENCE above, or write "No evidence found"
+- total_domain_spend: copy from SPEND BY MODULE, else use industry benchmark
+- vendor_adjusted_tam = total_domain_spend × weighted_readiness/100 (apply to both ends of range)
+- tam_rationale: midpoint = (low+high)/2, then × readiness%
+
+MODULES: {modules_list}
+
+Return ONLY a JSON array — {n} entries, one per module:
+[
+  {{
+    "domain": "<module name>",
+    "current_system": "<known system or Unknown>",
+    "existing_rel_score": <0-100>,
+    "existing_rel_evidence": "<exact quote from evidence above or No evidence found>",
+    "it_signals_score": <0-100>,
+    "it_signals_evidence": "<exact quote from evidence above or No evidence found>",
+    "company_signals_score": <0-100>,
+    "company_signals_evidence": "<exact quote from evidence above or No evidence found>",
+    "exec_signals_score": <0-100>,
+    "exec_signals_evidence": "<exact quote from evidence above or No evidence found>",
+    "budget_signals_score": <0-100>,
+    "budget_signals_evidence": "<exact quote from evidence above or No evidence found>",
+    "weighted_readiness": <0-100>,
+    "displacement_opp": "<High|Medium|Low>",
+    "total_domain_spend": "<from SPEND BY MODULE or benchmark>",
+    "vendor_adjusted_tam": "<range × readiness%>",
+    "tam_rationale": "<midpoint × readiness% calculation>"
+  }}
+]
+Return ONLY the JSON array. No prose."""
+
+
 def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str,
                           cap_data: list[dict] | None = None,
                           agg_data: list[dict] | None = None,
@@ -786,28 +873,21 @@ async def run_aftermarket_deep_dive(
     _BATCH_A = _ALL_MODULES[:5]
     _BATCH_B = _ALL_MODULES[5:]
 
-    # Always launch readiness immediately — never after spend_module.
-    # Readiness uses Google Search internally for its own signals and TAM estimation,
-    # so it doesn't need pre-computed cap/spend data. Waiting for caps+spend (300s+)
-    # before launching would push total pipeline time past Render's 600s HTTP limit.
-    # Split into two parallel 5/4-module batches to halve per-call time.
-    # Use gemini-2.0-flash for readiness: 3-5x faster than 2.5-flash, no thinking overhead,
-    # sufficient quality for structured signal scoring + TAM estimation.
+    # Readiness 2-step pipeline:
+    # Step 1: ONE search-grounded call collects raw evidence (vendor deployment, IT signals,
+    #         exec agenda, budget signals) — focused prompt, returns raw text ~30-60s.
+    # Step 2: TWO parallel no-search calls score batch A and batch B from that evidence ~10s.
+    # This gives REAL evidence (no hallucination) without the multi-minute search hangs
+    # that occurred when each scoring call did its own searches.
     if "readiness" in run:
-        # use_search=False: removes Google Search grounding which causes 2-5 min hangs.
-        # gemini-2.0-flash without grounding completes in 5-15s from training knowledge.
-        ready_future_a = loop.run_in_executor(
+        ready_research_future = loop.run_in_executor(
             None, _gemini_call_sync,
-            _readiness_tam_prompt(company_name, industry, target_vendor, [], [], [], _BATCH_A),
-            False, "readiness_tam_a", 16384, "gemini-2.0-flash",
-        )
-        ready_future_b = loop.run_in_executor(
-            None, _gemini_call_sync,
-            _readiness_tam_prompt(company_name, industry, target_vendor, [], [], [], _BATCH_B),
-            False, "readiness_tam_b", 16384, "gemini-2.0-flash",
+            _readiness_research_prompt(company_name, industry, target_vendor),
+            True, "readiness_research", 4096, "gemini-2.5-flash", True,  # return_raw=True
         )
     else:
-        ready_future_a = ready_future_b = None
+        ready_research_future = None
+    ready_future_a = ready_future_b = None  # set after research completes
 
     yield {"type": "heartbeat", "message": "🌐 Phase 1: Researching capabilities & tech spend in parallel…"}
     await asyncio.sleep(0)
@@ -913,44 +993,68 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": "🎯 Table 4: Collecting readiness matrix (2 parallel batches)…"}
     await asyncio.sleep(0)
 
-    async def _poll_ready_future(fut, batch_label: str) -> list:
-        """Poll a readiness future with heartbeats every 25s. Returns rows or []."""
-        if fut is None:
-            return []
-        READY_TIMEOUT = 360
-        elapsed_ready = 0
-        POLL_INTERVAL = 25
-        while not fut.done() and elapsed_ready < READY_TIMEOUT:
-            try:
-                result = await asyncio.wait_for(asyncio.shield(fut), timeout=POLL_INTERVAL)
-                return result if isinstance(result, list) else []
-            except asyncio.TimeoutError:
-                elapsed_ready += POLL_INTERVAL
-                yield_msg = f"⏳ Analysing {batch_label}… ({elapsed_ready}s)"
-                # Can't yield inside nested async fn — store message on fut for outer loop
-                fut._heartbeat_msg = yield_msg  # type: ignore[attr-defined]
-        if fut.done():
-            try:
-                r = fut.result()
-                return r if isinstance(r, list) else []
-            except Exception as e:
-                logger.error(f"readiness {batch_label} result error: {e}")
-        else:
-            fut.cancel()
-            logger.warning(f"readiness {batch_label}: timed out after {READY_TIMEOUT}s")
-        return []
-
+    # ── Step 4a: Collect research evidence (search-grounded, ~30-60s) ─────────
     readiness_rows = []
-    if ready_future_a or ready_future_b:
-        READY_TIMEOUT = 360
-        elapsed_ready = 0
-        POLL_INTERVAL = 25
-        futures_pending = {f for f in (ready_future_a, ready_future_b) if f is not None}
-        collected: list = []
+    if ready_research_future:
+        yield {"type": "heartbeat", "message": "🔍 Gathering real evidence for readiness signals…"}
+        await asyncio.sleep(0)
 
-        while futures_pending and elapsed_ready < READY_TIMEOUT:
-            await asyncio.sleep(POLL_INTERVAL)
-            elapsed_ready += POLL_INTERVAL
+        research_text = ""
+        RESEARCH_TIMEOUT = 120
+        elapsed_r = 0
+        while not ready_research_future.done() and elapsed_r < RESEARCH_TIMEOUT:
+            try:
+                research_text = await asyncio.wait_for(asyncio.shield(ready_research_future), timeout=25)
+                break
+            except asyncio.TimeoutError:
+                elapsed_r += 25
+                yield {"type": "heartbeat", "message": f"🔍 Searching for evidence… ({elapsed_r}s)"}
+                await asyncio.sleep(0)
+
+        if ready_research_future.done() and not research_text:
+            try:
+                research_text = ready_research_future.result() or ""
+            except Exception as e:
+                logger.error(f"readiness_research error: {e}")
+
+        if not research_text:
+            ready_research_future.cancel()
+            logger.warning("readiness_research: timed out — proceeding with empty evidence")
+
+        research_text = research_text if isinstance(research_text, str) else ""
+
+        # ── Step 4b: Score both batches in parallel (no search, ~10-15s each) ──
+        yield {"type": "heartbeat", "message": "🎯 Scoring readiness for all 9 modules from real evidence…"}
+        await asyncio.sleep(0)
+
+        spend_lines_for_score = "\n".join(
+            f"  {r.get('domain','')}: {r.get('current_spend','')}"
+            for r in (spend_rows if isinstance(spend_rows, list) else [])
+            if r.get("domain") and r.get("current_spend")
+        ) or "  (not available — use industry benchmarks)"
+        agg_ref_for_score = " | ".join(
+            f"{r.get('spend_type')}: {r.get('estimate','?')}"
+            for r in (agg_rows if isinstance(agg_rows, list) else [])[:4]
+        )
+
+        score_future_a = loop.run_in_executor(
+            None, _gemini_call_sync,
+            _readiness_score_prompt(company_name, industry, target_vendor, research_text, _BATCH_A, spend_lines_for_score, agg_ref_for_score),
+            False, "readiness_score_a", 16384, "gemini-2.0-flash",
+        )
+        score_future_b = loop.run_in_executor(
+            None, _gemini_call_sync,
+            _readiness_score_prompt(company_name, industry, target_vendor, research_text, _BATCH_B, spend_lines_for_score, agg_ref_for_score),
+            False, "readiness_score_b", 16384, "gemini-2.0-flash",
+        )
+
+        collected: list = []
+        SCORE_TIMEOUT = 90
+        elapsed_s = 0
+        futures_pending = {score_future_a, score_future_b}
+        while futures_pending and elapsed_s < SCORE_TIMEOUT:
+            await asyncio.sleep(15)
+            elapsed_s += 15
             done_now = {f for f in futures_pending if f.done()}
             for f in done_now:
                 try:
@@ -958,13 +1062,9 @@ async def run_aftermarket_deep_dive(
                     if isinstance(rows, list):
                         collected.extend(rows)
                 except Exception as e:
-                    logger.error(f"readiness batch error: {e}")
+                    logger.error(f"readiness score batch error: {e}")
             futures_pending -= done_now
-            if futures_pending:
-                yield {"type": "heartbeat", "message": f"⏳ Analysing readiness signals… {len(collected)} modules done ({elapsed_ready}s)"}
-                await asyncio.sleep(0)
 
-        # Collect any remaining futures that finished during final sleep
         for f in futures_pending:
             if f.done():
                 try:
@@ -975,9 +1075,7 @@ async def run_aftermarket_deep_dive(
                     pass
             else:
                 f.cancel()
-                logger.warning("readiness batch: timed out")
 
-        # Sort into canonical module order
         _MODULE_ORDER = {m: i for i, m in enumerate(_ALL_MODULES)}
         readiness_rows = sorted(collected, key=lambda r: _MODULE_ORDER.get(r.get("domain", ""), 99))
 
