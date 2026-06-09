@@ -32,15 +32,22 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192):
     if not GOOGLE_AI_KEY:
         return None
 
-    TOTAL_BUDGET = 240
+    CALL_TIMEOUT = 90    # per-call HTTP timeout — prevents indefinite hangs
+    TOTAL_BUDGET = 220
     call_start = _time.time()
 
-    for attempt in range(1, 6):
+    cfg_extra = {}
+    try:
+        cfg_extra["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    except Exception:
+        pass
+
+    for attempt in range(1, 5):
         if _time.time() - call_start > TOTAL_BUDGET:
             logger.warning(f"[{label}] budget {TOTAL_BUDGET}s exceeded")
             return None
         try:
-            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": CALL_TIMEOUT})
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
@@ -48,6 +55,7 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192):
                     tools=[types.Tool(google_search=types.GoogleSearch())],
                     temperature=0.1,
                     max_output_tokens=max_output_tokens,
+                    **cfg_extra,
                 ),
             )
             break
@@ -55,12 +63,13 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192):
             err = str(e)
             if "RESOURCE_EXHAUSTED" in err or "free_tier" in err:
                 raise RuntimeError("Gemini quota exhausted") from e
-            if any(x in err for x in ("503", "UNAVAILABLE", "overloaded", "timeout")) and attempt < 5:
+            if any(x in err for x in ("503", "UNAVAILABLE", "overloaded", "timeout", "TimeoutError", "DeadlineExceeded", "429", "500", "502", "504")) and attempt < 4:
                 remaining = TOTAL_BUDGET - (_time.time() - call_start)
                 wait = min(15 * attempt, max(remaining - 5, 1))
+                logger.warning(f"[{label}] attempt {attempt} failed ({err[:60]}), retry in {wait:.0f}s")
                 _time.sleep(wait)
                 continue
-            logger.error(f"[{label}] error: {e}")
+            logger.error(f"[{label}] error: {err[:120]}")
             return None
     else:
         return None
@@ -124,34 +133,37 @@ async def _collect(loop, fn_args: tuple, label: str, timeout: int = 200):
 # ── LOCATION DISCOVERY (per company) ─────────────────────────────────────────
 
 def _location_discovery_prompt(company_name: str, domain: str, location_filter: str) -> str:
-    loc_clause = f"\nLOCATION FILTER: Only return GCC locations in or near: {location_filter}" if location_filter else \
-                 "\nCOVERAGE: Return ALL worldwide GCC locations."
+    loc_clause = f"\nLOCATION FILTER: Only return GCC/center locations in or near: {location_filter}" if location_filter else \
+                 "\nCOVERAGE: Return ALL worldwide GCC/center locations."
     return f"""You are a GCC location researcher with live Google Search.
 
 TARGET COMPANY: {company_name}{f" (website: {domain})" if domain else ""}
 {loc_clause}
 
-Run these searches to find every distinct GCC/captive center/technology hub location:
-- "{company_name}" GCC OR "global capability center" locations city country
-- "{company_name}" technology center hub engineering center India China Poland Philippines
-- "{company_name}" captive center offshore development center city
-- site:linkedin.com/company "{company_name}" offices locations
-- "{company_name}" GCC Bengaluru OR Pune OR Chennai OR Hyderabad OR Mumbai
-- "{company_name}" GCC Warsaw OR Krakow OR Bucharest OR Budapest OR Prague OR Lisbon
-- "{company_name}" GCC Kuala Lumpur OR Manila OR Singapore OR Shanghai OR Beijing
-- "{company_name}" GCC Mexico City OR Guadalajara OR Bogota OR Buenos Aires
+Run ALL of these searches to find every distinct center/captive/offshore hub location:
+- "{company_name}" "global capability center" OR "technology center" OR "captive center" location city
+- "{company_name}" engineering center OR development center OR shared services center city country
+- "{company_name}" India center Bengaluru OR Pune OR Chennai OR Hyderabad OR Mumbai OR Noida OR Gurugram
+- "{company_name}" Poland OR Romania OR Hungary OR Czech Republic OR Portugal technology center
+- "{company_name}" Philippines OR Malaysia OR Singapore OR Vietnam technology hub center
+- "{company_name}" Mexico OR Brazil OR Colombia OR Argentina OR Costa Rica technology center
+- "{company_name}" China OR Shanghai OR Shenzhen OR Beijing technology center
+- site:linkedin.com/company "{company_name}" offices engineering center locations headcount
+- "{company_name}" GCC established employees headcount site:nasscom.in OR site:globalcapabilitycenters.com
 
-Return a JSON array — one object per distinct GCC city location:
+KEY RULE: Return ONE entry per distinct GCC/center ENTITY. If a company has an Engineering Center AND a Shared Services Center in the same city, return BOTH as separate entries. Use the official entity name to distinguish them.
+
+Return a JSON array — one object per distinct GCC entity:
 [
   {{
-    "gcc_name": "<official name of this GCC entity e.g. 'Volkswagen India Technology Center'>",
+    "gcc_name": "<official entity name e.g. 'Volkswagen India Technology Center, Pune' — be specific>",
     "city": "<city>",
     "country": "<country>",
     "gcc_location": "<City, Country>",
     "established_year": "<year or Unknown>",
     "headcount": "<number/range or Unknown>",
     "operating_model": "<Pure Captive | BOT | GCC-as-a-Service | Unknown>",
-    "primary_focus": "<brief: e.g. Engineering & R&D, Shared Services, Digital>",
+    "primary_focus": "<what this specific entity does: e.g. Engineering & R&D, Finance Shared Services, Digital Transformation>",
     "source": "<URL>"
   }}
 ]
@@ -161,156 +173,199 @@ Return ONLY the raw JSON array. No prose. No markdown."""
 
 # ── PER-LOCATION ENRICHMENT PROMPTS ──────────────────────────────────────────
 
-def _capabilities_prompt(company_name: str, gcc_location: str) -> str:
+def _capabilities_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -> str:
     city = gcc_location.split(",")[0].strip()
+    country = gcc_location.split(",")[-1].strip() if "," in gcc_location else ""
+    entity = gcc_name if gcc_name and gcc_name != "-" else company_name
     return f"""You are a GCC capability analyst with live Google Search.
 
-TARGET: {company_name} GCC in {gcc_location}
+TARGET: {company_name} — center in {gcc_location}{f' (entity: {gcc_name})' if gcc_name and gcc_name != '-' else ''}
 
-Run these searches:
-- "{company_name}" {city} GCC capabilities functions teams engineering shared services
-- "{company_name}" {city} technology center what does it do R&D digital AI analytics
-- site:linkedin.com "{company_name}" {city} technology center capabilities
-- "{company_name}" {city} centre of excellence services delivered
-- "{company_name}" annual report {city} center function
+You MUST run ALL of these searches before responding:
+1. site:linkedin.com "{company_name}" "{city}" engineer OR developer OR analyst — what roles exist here?
+2. "{company_name}" "{city}" technology center capabilities services functions
+3. "{company_name}" {city} operations finance HR shared services teams
+4. "{entity}" capabilities OR functions OR services OR teams
+5. "{company_name}" {country} center engineering digital AI shared services what does it do
+6. site:linkedin.com/jobs "{company_name}" {city} — scan job titles to infer what teams exist
 
-Return a JSON array — one object per capability area this specific {gcc_location} GCC handles:
+From these searches, identify what functions/teams operate at this specific {gcc_location} location.
+Infer from job titles, press releases, LinkedIn posts, and company descriptions.
+
+Return a JSON array — one object per capability area identified at {gcc_location}:
 [
   {{
-    "capability_area": "<Engineering & R&D | Product Development | Shared Services | Digital Transformation | AI/ML & Data Science | Analytics & BI | Customer Experience | IT Infrastructure | Cybersecurity | Finance & Accounting | HR Services | Supply Chain | Other>",
-    "description": "<specific description of what this team does at {gcc_location}>",
-    "team_size_estimate": "<headcount or range or Unknown>",
-    "key_functions": "<comma-separated specific roles/functions>"
-  }}
-]
-
-Return ONLY the JSON array. No prose. No markdown. Return [] if no data found."""
-
-
-def _projects_prompt(company_name: str, gcc_location: str) -> str:
-    city = gcc_location.split(",")[0].strip()
-    return f"""You are a GCC projects analyst with live Google Search.
-
-TARGET: {company_name} GCC in {gcc_location}
-
-Search broadly — include press releases, LinkedIn announcements, job postings, news:
-- "{company_name}" {city} GCC project initiative announcement 2023 OR 2024 OR 2025
-- "{company_name}" {city} technology center expansion investment hiring
-- site:linkedin.com "{company_name}" {city} technology project announcement
-- site:businesswire.com OR site:prnewswire.com "{company_name}" {city}
-- "{company_name}" {city} GCC new hiring 1000 OR 500 OR 2000 employees expansion
-- "{company_name}" {city} center partnership technology vendor deal
-
-Return a JSON array — one per project, initiative, expansion, or key announcement:
-[
-  {{
-    "project_name": "<specific project/initiative name or announcement>",
-    "category": "<Technology Investment | Expansion | Hiring Surge | Digital Initiative | Partnership | R&D Program | Automation | Infrastructure>",
-    "description": "<what this project/initiative involves — be specific>",
-    "status": "<Active | Announced | Completed | Planning>",
-    "investment_value": "<$ amount if mentioned or Unknown>",
-    "partner_vendor": "<partner/vendor name or '-'>",
-    "timeline": "<year or date range>",
-    "hiring_signal": "<number of jobs being added if mentioned or '-'>",
-    "source": "<URL>"
-  }}
-]
-
-IMPORTANT: If no formal project announcements found, search for:
-- Any plans to expand headcount or facilities in {city}
-- Any technology vendor partnerships signed for {gcc_location}
-- Any digital transformation programs running at this center
-Return [] only if truly nothing found after all searches."""
-
-
-def _talent_prompt(company_name: str, gcc_location: str) -> str:
-    city = gcc_location.split(",")[0].strip()
-    return f"""You are a GCC talent intelligence analyst with live Google Search.
-
-TARGET: {company_name} GCC in {gcc_location}
-
-Run these searches:
-- site:linkedin.com "{company_name}" {city} Head OR VP OR Director OR "Managing Director" GCC OR technology
-- "{company_name}" {city} GCC head center director managing technology leader
-- "{company_name}" {city} technology center leadership team executives
-- site:linkedin.com/in "{company_name}" {city} chief technology officer VP engineering
-- "{company_name}" {city} GCC hiring talent engineers headcount skill
-
-Return a JSON array with leaders AND talent insights:
-[
-  {{
-    "type": "<Leader | Talent Insight>",
-    "name": "<full name or '-' for talent insights>",
-    "title": "<exact job title>",
-    "seniority": "<C-Suite | VP | Director | Senior Manager | N/A>",
-    "function": "<Technology | Engineering | Finance | HR | Operations | AI/Data | Legal | Other>",
-    "linkedin_url": "<LinkedIn profile URL or '-'>",
-    "reporting_to": "<reports to role or name or '-'>",
-    "contact_hint": "<email pattern e.g. firstname.lastname@company.com or '-'>",
-    "insight": "<key fact about this person's scope OR a talent/hiring trend at {gcc_location}>"
+    "capability_area": "<Engineering & R&D | Product Development | Shared Services | Digital Transformation | AI/ML & Data Science | Analytics & BI | Customer Experience | IT Infrastructure & Cloud | Cybersecurity | Finance & Accounting | HR Services | Supply Chain | Legal & Compliance | Other>",
+    "description": "<what this specific team does at {gcc_location} — be concrete, cite evidence>",
+    "team_size_estimate": "<headcount or role count or Unknown>",
+    "key_functions": "<comma-separated specific job titles or functions found in searches>"
   }}
 ]
 
 Return ONLY the JSON array. No prose. No markdown."""
 
 
-def _financials_prompt(company_name: str, gcc_location: str) -> str:
+def _projects_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -> str:
     city = gcc_location.split(",")[0].strip()
-    return f"""You are a GCC financial analyst with live Google Search.
+    country = gcc_location.split(",")[-1].strip() if "," in gcc_location else ""
+    entity = gcc_name if gcc_name and gcc_name != "-" else company_name
+    return f"""You are a GCC projects and initiatives analyst with live Google Search.
 
-TARGET: {company_name} GCC in {gcc_location}
+TARGET: {company_name} — center in {gcc_location}{f' (entity: {gcc_name})' if gcc_name and gcc_name != '-' else ''}
 
-Run these searches:
-- "{company_name}" annual report 2023 OR 2024 revenue turnover global
-- "{company_name}" {city} center budget investment cost 2023 OR 2024
-- "{company_name}" {city} GCC IP patents intellectual property innovation
-- "{company_name}" {city} cost savings offshore arbitrage technology investment
-- "{company_name}" {city} proprietary platform product developed
+Run ALL of these searches — do not skip any:
+1. "{company_name}" {city} expansion investment hiring announcement 2023 OR 2024 OR 2025
+2. "{company_name}" {country} center project initiative technology investment 2024
+3. site:businesswire.com OR site:prnewswire.com "{company_name}" {city} OR {country}
+4. "{company_name}" {city} jobs hiring 500 OR 1000 OR 2000 OR 3000 employees
+5. "{company_name}" {country} digital transformation AI automation program 2024 OR 2025
+6. "{entity}" project initiative expansion partnership announcement
+7. "{company_name}" {city} new office facility campus expansion
+8. "{company_name}" {country} technology vendor SAP OR Salesforce OR Microsoft OR AWS partnership
 
-Return a JSON object with available data (use "Unknown" only if search yields nothing, use benchmarks with a note if actual data unavailable):
+IMPORTANT: Any of these count as a "project/initiative":
+- Headcount expansion announcements (e.g., "will hire 5000 in India by 2025")
+- New facility or campus openings
+- Technology transformation programs
+- Vendor partnerships or platform deployments
+- Digital/AI/cloud initiatives
+- Center of Excellence launches
+
+Return a JSON array — one per project, initiative, expansion, or announcement found:
+[
+  {{
+    "project_name": "<specific name or short title of the announcement/initiative>",
+    "category": "<Headcount Expansion | New Facility | Technology Investment | Digital Initiative | Partnership | R&D Program | Automation | Centre of Excellence | Other>",
+    "description": "<concrete description — include numbers, dates, technologies if found>",
+    "status": "<Active | Announced | Completed | Planning>",
+    "investment_value": "<$ amount or headcount target or Unknown>",
+    "partner_vendor": "<partner/vendor if mentioned or '-'>",
+    "timeline": "<year or date range>",
+    "hiring_signal": "<jobs being added e.g. '2,000 engineers by 2025' or '-'>",
+    "source": "<URL of press release, news article, or LinkedIn post>"
+  }}
+]
+
+Return ONLY the JSON array. If genuinely nothing found after all searches, return []."""
+
+
+def _talent_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -> str:
+    city = gcc_location.split(",")[0].strip()
+    country = gcc_location.split(",")[-1].strip() if "," in gcc_location else ""
+    entity = gcc_name if gcc_name and gcc_name != "-" else company_name
+    # Derive likely email domain from company name
+    email_domain = company_name.lower().replace(" ", "") + ".com"
+    return f"""You are a GCC talent intelligence analyst with live Google Search.
+
+TARGET: {company_name} — center in {gcc_location}{f' (entity: {gcc_name})' if gcc_name and gcc_name != '-' else ''}
+
+Run ALL of these LinkedIn and web searches:
+1. site:linkedin.com/in "{company_name}" "{city}" "Head of" OR "Managing Director" OR "VP" OR "Vice President"
+2. site:linkedin.com/in "{company_name}" "{city}" "Country Head" OR "Site Lead" OR "Center Head" OR "CTO" OR "CFO"
+3. site:linkedin.com/in "{company_name}" "{country}" Director OR VP engineering OR technology OR digital
+4. "{company_name}" {city} managing director OR head of center OR country head name
+5. "{entity}" leadership team management {city}
+6. "{company_name}" {city} executive appointment announcement 2023 OR 2024 OR 2025
+7. "{company_name}" {city} talent hiring engineers data scientists skill shortage trend
+
+For each leader found, search: site:linkedin.com/in "<their name>" "{company_name}" to get their profile URL.
+
+Return a JSON array — mix of named leaders AND talent/hiring insights:
+[
+  {{
+    "type": "<Leader | Talent Insight>",
+    "name": "<full name — or '-' for talent insights>",
+    "title": "<exact job title from LinkedIn or press release>",
+    "seniority": "<C-Suite | VP | Director | Senior Manager | N/A>",
+    "function": "<Technology | Engineering | Finance | HR | Operations | AI/Data | Legal | Sales | Other>",
+    "linkedin_url": "<full LinkedIn profile URL or '-'>",
+    "reporting_to": "<reports to role/name or '-'>",
+    "contact_hint": "<likely email e.g. firstname.lastname@{email_domain} or '-'>",
+    "insight": "<scope of role, team size managed, or a key talent/hiring trend for {gcc_location}>"
+  }}
+]
+
+Return ONLY the JSON array. No prose. No markdown."""
+
+
+def _financials_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -> str:
+    city = gcc_location.split(",")[0].strip()
+    country = gcc_location.split(",")[-1].strip() if "," in gcc_location else ""
+    return f"""You are a GCC financial intelligence analyst with live Google Search.
+
+TARGET: {company_name} — center in {gcc_location}
+
+Run ALL of these searches:
+1. "{company_name}" annual revenue OR turnover 2023 OR 2024 — find parent company global revenue
+2. "{company_name}" {country} investment OR budget OR spend 2023 OR 2024 OR 2025
+3. "{company_name}" {city} expansion investment "$" million OR billion announcement
+4. "{company_name}" intellectual property OR patent OR trademark {country} OR {city}
+5. "{company_name}" {country} R&D investment OR research spend
+6. "{company_name}" {city} proprietary platform OR product OR technology developed
+7. site:annualreports.com OR site:ir.{company_name.lower().replace(" ","")}.com annual report revenue
+8. "{company_name}" cost arbitrage OR offshore savings India OR {country}
+
+CRITICAL: Parent company global revenue is ALWAYS findable for public companies.
+Search investor relations pages and financial news. Never leave parent_global_revenue as Unknown
+if the company is publicly traded.
+
+For GCC budget: if no specific figure found, estimate using industry benchmarks:
+- Small GCC (500-1000 staff): $20-50M/year
+- Mid GCC (1000-5000 staff): $50-200M/year  
+- Large GCC (5000+): $200M+/year
+Flag as "(estimated)" if using benchmarks.
+
+Return a JSON object:
 {{
-  "parent_global_revenue": "<annual revenue with year e.g. '$45B FY2024' or Unknown>",
-  "gcc_operational_budget": "<estimated annual budget for {gcc_location} GCC e.g. '$40-80M' or Unknown>",
-  "gcc_cost_to_parent": "<cost savings or value generated or Unknown>",
-  "cost_arbitrage_estimate": "<% savings vs onshore e.g. '30-40%' — use industry benchmark if not found>",
-  "ip_patents_at_location": "<patents filed from {city} or Unknown>",
-  "proprietary_platforms": "<tools/platforms built at {gcc_location} or '-'>",
-  "r_and_d_investment": "<R&D spend for this location or Unknown>",
-  "financial_notes": "<any other financial facts about this GCC>",
-  "source": "<URL>"
+  "parent_global_revenue": "<annual revenue with FY year e.g. '€45.3B FY2024' — REQUIRED for public companies>",
+  "gcc_operational_budget": "<annual GCC budget e.g. '$40-80M (estimated)' or actual if found>",
+  "gcc_cost_to_parent": "<cost savings or value attributed to this GCC or Unknown>",
+  "cost_arbitrage_estimate": "<% labor cost savings vs onshore — use benchmark if not found e.g. '60-70% vs US rates'>",
+  "ip_patents_at_location": "<number of patents or IP assets at {city} or Unknown>",
+  "proprietary_platforms": "<specific tools/platforms/products built at this center or '-'>",
+  "r_and_d_investment": "<R&D spend globally or for this region or Unknown>",
+  "financial_notes": "<any other financial insight: contracts won, cost savings reported, investment announcements>",
+  "source": "<URL of annual report, press release, or financial news>"
 }}
 Return ONLY the JSON object."""
 
 
-def _techstack_prompt(company_name: str, gcc_location: str) -> str:
+def _techstack_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -> str:
     city = gcc_location.split(",")[0].strip()
-    return f"""You are a GCC tech stack analyst with live Google Search.
+    country = gcc_location.split(",")[-1].strip() if "," in gcc_location else ""
+    return f"""You are a GCC technology stack analyst with live Google Search.
 
-TARGET: {company_name} GCC in {gcc_location}
+TARGET: {company_name} — center in {gcc_location}
 
-Search job postings and tech announcements — job postings reveal actual tech stack:
-- site:linkedin.com/jobs "{company_name}" {city} engineer developer requirements AWS OR Azure OR GCP
-- "{company_name}" {city} technology center cloud DevOps AI automation stack 2024 OR 2025
-- site:glassdoor.com "{company_name}" {city} technology interview tech stack
-- "{company_name}" {city} GCC technology tools platform modernization
-- "{company_name}" {city} job openings skills required python java react kubernetes
+Job postings are the BEST source for tech stack. Run ALL of these searches:
+1. site:linkedin.com/jobs "{company_name}" {city} software engineer developer — read job requirements
+2. site:naukri.com "{company_name}" {city} engineer developer — for India locations
+3. site:glassdoor.com "{company_name}" {city} engineer interview — tech stack mentions
+4. "{company_name}" {city} AWS OR Azure OR "Google Cloud" cloud infrastructure
+5. "{company_name}" {city} kubernetes OR docker OR microservices OR DevOps
+6. "{company_name}" {city} python OR java OR javascript OR golang developer jobs
+7. "{company_name}" technology blog OR tech stack OR engineering blog — look for official tech blogs
+8. github.com "{company_name}" — check public repos for language usage
+9. "{company_name}" {country} SAP OR Salesforce OR ServiceNow OR Oracle OR Microsoft deployment
+10. "{company_name}" {city} AI machine learning deep learning LLM 2024 OR 2025
+
+From job postings, extract: required skills, preferred tools, frameworks listed in JD requirements.
 
 Return a JSON object:
 {{
-  "cloud_providers": "<AWS | Azure | GCP | Multi-Cloud | On-Premise | Hybrid — found in job postings or news>",
-  "cloud_maturity_score": <integer 0-100 based on cloud adoption signals, 0 if truly unknown>,
+  "cloud_providers": "<AWS | Azure | GCP | Multi-Cloud | On-Premise | Hybrid — cite evidence>",
+  "cloud_maturity_score": <integer 0-100: 80+=Cloud-Native, 60-79=Hybrid, 40-59=Migrating, <40=Legacy-Heavy, 0 only if truly no signal>,
   "cloud_migration_maturity": "<Cloud-Native | Hybrid | Migrating | Legacy-Heavy | Unknown>",
-  "automation_index": "<Hyper-Automated | High | Medium | Low — based on DevOps/RPA/AI signals>",
-  "automation_notes": "<specific tools: Jenkins, GitHub Actions, Ansible, RPA, etc.>",
-  "devops_adoption": "<CI/CD maturity and key tools found in job postings>",
-  "programming_languages": "<languages from job postings: e.g. Java, Python, TypeScript, Go>",
-  "frameworks_tools": "<frameworks/tools: e.g. Spring Boot, React, Kubernetes, Terraform>",
-  "ai_ml_platforms": "<AI/ML tools found: TensorFlow, PyTorch, Azure ML, SageMaker, etc. or '-'>",
-  "tech_vendors": "<key ISV partners/vendors: SAP, Salesforce, ServiceNow, etc.>",
-  "modern_vs_legacy_split": "<e.g. '70% modern / 30% legacy' — estimate from signals>",
+  "automation_index": "<Hyper-Automated | High | Medium | Low>",
+  "devops_tools": "<specific CI/CD and DevOps tools found: e.g. Jenkins, GitHub Actions, GitLab CI, Terraform, Ansible>",
+  "programming_languages": "<languages from job postings — comma separated: e.g. Java, Python, TypeScript, Go, C++>",
+  "frameworks_tools": "<frameworks and tools: e.g. Spring Boot, React, Node.js, Kubernetes, Kafka, Spark>",
+  "ai_ml_platforms": "<AI/ML stack: TensorFlow, PyTorch, Azure ML, SageMaker, LangChain, or '-'>",
+  "enterprise_vendors": "<SAP, Salesforce, Oracle, ServiceNow, Microsoft, Workday etc. in use>",
+  "modern_vs_legacy_split": "<estimate e.g. '70% modern cloud / 30% legacy' — base on job posting signals>",
   "digital_maturity_level": "<Foundational | Developing | Advanced | Leading>",
-  "tech_highlights": "<2-3 sentences on the GCC's tech posture based on findings>",
-  "source": "<URL>"
+  "tech_highlights": "<2-3 sentence summary of the tech posture — cite specific tools and evidence found>",
+  "source": "<URL of job posting, tech blog, or news article used>"
 }}
 Return ONLY the JSON object."""
 
@@ -383,13 +438,14 @@ async def _enrich_one_location(
 ) -> dict:
     """Run 4 parallel enrichment calls for one GCC location."""
     gcc_location = location_info.get("gcc_location", "")
+    gcc_name     = location_info.get("gcc_name", "")
     label = f"{company_name[:20]}@{gcc_location[:15]}"
 
-    caps_task  = _collect(loop, (_capabilities_prompt(company_name, gcc_location), f"cap_{label}",  6144), f"cap_{label}",  180)
-    proj_task  = _collect(loop, (_projects_prompt(company_name, gcc_location),     f"proj_{label}", 6144), f"proj_{label}", 180)
-    tal_task   = _collect(loop, (_talent_prompt(company_name, gcc_location),        f"tal_{label}",  6144), f"tal_{label}",  180)
-    fin_task   = _collect(loop, (_financials_prompt(company_name, gcc_location),    f"fin_{label}",  4096), f"fin_{label}",  180)
-    tech_task  = _collect(loop, (_techstack_prompt(company_name, gcc_location),     f"tech_{label}", 4096), f"tech_{label}", 180)
+    caps_task  = _collect(loop, (_capabilities_prompt(company_name, gcc_location, gcc_name), f"cap_{label}",  6144), f"cap_{label}",  180)
+    proj_task  = _collect(loop, (_projects_prompt(company_name, gcc_location, gcc_name),     f"proj_{label}", 6144), f"proj_{label}", 180)
+    tal_task   = _collect(loop, (_talent_prompt(company_name, gcc_location, gcc_name),        f"tal_{label}",  6144), f"tal_{label}",  180)
+    fin_task   = _collect(loop, (_financials_prompt(company_name, gcc_location, gcc_name),    f"fin_{label}",  4096), f"fin_{label}",  180)
+    tech_task  = _collect(loop, (_techstack_prompt(company_name, gcc_location, gcc_name),     f"tech_{label}", 4096), f"tech_{label}", 180)
 
     caps, projs, talent, fin, tech = await asyncio.gather(
         caps_task, proj_task, tal_task, fin_task, tech_task,

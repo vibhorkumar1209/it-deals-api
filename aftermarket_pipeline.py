@@ -134,16 +134,24 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
     config_kwargs = dict(temperature=0.15, max_output_tokens=max_output_tokens)
     if use_search:
         config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+    # Disable thinking — Gemini 2.5 Flash thinking burns 60-120s per call with no benefit
+    # for structured JSON extraction tasks.
+    try:
+        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    except Exception:
+        pass  # older SDK version — skip
 
-    MAX_RETRIES = 6
-    TOTAL_BUDGET = 300  # hard cap: all retries combined must finish within 5 min
+    MAX_RETRIES = 4
+    CALL_TIMEOUT = 100   # hard per-call HTTP timeout in seconds
+    TOTAL_BUDGET = 280   # all attempts combined must finish within this
     call_start = _time.time()
     for attempt in range(1, MAX_RETRIES + 1):
         if _time.time() - call_start > TOTAL_BUDGET:
             logger.warning(f"Gemini [{label}] total budget {TOTAL_BUDGET}s exceeded — giving up")
             return []
         try:
-            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            # http_options timeout ensures the call fails fast rather than hanging indefinitely.
+            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": CALL_TIMEOUT})
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
@@ -153,20 +161,20 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
         except Exception as e:
             err = str(e)
             is_quota = "RESOURCE_EXHAUSTED" in err or "free_tier" in err
-            is_retry = not is_quota and any(x in err for x in ("503", "UNAVAILABLE", "overloaded", "timeout", "429", "500", "502", "504"))
+            is_retry = not is_quota and any(x in err for x in ("503", "UNAVAILABLE", "overloaded", "timeout", "TimeoutError", "DeadlineExceeded", "429", "500", "502", "503", "504"))
             if is_quota:
                 raise RuntimeError("Gemini quota exhausted — upgrade to paid API plan.") from e
             if is_retry and attempt < MAX_RETRIES:
                 elapsed = _time.time() - call_start
                 remaining = TOTAL_BUDGET - elapsed
-                wait = min(20 * attempt, 60, max(0, remaining - 10))
+                wait = min(15 * attempt, 45, max(0, remaining - 15))
                 if wait <= 0:
                     logger.warning(f"Gemini [{label}] no time left for retry — giving up")
                     return []
-                logger.warning(f"Gemini [{label}] transient error attempt {attempt}/{MAX_RETRIES}, sleeping {wait:.0f}s: {err[:80]}")
+                logger.warning(f"Gemini [{label}] attempt {attempt}/{MAX_RETRIES} failed ({err[:60]}), retry in {wait:.0f}s")
                 _time.sleep(wait)
                 continue
-            logger.error(f"Aftermarket Gemini [{label}]: {e}")
+            logger.error(f"Aftermarket Gemini [{label}]: {err[:120]}")
             return []
     else:
         return []
@@ -525,7 +533,8 @@ READINESS_FIELDS = [
 def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str,
                           cap_data: list[dict] | None = None,
                           agg_data: list[dict] | None = None,
-                          spend_module_rows: list[dict] | None = None) -> str:
+                          spend_module_rows: list[dict] | None = None,
+                          modules: list[str] | None = None) -> str:
     ind = f" ({industry})" if industry else ""
     vendor = target_vendor or "the vendor"
     from collections import defaultdict
@@ -566,6 +575,10 @@ def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str,
 
     agg_ref = " | ".join(f"{r.get('spend_type')}: {r.get('estimate','?')}" for r in (agg_data or [])[:4])
 
+    modules_to_run = modules or ["Warranty Management", "Service & Repair Operations", "Parts & Inventory Management", "Field Service Management", "Dealer & Distribution Network", "Telematics & Connected Products", "Predictive Maintenance & IoT", "Analytics & Business Intelligence", "AI & Automation"]
+    modules_list = ", ".join(modules_to_run)
+    n_modules = len(modules_to_run)
+
     return f"""You are a vendor readiness analyst. Use Google Search to find live signals.
 
 COMPANY: {company_name}{ind}
@@ -596,7 +609,7 @@ SEARCHES TO RUN:
 - "{company_name}" CTO OR CIO digital transformation aftermarket 2024 OR 2025
 - "{company_name}" IT budget technology investment aftermarket service
 
-TASK: For EACH of the 9 modules listed below, assess vendor displacement readiness using 5 scored signal categories.
+TASK: For EACH of the {n_modules} modules listed below, assess vendor displacement readiness using 5 scored signal categories.
 
 SCORING RULES:
 - Score each category 0-100 based on evidence found
@@ -607,9 +620,9 @@ SCORING RULES:
 - budget_signals_score (weight 0.20): Budget announcements, IT spend news, contract renewals in this domain?
 - weighted_readiness = (existing_rel_score × 0.30) + (it_signals_score × 0.15) + (company_signals_score × 0.20) + (exec_signals_score × 0.15) + (budget_signals_score × 0.20)
 
-MODULES: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation
+MODULES: {modules_list}
 
-Return ONLY a valid JSON array. Each element:
+Return ONLY a valid JSON array — one entry per module listed above. Each element:
 
 [
   {{
@@ -633,7 +646,7 @@ Return ONLY a valid JSON array. Each element:
   }}
 ]
 
-Return ALL 9 modules. Return ONLY the JSON array starting with [. No prose, no markdown.
+Return ALL {n_modules} modules listed above. Return ONLY the JSON array starting with [. No prose, no markdown.
 """
 
 
@@ -769,7 +782,6 @@ async def run_aftermarket_deep_dive(
     # fire a lightweight search to get context for synthesis.
     # Readiness-only skips context: it uses Google Search grounding internally and
     # serial context fetching (~105s) eats into the readiness timeout budget.
-    readiness_only = run == {"readiness"}
     needs_context = ("spend_module" in run) and "capabilities" not in run
     context_future = loop.run_in_executor(
         None, _gemini_call_sync,
@@ -778,17 +790,31 @@ async def run_aftermarket_deep_dive(
     ) if needs_context else None
 
     spend_future   = None
-    # Readiness-only fast path: launch readiness immediately without waiting for
-    # context/agg (those add ~105s of serial blocking before readiness even starts).
-    if readiness_only:
-        ready_future = loop.run_in_executor(
+    _ALL_MODULES = ["Warranty Management", "Service & Repair Operations", "Parts & Inventory Management",
+                    "Field Service Management", "Dealer & Distribution Network",
+                    "Telematics & Connected Products", "Predictive Maintenance & IoT",
+                    "Analytics & Business Intelligence", "AI & Automation"]
+    _BATCH_A = _ALL_MODULES[:5]
+    _BATCH_B = _ALL_MODULES[5:]
+
+    # Always launch readiness immediately — never after spend_module.
+    # Readiness uses Google Search internally for its own signals and TAM estimation,
+    # so it doesn't need pre-computed cap/spend data. Waiting for caps+spend (300s+)
+    # before launching would push total pipeline time past Render's 600s HTTP limit.
+    # Split into two parallel 5/4-module batches to halve per-call time.
+    if "readiness" in run:
+        ready_future_a = loop.run_in_executor(
             None, _gemini_call_sync,
-            _readiness_tam_prompt(company_name, industry, target_vendor, [], [], []),
-            True, "readiness_tam",
-            32768,
+            _readiness_tam_prompt(company_name, industry, target_vendor, [], [], [], _BATCH_A),
+            True, "readiness_tam_a", 16384,
+        )
+        ready_future_b = loop.run_in_executor(
+            None, _gemini_call_sync,
+            _readiness_tam_prompt(company_name, industry, target_vendor, [], [], [], _BATCH_B),
+            True, "readiness_tam_b", 16384,
         )
     else:
-        ready_future = None
+        ready_future_a = ready_future_b = None
 
     yield {"type": "heartbeat", "message": "🌐 Phase 1: Researching capabilities & tech spend in parallel…"}
     await asyncio.sleep(0)
@@ -842,11 +868,10 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"✅ Capabilities: {len(all_cap_rows)} rows — launching Phase 2 synthesis…"}
     await asyncio.sleep(0)
 
-    # Collect aggregate spend (needed as context for Phase 2)
-    # Readiness-only skips agg gathering — readiness was already launched above.
+    # Collect aggregate spend (needed as context for spend_module synthesis)
     if agg_future:
         agg_rows = await _collect_future(agg_future, "agg_spend", timeout=90)
-    elif "spend_module" in run and not readiness_only:
+    elif "spend_module" in run:
         # Fetch aggregate spend as context for spend_module synthesis
         yield {"type": "heartbeat", "message": "💰 Fetching spend context for Phase 2…"}
         await asyncio.sleep(0)
@@ -889,52 +914,79 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"✅ Spend by module: {len(spend_rows) if isinstance(spend_rows, list) else 0} rows"}
     await asyncio.sleep(0)
 
-    # Phase 2b: Readiness Matrix + TAM — launched AFTER spend_module so it can use real spend figures.
-    # Exception: readiness-only was already launched at top (fast path) with empty context.
-    # Needs search grounding for live signals (hiring, RFPs, exec agenda).
-    # Uses 32768 output tokens: 9 modules × nested signal arrays easily exceeds 8192.
-    if "readiness" in run and not readiness_only:
-        ready_future = loop.run_in_executor(
-            None, _gemini_call_sync,
-            _readiness_tam_prompt(
-                company_name, industry, target_vendor,
-                all_cap_rows,
-                agg_rows if isinstance(agg_rows, list) else [],
-                spend_rows if isinstance(spend_rows, list) else [],
-            ),
-            True, "readiness_tam",
-            32768,
-        )
+    # Readiness was already launched at startup — nothing to do here.
 
     # ── Step 4: Readiness Matrix + TAM ───────────────────────────────────────
-    yield {"type": "heartbeat", "message": "🎯 Table 4: Collecting readiness matrix and TAM estimates…"}
+    yield {"type": "heartbeat", "message": "🎯 Table 4: Collecting readiness matrix (2 parallel batches)…"}
     await asyncio.sleep(0)
 
-    # Poll with heartbeats every 25s — critical to keep SSE connection alive.
-    # A silent await of up to 480s causes Render/browser to drop the connection,
-    # which is why readiness appeared to always return empty.
-    readiness_rows = []
-    if ready_future:
-        READY_TIMEOUT = 480
+    async def _poll_ready_future(fut, batch_label: str) -> list:
+        """Poll a readiness future with heartbeats every 25s. Returns rows or []."""
+        if fut is None:
+            return []
+        READY_TIMEOUT = 360
         elapsed_ready = 0
         POLL_INTERVAL = 25
-        while not ready_future.done() and elapsed_ready < READY_TIMEOUT:
+        while not fut.done() and elapsed_ready < READY_TIMEOUT:
             try:
-                readiness_rows = await asyncio.wait_for(asyncio.shield(ready_future), timeout=POLL_INTERVAL)
-                break
+                result = await asyncio.wait_for(asyncio.shield(fut), timeout=POLL_INTERVAL)
+                return result if isinstance(result, list) else []
             except asyncio.TimeoutError:
                 elapsed_ready += POLL_INTERVAL
-                yield {"type": "heartbeat", "message": f"⏳ Analysing readiness signals… ({elapsed_ready}s)"}
-                await asyncio.sleep(0)
+                yield_msg = f"⏳ Analysing {batch_label}… ({elapsed_ready}s)"
+                # Can't yield inside nested async fn — store message on fut for outer loop
+                fut._heartbeat_msg = yield_msg  # type: ignore[attr-defined]
+        if fut.done():
+            try:
+                r = fut.result()
+                return r if isinstance(r, list) else []
+            except Exception as e:
+                logger.error(f"readiness {batch_label} result error: {e}")
         else:
-            if ready_future.done():
+            fut.cancel()
+            logger.warning(f"readiness {batch_label}: timed out after {READY_TIMEOUT}s")
+        return []
+
+    readiness_rows = []
+    if ready_future_a or ready_future_b:
+        READY_TIMEOUT = 360
+        elapsed_ready = 0
+        POLL_INTERVAL = 25
+        futures_pending = {f for f in (ready_future_a, ready_future_b) if f is not None}
+        collected: list = []
+
+        while futures_pending and elapsed_ready < READY_TIMEOUT:
+            await asyncio.sleep(POLL_INTERVAL)
+            elapsed_ready += POLL_INTERVAL
+            done_now = {f for f in futures_pending if f.done()}
+            for f in done_now:
                 try:
-                    readiness_rows = ready_future.result()
+                    rows = f.result()
+                    if isinstance(rows, list):
+                        collected.extend(rows)
                 except Exception as e:
-                    logger.error(f"readiness_tam result error: {e}")
+                    logger.error(f"readiness batch error: {e}")
+            futures_pending -= done_now
+            if futures_pending:
+                yield {"type": "heartbeat", "message": f"⏳ Analysing readiness signals… {len(collected)} modules done ({elapsed_ready}s)"}
+                await asyncio.sleep(0)
+
+        # Collect any remaining futures that finished during final sleep
+        for f in futures_pending:
+            if f.done():
+                try:
+                    rows = f.result()
+                    if isinstance(rows, list):
+                        collected.extend(rows)
+                except Exception:
+                    pass
             else:
-                ready_future.cancel()
-                logger.warning("readiness_tam: timed out after 480s")
+                f.cancel()
+                logger.warning("readiness batch: timed out")
+
+        # Sort into canonical module order
+        _MODULE_ORDER = {m: i for i, m in enumerate(_ALL_MODULES)}
+        readiness_rows = sorted(collected, key=lambda r: _MODULE_ORDER.get(r.get("domain", ""), 99))
 
     for row in (readiness_rows if isinstance(readiness_rows, list) else []):
         if isinstance(row, dict):
