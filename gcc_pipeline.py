@@ -138,39 +138,39 @@ async def _collect(loop, fn_args: tuple, label: str, timeout: int = 200):
 def _location_discovery_prompt(company_name: str, domain: str, location_filter: str) -> str:
     loc_clause = f"\nLOCATION FILTER: Only return GCC/center locations in or near: {location_filter}" if location_filter else \
                  "\nCOVERAGE: Return ALL worldwide GCC/center locations."
-    return f"""You are a GCC location researcher with live Google Search.
-
-TARGET COMPANY: {company_name}{f" (website: {domain})" if domain else ""}
+    return f"""List all Global Capability Centers (GCCs) of {company_name} worldwide.{f" (website: {domain})" if domain else ""}
 {loc_clause}
 
-Run ALL of these searches to find every distinct center/captive/offshore hub location:
-- "{company_name}" "global capability center" OR "technology center" OR "captive center" location city
+For each GCC, provide: city and country, year of establishment, and operating model — whether it is a pure captive, Build-Operate-Transfer (BOT), or GCC-as-a-Service. Include sources.
+
+Run ALL of these searches before responding:
+- "{company_name}" "global capability center" OR "GCC" location city country established year
+- "{company_name}" captive center OR "build operate transfer" OR "GCC-as-a-Service"
 - "{company_name}" engineering center OR development center OR shared services center city country
-- "{company_name}" India center Bengaluru OR Pune OR Chennai OR Hyderabad OR Mumbai OR Noida OR Gurugram
-- "{company_name}" Poland OR Romania OR Hungary OR Czech Republic OR Portugal technology center
-- "{company_name}" Philippines OR Malaysia OR Singapore OR Vietnam technology hub center
+- "{company_name}" India Bengaluru OR Pune OR Chennai OR Hyderabad OR Mumbai OR Noida OR Gurugram center
+- "{company_name}" Poland OR Romania OR Hungary OR Czech Republic OR Portugal OR Spain technology center
+- "{company_name}" Philippines OR Malaysia OR Singapore OR Vietnam OR Thailand technology hub
 - "{company_name}" Mexico OR Brazil OR Colombia OR Argentina OR Costa Rica technology center
 - "{company_name}" China OR Shanghai OR Shenzhen OR Beijing technology center
 - site:linkedin.com/company "{company_name}" offices engineering center locations headcount
-- "{company_name}" GCC established employees headcount site:nasscom.in OR site:globalcapabilitycenters.com
+- site:nasscom.in OR site:globalcapabilitycenters.com "{company_name}" GCC
 
-KEY RULE: Return ONE entry per distinct GCC/center ENTITY. If a company has an Engineering Center AND a Shared Services Center in the same city, return BOTH as separate entries. Use the official entity name to distinguish them.
+KEY RULE: Return ONE entry per distinct GCC/center ENTITY. If a company has an Engineering Center AND a Shared Services Center in the same city, return BOTH as separate entries.
 
 Return a JSON array — one object per distinct GCC entity:
 [
   {{
-    "gcc_name": "<official entity name e.g. 'Volkswagen India Technology Center, Pune' — be specific>",
+    "gcc_name": "<official entity name e.g. 'Volkswagen India Technology Center, Pune'>",
     "city": "<city>",
     "country": "<country>",
     "gcc_location": "<City, Country>",
     "established_year": "<year or Unknown>",
     "headcount": "<number/range or Unknown>",
     "operating_model": "<Pure Captive | BOT | GCC-as-a-Service | Unknown>",
-    "primary_focus": "<what this specific entity does: e.g. Engineering & R&D, Finance Shared Services, Digital Transformation>",
+    "primary_focus": "<Engineering & R&D | Shared Services | Digital Transformation | AI/ML & Data | Customer Experience | Mixed>",
     "source": "<URL>"
   }}
 ]
-
 Return ONLY the raw JSON array. No prose. No markdown."""
 
 
@@ -180,31 +180,30 @@ def _capabilities_prompt(company_name: str, gcc_location: str, gcc_name: str = "
     city = gcc_location.split(",")[0].strip()
     country = gcc_location.split(",")[-1].strip() if "," in gcc_location else ""
     entity = gcc_name if gcc_name and gcc_name != "-" else company_name
-    return f"""You are a GCC capability analyst with live Google Search.
+    return f"""What functions does {company_name}'s GCC in {gcc_location} handle?{f" (center: {gcc_name})" if gcc_name and gcc_name != '-' else ""}
 
-TARGET: {company_name} — center in {gcc_location}{f' (entity: {gcc_name})' if gcc_name and gcc_name != '-' else ''}
+Provide a breakdown across: software engineering and R&D, shared services (finance, HR, legal), digital transformation, AI/ML and data analytics, and customer experience operations. Include the primary mandate of the center.
 
-You MUST run ALL of these searches before responding:
-1. site:linkedin.com "{company_name}" "{city}" engineer OR developer OR analyst — what roles exist here?
-2. "{company_name}" "{city}" technology center capabilities services functions
-3. "{company_name}" {city} operations finance HR shared services teams
-4. "{entity}" capabilities OR functions OR services OR teams
-5. "{company_name}" {country} center engineering digital AI shared services what does it do
-6. site:linkedin.com/jobs "{company_name}" {city} — scan job titles to infer what teams exist
+Run ALL of these searches before responding:
+1. "{company_name}" "{city}" GCC capabilities OR functions OR services — what does this center do?
+2. site:linkedin.com "{company_name}" "{city}" engineer OR developer OR analyst OR manager — what roles exist?
+3. site:linkedin.com/jobs "{company_name}" {city} — scan job titles to infer teams and functions
+4. "{company_name}" {city} operations finance HR shared services legal digital teams
+5. "{entity}" capabilities mandate primary focus engineering AI data analytics
+6. "{company_name}" {country} center engineering digital AI shared services customer experience
+7. "{company_name}" {city} center of excellence OR CoE OR R&D OR product development
 
-From these searches, identify what functions/teams operate at this specific {gcc_location} location.
-Infer from job titles, press releases, LinkedIn posts, and company descriptions.
+From searches, identify ALL functions/teams at {gcc_location}. Infer from job titles, org charts, press releases, and company descriptions.
 
-Return a JSON array — one object per capability area identified at {gcc_location}:
+Return a JSON array — one object per capability area at {gcc_location}:
 [
   {{
     "capability_area": "<Engineering & R&D | Product Development | Shared Services | Digital Transformation | AI/ML & Data Science | Analytics & BI | Customer Experience | IT Infrastructure & Cloud | Cybersecurity | Finance & Accounting | HR Services | Supply Chain | Legal & Compliance | Other>",
-    "description": "<what this specific team does at {gcc_location} — be concrete, cite evidence>",
-    "team_size_estimate": "<headcount or role count or Unknown>",
-    "key_functions": "<comma-separated specific job titles or functions found in searches>"
+    "description": "<concrete description of what this team does at {gcc_location} — cite evidence>",
+    "team_size_estimate": "<headcount/role count or Unknown>",
+    "key_functions": "<specific job titles or sub-functions found in searches>"
   }}
 ]
-
 Return ONLY the JSON array. No prose. No markdown."""
 
 
@@ -212,121 +211,112 @@ def _projects_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -
     city = gcc_location.split(",")[0].strip()
     country = gcc_location.split(",")[-1].strip() if "," in gcc_location else ""
     entity = gcc_name if gcc_name and gcc_name != "-" else company_name
-    return f"""You are a GCC projects and initiatives analyst with live Google Search.
+    return f"""What are the active projects, technology investments, strategic partnerships, and expansion plans at {company_name}'s GCC in {gcc_location} as of 2025–2026?{f" (center: {gcc_name})" if gcc_name and gcc_name != '-' else ""}
 
-TARGET: {company_name} — center in {gcc_location}{f' (entity: {gcc_name})' if gcc_name and gcc_name != '-' else ''}
+Include any recent announcements, new center openings, and LinkedIn or job posting signals indicating hiring velocity.
 
 Run ALL of these searches — do not skip any:
-1. "{company_name}" {city} expansion investment hiring announcement 2023 OR 2024 OR 2025
-2. "{company_name}" {country} center project initiative technology investment 2024
-3. site:businesswire.com OR site:prnewswire.com "{company_name}" {city} OR {country}
-4. "{company_name}" {city} jobs hiring 500 OR 1000 OR 2000 OR 3000 employees
-5. "{company_name}" {country} digital transformation AI automation program 2024 OR 2025
-6. "{entity}" project initiative expansion partnership announcement
-7. "{company_name}" {city} new office facility campus expansion
-8. "{company_name}" {country} technology vendor SAP OR Salesforce OR Microsoft OR AWS partnership
+1. "{company_name}" {city} expansion investment hiring announcement 2024 OR 2025 OR 2026
+2. site:businesswire.com OR site:prnewswire.com "{company_name}" {city} OR {country} 2024 OR 2025
+3. "{company_name}" {country} center project initiative technology investment 2024 OR 2025
+4. "{entity}" project initiative expansion partnership announcement strategic
+5. "{company_name}" {city} new office facility campus expansion 2024 OR 2025
+6. "{company_name}" {city} hiring 500 OR 1000 OR 2000 OR 3000 OR 5000 employees engineers
+7. "{company_name}" {country} AI OR cloud OR digital transformation program initiative 2024 OR 2025
+8. "{company_name}" {country} technology vendor Microsoft OR AWS OR Azure OR SAP OR ServiceNow partnership
+9. site:linkedin.com "{company_name}" {city} new jobs hiring 2025 — check hiring velocity
+10. "{company_name}" {city} OR {country} centre of excellence OR CoE launch 2024 OR 2025
 
-IMPORTANT: Any of these count as a "project/initiative":
-- Headcount expansion announcements (e.g., "will hire 5000 in India by 2025")
-- New facility or campus openings
-- Technology transformation programs
-- Vendor partnerships or platform deployments
-- Digital/AI/cloud initiatives
-- Center of Excellence launches
+Count as a project/initiative: headcount expansions, facility openings, technology programs, vendor partnerships, digital/AI/cloud initiatives, CoE launches.
 
-Return a JSON array — one per project, initiative, expansion, or announcement found:
+Return a JSON array — one per project, initiative, or announcement found:
 [
   {{
-    "project_name": "<specific name or short title of the announcement/initiative>",
-    "category": "<Headcount Expansion | New Facility | Technology Investment | Digital Initiative | Partnership | R&D Program | Automation | Centre of Excellence | Other>",
-    "description": "<concrete description — include numbers, dates, technologies if found>",
+    "project_name": "<specific name or short title>",
+    "category": "<Headcount Expansion | New Facility | Technology Investment | Digital Initiative | AI/ML Program | Partnership | R&D Program | Automation | Centre of Excellence | Other>",
+    "description": "<concrete description — include numbers, dates, technologies>",
     "status": "<Active | Announced | Completed | Planning>",
     "investment_value": "<$ amount or headcount target or Unknown>",
     "partner_vendor": "<partner/vendor if mentioned or '-'>",
     "timeline": "<year or date range>",
-    "hiring_signal": "<jobs being added e.g. '2,000 engineers by 2025' or '-'>",
+    "hiring_signal": "<new roles being added e.g. '2,000 engineers by 2025' or '-'>",
     "source": "<URL of press release, news article, or LinkedIn post>"
   }}
 ]
-
-Return ONLY the JSON array. If genuinely nothing found after all searches, return []."""
+Return ONLY the JSON array. If genuinely nothing found, return []."""
 
 
 def _talent_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -> str:
     city = gcc_location.split(",")[0].strip()
     country = gcc_location.split(",")[-1].strip() if "," in gcc_location else ""
     entity = gcc_name if gcc_name and gcc_name != "-" else company_name
-    # Derive likely email domain from company name
     email_domain = company_name.lower().replace(" ", "") + ".com"
-    return f"""You are a GCC talent intelligence analyst with live Google Search.
+    return f"""Who are the key leaders at {company_name}'s GCC in {gcc_location}?{f" (center: {gcc_name})" if gcc_name and gcc_name != '-' else ""}
 
-TARGET: {company_name} — center in {gcc_location}{f' (entity: {gcc_name})' if gcc_name and gcc_name != '-' else ''}
+Provide names and titles for: GCC Head / MD, VPs, and functional leaders. Include their LinkedIn profiles if available, reporting lines to parent HQ, current headcount, dominant skill sets, and top open roles being hired for in 2025–2026.
 
-Run ALL of these LinkedIn and web searches:
-1. site:linkedin.com/in "{company_name}" "{city}" "Head of" OR "Managing Director" OR "VP" OR "Vice President"
-2. site:linkedin.com/in "{company_name}" "{city}" "Country Head" OR "Site Lead" OR "Center Head" OR "CTO" OR "CFO"
-3. site:linkedin.com/in "{company_name}" "{country}" Director OR VP engineering OR technology OR digital
-4. "{company_name}" {city} managing director OR head of center OR country head name
-5. "{entity}" leadership team management {city}
-6. "{company_name}" {city} executive appointment announcement 2023 OR 2024 OR 2025
-7. "{company_name}" {city} talent hiring engineers data scientists skill shortage trend
+Run ALL of these searches:
+1. site:linkedin.com/in "{company_name}" "{city}" "Managing Director" OR "Head of" OR "VP" OR "Vice President" OR "Country Head" OR "Site Lead" OR "Center Head"
+2. site:linkedin.com/in "{company_name}" "{city}" "CTO" OR "CFO" OR "COO" OR "Director" engineering OR technology OR digital
+3. "{company_name}" {city} managing director OR GCC head OR country head appointed OR named 2023 OR 2024 OR 2025
+4. "{entity}" leadership team management {city} executive
+5. "{company_name}" {city} executive appointment announcement 2024 OR 2025
+6. site:linkedin.com/jobs "{company_name}" {city} 2025 — what are the top roles being hired now?
+7. "{company_name}" {city} talent hiring engineers data scientists dominant skills 2025
+8. "{company_name}" {country} headcount total employees GCC 2024 OR 2025
 
-For each leader found, search: site:linkedin.com/in "<their name>" "{company_name}" to get their profile URL.
-
-Return a JSON array — mix of named leaders AND talent/hiring insights:
+Return a JSON array — named leaders first, then talent/hiring insights:
 [
   {{
     "type": "<Leader | Talent Insight>",
-    "name": "<full name — or '-' for talent insights>",
+    "name": "<full name or '-' for talent insights>",
     "title": "<exact job title from LinkedIn or press release>",
     "seniority": "<C-Suite | VP | Director | Senior Manager | N/A>",
     "function": "<Technology | Engineering | Finance | HR | Operations | AI/Data | Legal | Sales | Other>",
     "linkedin_url": "<full LinkedIn profile URL or '-'>",
-    "reporting_to": "<reports to role/name or '-'>",
+    "reporting_to": "<reports to HQ role/name or '-'>",
     "contact_hint": "<likely email e.g. firstname.lastname@{email_domain} or '-'>",
-    "insight": "<scope of role, team size managed, or a key talent/hiring trend for {gcc_location}>"
+    "insight": "<scope of role, team size, or key talent/hiring trend for {gcc_location}>"
   }}
 ]
-
 Return ONLY the JSON array. No prose. No markdown."""
 
 
 def _financials_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -> str:
     city = gcc_location.split(",")[0].strip()
     country = gcc_location.split(",")[-1].strip() if "," in gcc_location else ""
-    return f"""You are a GCC financial intelligence analyst with live Google Search.
+    return f"""What is the estimated operational budget and revenue contribution of {company_name}'s GCC in {gcc_location}?
 
-TARGET: {company_name} — center in {gcc_location}
+Include: parent company global annual revenue, any disclosed GCC-specific financials, IP or patents developed at the center, and proprietary platforms built there.
 
 Run ALL of these searches:
-1. "{company_name}" annual revenue OR turnover 2023 OR 2024 — find parent company global revenue
-2. "{company_name}" {country} investment OR budget OR spend 2023 OR 2024 OR 2025
-3. "{company_name}" {city} expansion investment "$" million OR billion announcement
-4. "{company_name}" intellectual property OR patent OR trademark {country} OR {city}
-5. "{company_name}" {country} R&D investment OR research spend
-6. "{company_name}" {city} proprietary platform OR product OR technology developed
-7. site:annualreports.com OR site:ir.{company_name.lower().replace(" ","")}.com annual report revenue
-8. "{company_name}" cost arbitrage OR offshore savings India OR {country}
+1. "{company_name}" annual revenue OR turnover 2024 OR 2025 — find verified parent company global revenue
+2. site:annualreports.com OR site:ir.*.com "{company_name}" annual report 2024 revenue earnings
+3. "{company_name}" {country} investment OR budget OR technology spend 2024 OR 2025
+4. "{company_name}" {city} expansion investment "$" million OR billion announcement
+5. "{company_name}" intellectual property OR patent OR trademark {country} OR {city}
+6. "{company_name}" {country} R&D investment OR research and development spend
+7. "{company_name}" {city} proprietary platform OR product OR technology developed built
+8. "{company_name}" cost arbitrage OR offshore savings OR labor cost {country}
+9. "{company_name}" GCC revenue contribution OR value delivered OR savings reported
 
-CRITICAL: Parent company global revenue is ALWAYS findable for public companies.
-Search investor relations pages and financial news. Never leave parent_global_revenue as Unknown
-if the company is publicly traded.
+CRITICAL: Parent global revenue is ALWAYS findable for public companies — search investor relations and financial news.
 
-For GCC budget: if no specific figure found, estimate using industry benchmarks:
-- Small GCC (500-1000 staff): $20-50M/year
-- Mid GCC (1000-5000 staff): $50-200M/year  
-- Large GCC (5000+): $200M+/year
-Flag as "(estimated)" if using benchmarks.
+For GCC operational budget: if no specific figure, estimate from headcount benchmarks:
+- Small GCC (500–1,000 staff): $20–50M/year
+- Mid GCC (1,000–5,000 staff): $50–200M/year
+- Large GCC (5,000+): $200M+/year
+Flag estimated figures as "(estimated)".
 
 Return a JSON object:
 {{
-  "parent_global_revenue": "<annual revenue with FY year e.g. '€45.3B FY2024' — REQUIRED for public companies>",
-  "gcc_operational_budget": "<annual GCC budget e.g. '$40-80M (estimated)' or actual if found>",
+  "parent_global_revenue": "<verified annual revenue with FY year e.g. '€45.3B FY2024'>",
+  "gcc_operational_budget": "<annual GCC budget e.g. '$40–80M (estimated)' or actual>",
   "gcc_cost_to_parent": "<cost savings or value attributed to this GCC or Unknown>",
-  "cost_arbitrage_estimate": "<% labor cost savings vs onshore — use benchmark if not found e.g. '60-70% vs US rates'>",
+  "cost_arbitrage_estimate": "<% labor cost savings vs onshore e.g. '60–70% vs US rates'>",
   "ip_patents_at_location": "<number of patents or IP assets at {city} or Unknown>",
   "proprietary_platforms": "<specific tools/platforms/products built at this center or '-'>",
-  "r_and_d_investment": "<R&D spend globally or for this region or Unknown>",
+  "r_and_d_investment": "<R&D spend for this region or globally or Unknown>",
   "financial_notes": "<any other financial insight: contracts won, cost savings reported, investment announcements>",
   "source": "<URL of annual report, press release, or financial news>"
 }}
@@ -336,23 +326,23 @@ Return ONLY the JSON object."""
 def _techstack_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -> str:
     city = gcc_location.split(",")[0].strip()
     country = gcc_location.split(",")[-1].strip() if "," in gcc_location else ""
-    return f"""You are a GCC technology stack analyst with live Google Search.
+    return f"""What is the technology stack and digital maturity of {company_name}'s GCC in {gcc_location}?
 
-TARGET: {company_name} — center in {gcc_location}
+Cover: cloud providers and migration status, automation and RPA/hyper-automation adoption, DevOps/DevSecOps maturity, key technology vendors and partnerships, and the estimated split between modern cloud-native vs legacy on-premise workloads.
 
-Job postings are the BEST source for tech stack. Run ALL of these searches:
-1. site:linkedin.com/jobs "{company_name}" {city} software engineer developer — read job requirements
-2. site:naukri.com "{company_name}" {city} engineer developer — for India locations
-3. site:glassdoor.com "{company_name}" {city} engineer interview — tech stack mentions
-4. "{company_name}" {city} AWS OR Azure OR "Google Cloud" cloud infrastructure
-5. "{company_name}" {city} kubernetes OR docker OR microservices OR DevOps
-6. "{company_name}" {city} python OR java OR javascript OR golang developer jobs
-7. "{company_name}" technology blog OR tech stack OR engineering blog — look for official tech blogs
-8. github.com "{company_name}" — check public repos for language usage
-9. "{company_name}" {country} SAP OR Salesforce OR ServiceNow OR Oracle OR Microsoft deployment
-10. "{company_name}" {city} AI machine learning deep learning LLM 2024 OR 2025
+Run ALL of these searches:
+1. site:linkedin.com/jobs "{company_name}" {city} software engineer developer — extract required tech skills from job descriptions
+2. site:naukri.com "{company_name}" {city} engineer developer — India job postings for tech stack signals
+3. site:glassdoor.com "{company_name}" {city} engineer interview — tech stack and tooling mentions
+4. "{company_name}" {city} AWS OR Azure OR "Google Cloud" cloud infrastructure migration 2024 OR 2025
+5. "{company_name}" {city} kubernetes OR docker OR microservices OR DevOps OR DevSecOps
+6. "{company_name}" {city} RPA OR automation OR "hyper-automation" OR UiPath OR Automation Anywhere
+7. "{company_name}" technology blog OR engineering blog OR tech stack OR open source contribution
+8. github.com "{company_name}" — check public repositories for primary language and framework usage
+9. "{company_name}" {country} SAP OR Salesforce OR ServiceNow OR Oracle OR Microsoft OR Workday deployment
+10. "{company_name}" {city} AI OR "machine learning" OR LLM OR "generative AI" platform 2024 OR 2025
 
-From job postings, extract: required skills, preferred tools, frameworks listed in JD requirements.
+Extract from job postings: required programming languages, preferred tools, frameworks, cloud platforms, and certifications mentioned.
 
 Return a JSON object:
 {{
