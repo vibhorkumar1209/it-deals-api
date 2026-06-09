@@ -535,58 +535,83 @@ READINESS_FIELDS = [
 ]
 
 
-def _readiness_research_prompt(company_name: str, industry: str, target_vendor: str) -> str:
-    """Step 1: Search-grounded evidence gathering — short focused prompt, returns raw text."""
-    vendor = target_vendor or "the vendor"
+def _readiness_research_prompt(company_name: str, industry: str) -> str:
+    """Step 1: Search-grounded signal gathering — vendor deployment comes from cap_data instead.
+    Searches only for IT investment, exec agenda, budget, and hiring signals."""
     return f"""You are a technology intelligence analyst. Use Google Search to find REAL evidence.
 
 COMPANY: {company_name} ({industry})
-VENDOR: {vendor}
 
-Run these specific searches and report ONLY what you actually find:
-1. "{company_name}" "{vendor}" — any deployment, partnership, case study, or contract
-2. "{company_name}" aftermarket OR warranty OR "field service" OR "dealer management" technology 2023 OR 2024 OR 2025
-3. "{company_name}" CTO OR CIO OR "digital transformation" OR "technology investment" 2024 OR 2025
-4. "{company_name}" IT budget OR technology spend OR RFP OR tender 2024
-5. "{company_name}" hiring "software engineer" OR "technology" OR "digital" job postings
+Run ALL of these searches and report ONLY what you actually find:
+1. "{company_name}" aftermarket OR warranty OR "field service" OR "dealer management" technology 2023 OR 2024 OR 2025
+2. "{company_name}" CTO OR CIO OR "digital transformation" OR "technology investment" 2024 OR 2025
+3. "{company_name}" IT budget OR technology spend OR RFP OR tender 2024 OR 2025
+4. "{company_name}" hiring "software engineer" OR "technology" OR "digital" job postings 2024
 
 For each search, report ONLY confirmed findings with their source URL.
 Format: [CATEGORY] Finding. Source: URL
 
-Categories to use: VENDOR_DEPLOYMENT, IT_INVESTMENT, EXEC_AGENDA, BUDGET_SIGNAL, HIRING_SIGNAL
+Categories: IT_INVESTMENT, EXEC_AGENDA, BUDGET_SIGNAL, HIRING_SIGNAL
 
-If a search returns nothing relevant, write: [CATEGORY] No evidence found.
+If a search returns nothing relevant for a category, write: [CATEGORY] No evidence found.
 
 Do NOT invent or infer. Only report what search results actually show."""
 
 
 def _readiness_score_prompt(company_name: str, industry: str, target_vendor: str,
-                             research_text: str, modules: list[str],
-                             spend_lines: str, agg_ref: str) -> str:
-    """Step 2: No-search scoring — takes real evidence from step 1, scores each module."""
+                             research_text: str, cap_data: list,
+                             modules: list[str], spend_lines: str, agg_ref: str) -> str:
+    """Step 2: No-search scoring. Vendor deployment from cap_data; other signals from research."""
     vendor = target_vendor or "the vendor"
     n = len(modules)
     modules_list = ", ".join(modules)
+
+    # Build vendor deployment context from already-researched capabilities
+    from collections import defaultdict
+    cap_by_domain: dict = defaultdict(lambda: {"techs": [], "vendor_hit": False, "signals": []})
+    for r in (cap_data or []):
+        d = r.get("domain", "")
+        tech = r.get("technology", "")
+        rel = (r.get("vendor_relationship") or r.get("relationship") or "").lower()
+        vendor_lower = vendor.lower()
+        if tech and tech not in ("Unknown/Not Disclosed", "-"):
+            cap_by_domain[d]["techs"].append(tech)
+        if vendor_lower and (vendor_lower in tech.lower() or vendor_lower in rel):
+            cap_by_domain[d]["vendor_hit"] = True
+            cap_by_domain[d]["signals"].append(tech or rel)
+
+    vendor_lines = []
+    for d, info in cap_by_domain.items():
+        if info["vendor_hit"]:
+            vendor_lines.append(f"  {d}: {vendor} DEPLOYED — {', '.join(info['signals'][:2])}")
+        elif info["techs"]:
+            vendor_lines.append(f"  {d}: {vendor} NOT found — current tech: {', '.join(info['techs'][:2])}")
+    vendor_context = "\n".join(vendor_lines) if vendor_lines else f"  No capabilities data available for {vendor}."
+
     return f"""You are a vendor displacement readiness analyst.
 
 COMPANY: {company_name} ({industry})
 VENDOR BEING EVALUATED: {vendor}
 
-REAL EVIDENCE FROM SEARCH (use ONLY this — do not add anything not listed here):
+VENDOR DEPLOYMENT — FROM CAPABILITIES RESEARCH (authoritative, already verified):
+{vendor_context}
+
+OTHER SIGNALS — FROM LIVE SEARCH (use ONLY what is listed here):
 {research_text or "No search evidence available."}
 
 SPEND BY MODULE:
 {spend_lines}
 
-SCORING RULES — base scores ONLY on the evidence above:
-- existing_rel_score (weight 0.30): Is {vendor} shown as deployed/piloted at {company_name} in evidence? Yes→≥70. Mentioned→40-70. No evidence→≤25.
-- it_signals_score (weight 0.15): IT job postings, RFPs, or tech evaluations found in evidence for this domain?
-- company_signals_score (weight 0.20): Growth, transformation, or investment signals found in evidence for this domain?
-- exec_signals_score (weight 0.15): Executive technology agenda items found in evidence for this domain?
-- budget_signals_score (weight 0.20): Budget announcements or IT spend signals found in evidence for this domain?
+SCORING RULES — base scores ONLY on the evidence sections above:
+- existing_rel_score (weight 0.30): Use VENDOR DEPLOYMENT section only. DEPLOYED→≥75. Mentioned/partial→40-70. Not found→≤20.
+- it_signals_score (weight 0.15): IT_INVESTMENT or HIRING_SIGNAL findings from OTHER SIGNALS for this domain?
+- company_signals_score (weight 0.20): IT_INVESTMENT findings from OTHER SIGNALS for this domain?
+- exec_signals_score (weight 0.15): EXEC_AGENDA findings from OTHER SIGNALS for this domain?
+- budget_signals_score (weight 0.20): BUDGET_SIGNAL findings from OTHER SIGNALS for this domain?
 - weighted_readiness = (existing_rel_score×0.30)+(it_signals_score×0.15)+(company_signals_score×0.20)+(exec_signals_score×0.15)+(budget_signals_score×0.20)
 - displacement_opp: "High" if weighted_readiness≥65, "Medium" if 40-64, "Low" if <40
-- For evidence fields: quote the actual finding from REAL EVIDENCE above, or write "No evidence found"
+- existing_rel_evidence: quote from VENDOR DEPLOYMENT section, or "Not deployed"
+- other evidence fields: quote the exact [CATEGORY] finding from OTHER SIGNALS, or "No evidence found"
 - total_domain_spend: copy from SPEND BY MODULE, else use industry benchmark
 - vendor_adjusted_tam = total_domain_spend × weighted_readiness/100 (apply to both ends of range)
 - tam_rationale: midpoint = (low+high)/2, then × readiness%
@@ -880,9 +905,10 @@ async def run_aftermarket_deep_dive(
     # This gives REAL evidence (no hallucination) without the multi-minute search hangs
     # that occurred when each scoring call did its own searches.
     if "readiness" in run:
+        # Research prompt no longer searches for vendor deployment — that comes from cap_data
         ready_research_future = loop.run_in_executor(
             None, _gemini_call_sync,
-            _readiness_research_prompt(company_name, industry, target_vendor),
+            _readiness_research_prompt(company_name, industry),
             True, "readiness_research", 4096, "gemini-2.5-flash", True,  # return_raw=True
         )
     else:
@@ -1037,14 +1063,15 @@ async def run_aftermarket_deep_dive(
             for r in (agg_rows if isinstance(agg_rows, list) else [])[:4]
         )
 
+        # Pass all_cap_rows so existing_rel scores use the already-researched capabilities data
         score_future_a = loop.run_in_executor(
             None, _gemini_call_sync,
-            _readiness_score_prompt(company_name, industry, target_vendor, research_text, _BATCH_A, spend_lines_for_score, agg_ref_for_score),
+            _readiness_score_prompt(company_name, industry, target_vendor, research_text, all_cap_rows, _BATCH_A, spend_lines_for_score, agg_ref_for_score),
             False, "readiness_score_a", 16384, "gemini-2.0-flash",
         )
         score_future_b = loop.run_in_executor(
             None, _gemini_call_sync,
-            _readiness_score_prompt(company_name, industry, target_vendor, research_text, _BATCH_B, spend_lines_for_score, agg_ref_for_score),
+            _readiness_score_prompt(company_name, industry, target_vendor, research_text, all_cap_rows, _BATCH_B, spend_lines_for_score, agg_ref_for_score),
             False, "readiness_score_b", 16384, "gemini-2.0-flash",
         )
 
