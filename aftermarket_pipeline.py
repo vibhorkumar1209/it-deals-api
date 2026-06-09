@@ -121,7 +121,7 @@ AFTERMARKET_DOMAINS = [
 
 # ── Shared Gemini call ────────────────────────────────────────────────────────
 
-def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_tokens: int = 16384):
+def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_tokens: int = 16384, model: str = "gemini-2.5-flash"):
     try:
         from google import genai
         from google.genai import types
@@ -153,7 +153,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
             # http_options timeout ensures the call fails fast rather than hanging indefinitely.
             client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": CALL_TIMEOUT})
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=model,
                 contents=prompt,
                 config=types.GenerateContentConfig(**config_kwargs),
             )
@@ -802,16 +802,18 @@ async def run_aftermarket_deep_dive(
     # so it doesn't need pre-computed cap/spend data. Waiting for caps+spend (300s+)
     # before launching would push total pipeline time past Render's 600s HTTP limit.
     # Split into two parallel 5/4-module batches to halve per-call time.
+    # Use gemini-2.0-flash for readiness: 3-5x faster than 2.5-flash, no thinking overhead,
+    # sufficient quality for structured signal scoring + TAM estimation.
     if "readiness" in run:
         ready_future_a = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_tam_prompt(company_name, industry, target_vendor, [], [], [], _BATCH_A),
-            True, "readiness_tam_a", 16384,
+            True, "readiness_tam_a", 16384, "gemini-2.0-flash",
         )
         ready_future_b = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_tam_prompt(company_name, industry, target_vendor, [], [], [], _BATCH_B),
-            True, "readiness_tam_b", 16384,
+            True, "readiness_tam_b", 16384, "gemini-2.0-flash",
         )
     else:
         ready_future_a = ready_future_b = None
