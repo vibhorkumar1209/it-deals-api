@@ -156,42 +156,64 @@ async def _collect(loop, fn_args: tuple, label: str, timeout: int = 200):
 # ── LOCATION DISCOVERY (per company) ─────────────────────────────────────────
 
 def _location_discovery_prompt(company_name: str, domain: str, location_filter: str) -> str:
-    loc_clause = f"\nLOCATION FILTER: Only return GCC/center locations in or near: {location_filter}" if location_filter else \
-                 "\nCOVERAGE: Return ALL worldwide GCC/center locations."
-    return f"""List all Global Capability Centers (GCCs) of {company_name} worldwide.{f" (website: {domain})" if domain else ""}
+    loc_clause = f"LOCATION FILTER: Only include locations in or near: {location_filter}" if location_filter else \
+                 "SCOPE: Return ALL worldwide locations — do not limit by region."
+    return f"""Find every Global Capability Center (GCC), technology hub, shared services center, and offshore delivery center that {company_name} operates worldwide.{f" (official website: {domain})" if domain else ""}
+
 {loc_clause}
 
-For each GCC, provide: city and country, year of establishment, and operating model — whether it is a pure captive, Build-Operate-Transfer (BOT), or GCC-as-a-Service. Include sources.
+IMPORTANT: Run EVERY one of these searches before answering — do not skip any:
+1. "{company_name}" "global capability center" OR "GCC" locations worldwide list
+2. "{company_name}" "technology center" OR "engineering center" OR "development center" city country
+3. "{company_name}" "shared services center" OR "global business services" OR "GBS" locations
+4. "{company_name}" India Chennai OR Bengaluru OR Bangalore OR Pune OR Hyderabad OR Mumbai OR Noida OR Gurugram center hub
+5. "{company_name}" Poland OR Romania OR Hungary OR Czech Republic OR Slovakia OR Portugal technology center
+6. "{company_name}" Philippines OR Malaysia OR Singapore OR Vietnam OR Thailand OR Indonesia hub operations center
+7. "{company_name}" Mexico OR Brazil OR Colombia OR Argentina OR Costa Rica OR Chile technology center
+8. "{company_name}" China OR Guangzhou OR Shanghai OR Shenzhen OR Beijing OR Chengdu center hub
+9. "{company_name}" Egypt OR Morocco OR South Africa OR Kenya technology OR operations center
+10. "{company_name}" offices locations employees headcount site:linkedin.com/company
+11. site:nasscom.in OR site:globalcapabilitycenters.com OR site:zinnov.com "{company_name}"
+12. "{company_name}" annual report 2024 global offices technology hubs locations
 
-Run ALL of these searches before responding:
-- "{company_name}" "global capability center" OR "GCC" location city country established year
-- "{company_name}" captive center OR "build operate transfer" OR "GCC-as-a-Service"
-- "{company_name}" engineering center OR development center OR shared services center city country
-- "{company_name}" India Bengaluru OR Pune OR Chennai OR Hyderabad OR Mumbai OR Noida OR Gurugram center
-- "{company_name}" Poland OR Romania OR Hungary OR Czech Republic OR Portugal OR Spain technology center
-- "{company_name}" Philippines OR Malaysia OR Singapore OR Vietnam OR Thailand technology hub
-- "{company_name}" Mexico OR Brazil OR Colombia OR Argentina OR Costa Rica technology center
-- "{company_name}" China OR Shanghai OR Shenzhen OR Beijing technology center
-- site:linkedin.com/company "{company_name}" offices engineering center locations headcount
-- site:nasscom.in OR site:globalcapabilitycenters.com "{company_name}" GCC
+RULES:
+- Include EVERY city where {company_name} has a GCC/tech/ops center — even if only 500 staff
+- If a company has multiple centers in the same city (e.g. Chennai DLF + Chennai Tidel Park), list them separately
+- Never omit a location just because it is smaller or less well-known
+- Headcount: use the most recent figure available; if unknown, estimate from job postings
 
-KEY RULE: Return ONE entry per distinct GCC/center ENTITY. If a company has an Engineering Center AND a Shared Services Center in the same city, return BOTH as separate entries.
-
-Return a JSON array — one object per distinct GCC entity:
+Return a JSON array. Each element must have exactly these fields:
 [
   {{
-    "gcc_name": "<official entity name e.g. 'Volkswagen India Technology Center, Pune'>",
-    "city": "<city>",
-    "country": "<country>",
+    "gcc_name": "<official center name, e.g. 'Standard Chartered GBS, Chennai'>",
     "gcc_location": "<City, Country>",
-    "established_year": "<year or Unknown>",
-    "headcount": "<number/range or Unknown>",
+    "city": "<city only>",
+    "country": "<country only>",
+    "headcount": "<number or range, e.g. '13,000' or '2,000–3,000' or 'Unknown'>",
+    "established_year": "<4-digit year or 'Unknown'>",
     "operating_model": "<Pure Captive | BOT | GCC-as-a-Service | Unknown>",
     "primary_focus": "<Engineering & R&D | Shared Services | Digital Transformation | AI/ML & Data | Customer Experience | Mixed>",
-    "source": "<URL>"
+    "source": "<URL of press release, LinkedIn, annual report, or news article>"
   }}
 ]
-Return ONLY the raw JSON array. No prose. No markdown."""
+Return ONLY the raw JSON array. No explanation. No markdown. No prose before or after."""
+
+
+def _location_discovery_prompt_simple(company_name: str) -> str:
+    """Simpler fallback discovery prompt — used on retry when full prompt fails to parse."""
+    return f"""Search for all office and technology center locations of {company_name} worldwide.
+
+Run these searches:
+1. "{company_name}" GCC OR "global capability center" OR "technology center" locations list
+2. "{company_name}" India offices employees engineering 2024
+3. "{company_name}" Poland Philippines Malaysia Singapore China offices 2024
+4. "{company_name}" global offices locations annual report 2024
+
+List every city where {company_name} has a GCC, technology hub, or shared services center.
+
+Return a JSON array — one entry per city:
+[{{"gcc_name": "<name>", "gcc_location": "<City, Country>", "city": "<city>", "country": "<country>", "headcount": "<number or Unknown>", "established_year": "<year or Unknown>", "operating_model": "Unknown", "primary_focus": "Mixed", "source": "<URL>"}}]
+Return ONLY the JSON array. No text outside the array."""
 
 
 # ── PER-LOCATION ENRICHMENT PROMPTS ──────────────────────────────────────────
@@ -569,23 +591,46 @@ async def run_gcc_enrichment(
             yield {"type": "heartbeat", "message": f"🔍 Finding GCC locations for {cname}…"}
             await asyncio.sleep(0)
 
-            # Step 1: discover locations for this company
+            # Step 1: discover locations for this company — full prompt first
             loc_result = await _collect(
                 loop,
-                (_location_discovery_prompt(cname, domain, loc_filter), f"locs_{cname[:20]}", 6144),
+                (_location_discovery_prompt(cname, domain, loc_filter), f"locs_{cname[:20]}", 8192),
                 f"locs_{cname[:20]}",
-                timeout=150,
+                timeout=160,
             )
-            locations = loc_result if isinstance(loc_result, list) else []
+            locations = loc_result if isinstance(loc_result, list) and len(loc_result) > 0 else []
 
-            # Fallback: use provided location if discovery returned nothing
+            # Retry with simpler prompt if first attempt failed or returned empty
             if not locations:
-                fallback_loc = loc_filter or f"India"
-                locations = [{"gcc_name": f"{cname} GCC", "gcc_location": fallback_loc, "established_year": "Unknown", "headcount": "Unknown", "operating_model": "Unknown", "primary_focus": "-"}]
-                yield {"type": "heartbeat", "message": f"⚠️ {cname}: no locations found via search, using {fallback_loc}"}
+                yield {"type": "heartbeat", "message": f"🔄 {cname}: retrying location discovery with simplified prompt…"}
+                await asyncio.sleep(0)
+                loc_result2 = await _collect(
+                    loop,
+                    (_location_discovery_prompt_simple(cname), f"locs2_{cname[:20]}", 4096),
+                    f"locs2_{cname[:20]}",
+                    timeout=120,
+                )
+                locations = loc_result2 if isinstance(loc_result2, list) and len(loc_result2) > 0 else []
+
+            if not locations:
+                # Last resort: synthesize entries for the most common GCC hubs if user gave no filter
+                if loc_filter:
+                    fallback_locs = [loc_filter]
+                else:
+                    # Use major GCC hubs as seed — better than single "India" default
+                    fallback_locs = ["India", "Poland", "Philippines", "Malaysia", "China"]
+                locations = [
+                    {"gcc_name": f"{cname} GCC", "gcc_location": fl, "city": fl.split(",")[0].strip(),
+                     "country": fl.split(",")[-1].strip() if "," in fl else fl,
+                     "established_year": "Unknown", "headcount": "Unknown",
+                     "operating_model": "Unknown", "primary_focus": "-"}
+                    for fl in fallback_locs
+                ]
+                yield {"type": "heartbeat", "message": f"⚠️ {cname}: location search returned no results — enriching {len(locations)} probable hub{'s' if len(locations)>1 else ''}"}
             else:
-                loc_names = ", ".join(l.get("gcc_location", "") for l in locations[:5])
-                yield {"type": "heartbeat", "message": f"📍 {cname}: {len(locations)} location{'s' if len(locations) > 1 else ''} found — {loc_names}"}
+                loc_names = ", ".join(l.get("gcc_location", "") for l in locations[:6])
+                extra = f" (+{len(locations)-6} more)" if len(locations) > 6 else ""
+                yield {"type": "heartbeat", "message": f"📍 {cname}: {len(locations)} location{'s' if len(locations) > 1 else ''} found — {loc_names}{extra}"}
 
             await asyncio.sleep(0)
 
