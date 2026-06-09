@@ -387,37 +387,41 @@ def _spend_module_prompt(company_name: str, industry: str, cap_data: list[dict] 
     if agg_data:
         agg_summary = "\n".join(f"  {r.get('spend_type')}: {r.get('estimate')} — {r.get('basis','')}" for r in agg_data)
 
-    return f"""You are an IT financial analyst synthesising research findings. No web search needed.
+    return f"""You are an IT financial analyst synthesising research findings. No web search needed — use data provided.
 
 COMPANY: {company_name}{ind}
 
 KNOWN TECHNOLOGY STACK (from research):
 {cap_summary or "  (No capability data available — use industry benchmarks)"}
 
-AGGREGATE IT SPEND CONTEXT:
-{agg_summary or "  (No aggregate data — estimate from industry benchmarks)"}
+VERIFIED AGGREGATE IT SPEND (use as anchor for all module estimates — totals must add up):
+{agg_summary or "  (No aggregate data — apportion using industry benchmarks)"}
 
-TASK: For each aftermarket module below, estimate annual technology spend.
-Base calculations on: (a) known technology vendors/products from the tech stack above,
-(b) typical SaaS/license pricing for those specific tools, (c) headcount ratios,
-(d) the aggregate spend context to validate totals.
+TASK: Estimate annual technology spend per aftermarket module.
 
-Example calculation: If Tavant WarrantyXchange is deployed for 500 dealers at ~$5k/dealer/yr = $2.5M + $500k infra.
+RULES:
+1. Use vendor/product pricing from the KNOWN TECHNOLOGY STACK where available
+   — SaaS/subscription: typical 2024/2025 list pricing for named products
+   — On-premise: licence + maintenance (typically 18–22% of licence per year)
+2. Module estimates must be proportional to and consistent with AGGREGATE IT SPEND above
+3. All 9 module estimates should sum to roughly the Aftermarket IT Spend figure in AGGREGATE
+4. market_benchmark: use verified 2024/2025 industry benchmarks for comparable companies by revenue tier
 
-Return a JSON array. Each object must have exactly these keys:
+Example spend_math: "SAP S/4HANA Warranty module: ~$3M licence + $600k annual maintenance + $800k integration support = $4.4M. Scale for company size: $6M–$9M"
+
+Return ONLY a JSON array:
 [
   {{
     "domain": "Warranty Management",
-    "current_spend": "$8M-$15M",
-    "spend_math": "Tavant WarrantyXchange: 500 dealers × $5k/yr = $2.5M + SAP integration $1M + infra $500k = ~$4M. Add managed services 2×: $8M total",
-    "market_benchmark": "$5M-$20M for Tier-1 OEMs"
+    "current_spend": "$6M–$9M",
+    "spend_math": "<specific vendor pricing × scale + maintenance/support = total>",
+    "market_benchmark": "<verified 2024/2025 benchmark range for comparable companies>"
   }}
 ]
 
 Modules: Warranty Management, Service & Repair Operations, Parts & Inventory Management, Field Service Management, Dealer & Distribution Network, Telematics & Connected Products, Predictive Maintenance & IoT, Analytics & Business Intelligence, AI & Automation.
 
-IMPORTANT: Return ONLY the JSON array starting with [. No prose, no source field needed.
-"""
+Return ONLY the JSON array starting with [. No prose."""
 
 
 # ── Aggregate Spend: IT / AI / Cloud / Aftermarket ────────────────────────────
@@ -457,49 +461,62 @@ Return ONLY the raw JSON array. No prose. No markdown.
 
 def _aggregate_spend_prompt(company_name: str, industry: str) -> str:
     ind = f" ({industry})" if industry else ""
-    return f"""You are an enterprise IT financial analyst.
+    return f"""You are an enterprise IT financial analyst. Use Google Search to find VERIFIED, CURRENT data.
 
 COMPANY: {company_name}{ind}
 
-Search for financial data:
-- "{company_name}" annual report technology IT spend 2023 OR 2024
-- "{company_name}" revenue total operating expenses
-- "{company_name}" cloud spend AWS Azure Google Cloud
-- "{company_name}" AI investment artificial intelligence budget
-- "{company_name}" aftermarket service revenue
+STEP 1 — Find actual revenue (search these):
+- "{company_name}" revenue 2024 OR 2025 annual report OR earnings
+- "{company_name}" fiscal year 2024 financial results
+- site:annualreports.com OR site:ir.* "{company_name}" 2024
 
-Estimate the following four spend categories with calculation basis:
+STEP 2 — Find IT/technology spend data (search these):
+- "{company_name}" IT spend technology investment 2024 OR 2025
+- "{company_name}" digital transformation budget 2024
+- "{company_name}" cloud computing spend AWS Azure 2024 OR 2025
+- "{company_name}" AI artificial intelligence investment 2024 OR 2025
+
+STEP 3 — Apply LATEST 2024/2025 industry benchmarks (verify benchmark source via search):
+- IT spend as % of revenue: manufacturing/industrial ~2.5–3.5%, automotive OEM ~2.0–3.0%, tech/software ~8–12%
+- AI spend: ~10–15% of IT budget (2025 Gartner/IDC benchmarks)
+- Cloud spend: ~28–35% of IT budget (2024 Flexera State of Cloud)
+- Aftermarket/service IT: ~15–25% of total IT budget for OEMs with service business
+
+CALCULATION RULES:
+1. Use the ACTUAL verified revenue figure found in Step 1 as the base
+2. Apply the MOST RELEVANT industry benchmark for this company's sector
+3. Cross-check: if IT deals / announcements from search suggest a higher/lower figure, adjust accordingly
+4. Cite the actual source URL for revenue and the benchmark source
 
 Return ONLY a JSON array:
 [
   {{
     "spend_type": "IT Spend",
-    "estimate": "<total annual IT spend e.g. '$450M-$500M'>",
-    "basis": "<e.g. '2.8% of $16.2B revenue (manufacturing industry avg per Gartner)'>",
-    "source": "<URL to annual report or analyst benchmark>"
+    "estimate": "<e.g. '$420M–$480M'>",
+    "basis": "<benchmark%> of <verified revenue from source> — <benchmark source name and year>",
+    "source": "<URL to annual report, earnings release, or verified benchmark>"
   }},
   {{
     "spend_type": "AI Spend",
-    "estimate": "<AI/ML specific spend>",
-    "basis": "<e.g. '~8% of total IT spend based on 2024 AI adoption benchmarks'>",
+    "estimate": "<e.g. '$42M–$72M'>",
+    "basis": "<10–15%> of IT budget per <2025 benchmark source>",
     "source": "<URL>"
   }},
   {{
     "spend_type": "Cloud Spend",
-    "estimate": "<cloud infrastructure spend>",
-    "basis": "<e.g. '~22% of IT budget (industry avg cloud allocation for manufacturing)'>",
+    "estimate": "<e.g. '$120M–$165M'>",
+    "basis": "<28–35%> of IT budget per <2024 Flexera or equivalent>",
     "source": "<URL>"
   }},
   {{
     "spend_type": "Aftermarket IT Spend",
-    "estimate": "<IT spend specifically on aftermarket/service operations>",
-    "basis": "<e.g. 'Aftermarket = ~18% of revenue; IT for aftermarket ~1.5% of aftermarket revenue'>",
+    "estimate": "<e.g. '$65M–$110M'>",
+    "basis": "<15–25%> of IT budget allocated to aftermarket/service operations",
     "source": "<URL>"
   }}
 ]
 
-Return ONLY the raw JSON array.
-"""
+Return ONLY the raw JSON array. Every estimate must be grounded in verified revenue data."""
 
 
 # ── Table 4: Readiness Matrix + TAM ──────────────────────────────────────────
