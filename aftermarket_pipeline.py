@@ -268,9 +268,10 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
 
 
 async def _collect_future(future, label: str, timeout: int = 90) -> list:
-    """Await an asyncio Future from run_in_executor with timeout. Module-level."""
+    """Await an asyncio Future from run_in_executor with hard timeout. No asyncio.shield."""
     try:
-        return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+        result = await asyncio.wait_for(future, timeout=timeout)
+        return result if isinstance(result, list) else ([] if result is None else result)
     except asyncio.TimeoutError:
         logger.warning(f"_collect_future: {label} timed out after {timeout}s")
         return []
@@ -280,16 +281,18 @@ async def _collect_future(future, label: str, timeout: int = 90) -> list:
 
 
 async def _run_async(prompt: str, use_search: bool, label: str, timeout: int = 110) -> list:
+    """Run a Gemini call in executor with hard timeout. No asyncio.shield."""
     loop = asyncio.get_event_loop()
     future = loop.run_in_executor(None, _gemini_call_sync, prompt, use_search, label)
-    elapsed = 0
-    while elapsed < timeout:
-        try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=10)
-        except asyncio.TimeoutError:
-            elapsed += 10
-    future.cancel()
-    return []
+    try:
+        result = await asyncio.wait_for(future, timeout=timeout)
+        return result if isinstance(result, list) else []
+    except asyncio.TimeoutError:
+        logger.warning(f"_run_async: {label} timed out after {timeout}s")
+        return []
+    except Exception as e:
+        logger.error(f"_run_async: {label} error: {e}")
+        return []
 
 
 # ── Table 1: Capability Assessment ───────────────────────────────────────────
@@ -694,22 +697,22 @@ For EACH finding, record the URL. Evidence arrays must include source URLs.
 
 MODULES: {modules_list}
 
-Return ONLY a valid JSON array — exactly {n} objects. Each evidence field is an ARRAY of signal objects with text and source:
+Return ONLY a valid JSON array — exactly {n} objects. Keep evidence fields as plain strings (no nested arrays):
 
 [
   {{
     "domain": "<module name>",
     "current_system": "<known system or Unknown>",
     "existing_rel_score": <0-100>,
-    "existing_rel_evidence": [{{"text": "<from EXISTING RELATIONSHIP section>", "source": ""}}],
+    "existing_rel_evidence": "<one sentence from EXISTING RELATIONSHIP section above>",
     "it_signals_score": <0-100>,
-    "it_signals_evidence": [{{"text": "<specific finding>", "source": "<URL>"}}],
+    "it_signals_evidence": "<specific finding with URL e.g. 'SAP S/4HANA go-live 2024. Source: https://...'>",
     "company_signals_score": <0-100>,
-    "company_signals_evidence": [{{"text": "<specific finding>", "source": "<URL>"}}],
+    "company_signals_evidence": "<specific finding with URL>",
     "exec_signals_score": <0-100>,
-    "exec_signals_evidence": [{{"text": "<specific finding>", "source": "<URL>"}}],
+    "exec_signals_evidence": "<specific finding with URL>",
     "budget_signals_score": <0-100>,
-    "budget_signals_evidence": [{{"text": "<specific finding>", "source": "<URL>"}}],
+    "budget_signals_evidence": "<specific finding with URL>",
     "weighted_readiness": <0-100>,
     "displacement_opp": "<High|Medium|Low>",
     "total_domain_spend": "<exact value from SPEND BY MODULE>",
@@ -718,8 +721,8 @@ Return ONLY a valid JSON array — exactly {n} objects. Each evidence field is a
   }}
 ]
 
-If no evidence found for a signal after searching: [{{"text": "No evidence found", "source": ""}}]
-Return ONLY the JSON array. No prose before or after."""
+If no evidence found for a signal: "No evidence found."
+Return ONLY the JSON array starting with [. No prose before or after. No markdown."""
 
 
 def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str,
@@ -1134,8 +1137,7 @@ async def run_aftermarket_deep_dive(
             for r in (agg_rows if isinstance(agg_rows, list) else [])[:4]
         )
 
-        # Search-grounded scoring: model can search for domain-specific evidence beyond research_text
-        has_research = bool(research_text and "No public evidence found" not in research_text)
+        # Launch both scoring batches in parallel — do NOT await them sequentially
         score_future_a = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_score_prompt(company_name, industry, target_vendor, research_text, all_cap_rows, _BATCH_A, spend_lines_for_score, agg_ref_for_score),
@@ -1147,17 +1149,59 @@ async def run_aftermarket_deep_dive(
             True, "readiness_score_b", 16384, "gemini-2.5-flash",
         )
 
+        # Gather both in parallel with a shared 160s wall-clock budget
+        try:
+            results_ab = await asyncio.wait_for(
+                asyncio.gather(score_future_a, score_future_b, return_exceptions=True),
+                timeout=160,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("readiness scoring: both batches timed out after 160s")
+            results_ab = [[], []]
+
         collected: list = []
-        for label_s, fut in [("readiness_score_a", score_future_a), ("readiness_score_b", score_future_b)]:
+        for i, res in enumerate(results_ab):
+            label_s = f"readiness_score_{'a' if i == 0 else 'b'}"
+            if isinstance(res, Exception):
+                logger.error(f"{label_s} raised: {res}")
+            elif isinstance(res, list) and res:
+                collected.extend(res)
+                logger.info(f"{label_s} returned {len(res)} rows")
+            else:
+                logger.warning(f"{label_s} returned empty — will try fallback")
+
+        # ── Fallback: if search-grounded scoring produced nothing, use knowledge-only prompt ──
+        if not collected:
+            logger.warning("readiness_score a+b both empty — falling back to _readiness_tam_prompt (no search)")
+            yield {"type": "heartbeat", "message": "⚠️ Search-grounded scoring empty — retrying with knowledge-based readiness…"}
+            await asyncio.sleep(0)
+
+            fallback_spend = spend_rows if isinstance(spend_rows, list) and spend_rows else (existing_spend_rows or [])
+            fb_a = loop.run_in_executor(
+                None, _gemini_call_sync,
+                _readiness_tam_prompt(company_name, industry, target_vendor, all_cap_rows,
+                                      agg_rows if isinstance(agg_rows, list) else [],
+                                      fallback_spend, _BATCH_A),
+                False, "readiness_fallback_a", 16384, "gemini-2.5-flash",
+            )
+            fb_b = loop.run_in_executor(
+                None, _gemini_call_sync,
+                _readiness_tam_prompt(company_name, industry, target_vendor, all_cap_rows,
+                                      agg_rows if isinstance(agg_rows, list) else [],
+                                      fallback_spend, _BATCH_B),
+                False, "readiness_fallback_b", 16384, "gemini-2.5-flash",
+            )
             try:
-                rows = await asyncio.wait_for(fut, timeout=150)
-                if isinstance(rows, list):
-                    collected.extend(rows)
-                    logger.info(f"{label_s} returned {len(rows)} rows")
+                fb_results = await asyncio.wait_for(
+                    asyncio.gather(fb_a, fb_b, return_exceptions=True),
+                    timeout=120,
+                )
+                for i, res in enumerate(fb_results):
+                    if isinstance(res, list) and res:
+                        collected.extend(res)
+                        logger.info(f"readiness_fallback_{'a' if i==0 else 'b'} returned {len(res)} rows")
             except asyncio.TimeoutError:
-                logger.warning(f"{label_s} timed out after 90s")
-            except Exception as e:
-                logger.error(f"{label_s} failed: {e}")
+                logger.warning("readiness fallback also timed out after 120s")
 
         _MODULE_ORDER = {m: i for i, m in enumerate(_ALL_MODULES)}
         readiness_rows = sorted(collected, key=lambda r: _MODULE_ORDER.get(r.get("domain", ""), 99))
