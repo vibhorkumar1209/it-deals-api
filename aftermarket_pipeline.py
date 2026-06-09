@@ -168,7 +168,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
         except Exception as e:
             err = str(e)
             is_quota = "RESOURCE_EXHAUSTED" in err or "free_tier" in err
-            is_retry = not is_quota and any(x in err for x in ("503", "UNAVAILABLE", "overloaded", "timeout", "TimeoutError", "DeadlineExceeded", "429", "500", "502", "503", "504"))
+            is_retry = not is_quota and any(x in err for x in ("503", "UNAVAILABLE", "overloaded", "timeout", "TimeoutError", "DeadlineExceeded", "429", "500", "502", "503", "504", "ConnectionError", "ConnectionReset", "RemoteDisconnected"))
             if is_quota:
                 raise RuntimeError("Gemini quota exhausted — upgrade to paid API plan.") from e
             if is_retry and attempt < MAX_RETRIES:
@@ -181,7 +181,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
                 logger.warning(f"Gemini [{label}] attempt {attempt}/{MAX_RETRIES} failed ({err[:60]}), retry in {wait:.0f}s")
                 _time.sleep(wait)
                 continue
-            logger.error(f"Aftermarket Gemini [{label}] failed (attempt {attempt}): {err[:200]}")
+            logger.error(f"Aftermarket Gemini [{label}] TERMINAL FAIL (attempt {attempt}, model={model}): {err}")
             return []
     else:
         return []
@@ -1065,12 +1065,12 @@ async def run_aftermarket_deep_dive(
         score_future_a = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_score_prompt(company_name, industry, target_vendor, research_text, all_cap_rows, _BATCH_A, spend_lines_for_score, agg_ref_for_score),
-            False, "readiness_score_a", 16384, "gemini-2.0-flash",
+            False, "readiness_score_a", 16384, "gemini-2.5-flash",
         )
         score_future_b = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_score_prompt(company_name, industry, target_vendor, research_text, all_cap_rows, _BATCH_B, spend_lines_for_score, agg_ref_for_score),
-            False, "readiness_score_b", 16384, "gemini-2.0-flash",
+            False, "readiness_score_b", 16384, "gemini-2.5-flash",
         )
 
         collected: list = []
