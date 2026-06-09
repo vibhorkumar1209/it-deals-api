@@ -163,27 +163,25 @@ def _location_discovery_prompt(company_name: str, domain: str, location_filter: 
 
 {loc_clause}
 
-CRITICAL INSTRUCTION: You MUST run ALL searches below before answering. Many companies have GCCs outside India — in the Americas, Europe, and Southeast Asia. Do not default to India-only results.
+CRITICAL INSTRUCTION: You MUST run ALL searches below before answering. Return results for ALL regions found — do not limit to any single country or continent.
 
-Run EVERY one of these 14 searches:
+Run EVERY one of these 12 searches:
 1. "{company_name}" "global capability center" OR "GCC" locations worldwide full list 2024 2025
 2. "{company_name}" "technology center" OR "tech hub" OR "engineering center" OR "development center" global locations
 3. "{company_name}" "shared services" OR "global business services" OR "GBS" OR "captive center" locations worldwide
 4. site:linkedin.com/company "{company_name}" offices locations worldwide — check the Locations tab
 5. "{company_name}" global offices employees headcount 2024 site:linkedin.com
 6. "{company_name}" annual report 2024 OR 2025 global offices technology hubs locations operations
-7. "{company_name}" United States OR Canada OR Mexico OR "Costa Rica" OR Brazil OR Colombia OR Chile technology center hub
-8. "{company_name}" United Kingdom OR Ireland OR Poland OR Romania OR Hungary OR Portugal OR Spain OR Germany OR "Czech Republic" technology center
-9. "{company_name}" India OR "Bengaluru" OR "Hyderabad" OR "Chennai" OR "Pune" OR "Gurugram" OR "Mumbai" engineering center
-10. "{company_name}" Philippines OR Malaysia OR Singapore OR Vietnam OR Indonesia OR Thailand hub operations center
-11. "{company_name}" China OR Shanghai OR Beijing OR "Hong Kong" OR Taiwan technology center
-12. "{company_name}" Egypt OR Morocco OR "South Africa" OR Kenya OR UAE OR Israel technology center
-13. site:nasscom.in OR site:globalcapabilitycenters.com OR site:zinnov.com OR site:everestgrp.com "{company_name}" GCC
-14. "{company_name}" "center of excellence" OR "CoE" OR "innovation hub" OR "delivery center" location city country
+7. "{company_name}" technology center OR engineering hub OR delivery center — all countries all regions
+8. "{company_name}" "center of excellence" OR "CoE" OR "innovation hub" OR "delivery center" location city country
+9. site:nasscom.in OR site:globalcapabilitycenters.com OR site:zinnov.com OR site:everestgrp.com "{company_name}" GCC
+10. "{company_name}" GCC OR "captive" OR "offshore" OR "nearshore" headcount employees city 2024
+11. "{company_name}" technology strategy global footprint locations 2024 2025
+12. "{company_name}" office locations careers site — jobs pages often list all active office locations
 
 RULES:
 - Include EVERY city where {company_name} has any GCC/tech/ops center regardless of size
-- List centers in ALL regions found — Americas, Europe, Asia-Pacific, MEA — not just India
+- Report what the searches actually find — do not assume India if searches show other regions
 - If a company has multiple centers in the same country, list each city separately
 - Headcount: use the most recent figure; if unknown write "Unknown"
 
@@ -211,12 +209,12 @@ def _location_discovery_prompt_simple(company_name: str) -> str:
 Run ALL of these searches — do not skip any:
 1. "{company_name}" "global capability center" OR "technology center" OR "tech hub" locations worldwide list
 2. "{company_name}" offices global locations employees 2024 site:linkedin.com
-3. "{company_name}" United States OR Canada OR Mexico OR "Costa Rica" technology center hub
-4. "{company_name}" India OR Poland OR Philippines OR Malaysia technology center 2024
-5. "{company_name}" annual report 2024 global offices locations
-6. "{company_name}" GCC OR "shared services" OR "engineering center" OR "delivery center" city country
+3. "{company_name}" GCC OR captive OR offshore OR nearshore technology hub locations all countries
+4. "{company_name}" annual report 2024 global offices locations technology hubs
+5. "{company_name}" "shared services" OR "engineering center" OR "delivery center" city country
+6. "{company_name}" office locations careers site — jobs pages list all active office locations
 
-IMPORTANT: Include ALL regions — Americas, Europe, Asia-Pacific, and MEA. Do not focus only on India.
+IMPORTANT: Return ALL regions found — do not assume or default to any single country.
 
 Return a JSON array — one entry per city:
 [{{"gcc_name": "<name>", "gcc_location": "<City, Country>", "city": "<city>", "country": "<country>", "headcount": "<number or Unknown>", "established_year": "<year or Unknown>", "operating_model": "Unknown", "primary_focus": "Mixed", "source": "<URL>"}}]
