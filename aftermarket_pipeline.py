@@ -625,104 +625,193 @@ If genuinely nothing found for a category after searching: [CATEGORY] No public 
 Report every real finding — aim for at least 2–3 findings per category if they exist."""
 
 
+def _build_vendor_rel_map(cap_data: list, vendor: str) -> dict:
+    """
+    Pre-compute existing relationship score per domain from cap_data.
+    Returns dict: domain -> {"score": int, "evidence": str, "techs": list}
+    This is computed in Python so the model cannot override it via search.
+    """
+    from collections import defaultdict
+    vendor_lower = vendor.lower() if vendor else ""
+    by_domain: dict = defaultdict(lambda: {"techs": [], "vendor_hit": False, "signals": []})
+    for r in (cap_data or []):
+        d = r.get("domain", "")
+        if not d:
+            continue
+        tech = (r.get("technology") or "").strip()
+        rel  = (r.get("vendor_relationship") or r.get("relationship") or "").lower()
+        if tech and tech not in ("Unknown/Not Disclosed", "-", "Unknown"):
+            by_domain[d]["techs"].append(tech)
+        if vendor_lower and (vendor_lower in tech.lower() or vendor_lower in rel):
+            by_domain[d]["vendor_hit"] = True
+            by_domain[d]["signals"].append(tech or rel)
+
+    result = {}
+    for d, info in by_domain.items():
+        if info["vendor_hit"]:
+            sig = ", ".join(info["signals"][:2])
+            result[d] = {"score": 85, "evidence": f"{vendor} DEPLOYED at {d} ({sig})", "techs": info["techs"]}
+        elif info["techs"]:
+            techs = ", ".join(info["techs"][:3])
+            result[d] = {"score": 10, "evidence": f"{vendor} not found — current tech: {techs}", "techs": info["techs"]}
+        else:
+            result[d] = {"score": 5, "evidence": "No capability data available", "techs": []}
+    return result
+
+
+def _parse_spend_millions(spend_str: str) -> tuple[float, float] | None:
+    """Parse '$6M–$9M', '$1.2B–$1.8B', '$45M' → (low_M, high_M). Returns None if unparseable."""
+    if not spend_str:
+        return None
+    s = spend_str.replace("–", "-").replace("—", "-").replace(",", "")
+    hits = re.findall(r'\$?([\d.]+)\s*([BbMm])', s)
+    vals = []
+    for num, unit in hits:
+        v = float(num)
+        if unit.upper() == "B":
+            v *= 1000.0
+        vals.append(v)
+    if len(vals) >= 2:
+        return (min(vals[0], vals[1]), max(vals[0], vals[1]))
+    if len(vals) == 1:
+        return (vals[0] * 0.85, vals[0] * 1.15)
+    return None
+
+
+def _recalculate_tam(readiness_rows: list, spend_rows: list) -> list:
+    """
+    Post-process readiness rows: replace total_domain_spend, vendor_adjusted_tam,
+    and tam_rationale using actual spend_module figures.
+    Also recalculate weighted_readiness from the 5 component scores to ensure arithmetic is correct.
+    """
+    spend_map = {r.get("domain", ""): r.get("current_spend", "") for r in (spend_rows or []) if r.get("domain")}
+    out = []
+    for row in readiness_rows:
+        row = dict(row)
+        domain = row.get("domain", "")
+
+        # ── Recalculate weighted_readiness from component scores ──────────────
+        try:
+            er = float(row.get("existing_rel_score", 0))
+            it = float(row.get("it_signals_score", 0))
+            cs = float(row.get("company_signals_score", 0))
+            es = float(row.get("exec_signals_score", 0))
+            bs = float(row.get("budget_signals_score", 0))
+            computed = round(er*0.30 + it*0.15 + cs*0.20 + es*0.15 + bs*0.20)
+            row["weighted_readiness"] = computed
+            row["displacement_opp"] = "High" if computed >= 65 else ("Medium" if computed >= 40 else "Low")
+        except Exception:
+            computed = int(row.get("weighted_readiness", 0))
+
+        # ── Replace TAM using actual spend_module figure ──────────────────────
+        actual_spend = spend_map.get(domain, "")
+        if actual_spend:
+            row["total_domain_spend"] = actual_spend
+            parsed = _parse_spend_millions(actual_spend)
+            if parsed and computed > 0:
+                low_m, high_m = parsed
+                adj_low = low_m * computed / 100
+                adj_high = high_m * computed / 100
+                mid = (low_m + high_m) / 2
+                adj_mid = mid * computed / 100
+
+                def _fmt(v: float) -> str:
+                    if v >= 1000:
+                        return f"${v/1000:.2f}B"
+                    if v >= 10:
+                        return f"${v:.0f}M"
+                    return f"${v:.1f}M"
+
+                row["vendor_adjusted_tam"] = f"{_fmt(adj_low)}–{_fmt(adj_high)}"
+                row["tam_rationale"] = (
+                    f"Midpoint = ({_fmt(low_m)}+{_fmt(high_m)})/2 = {_fmt(mid)} "
+                    f"× {computed}% readiness = {_fmt(adj_mid)} vendor-adjusted TAM"
+                )
+        out.append(row)
+    return out
+
+
 def _readiness_score_prompt(company_name: str, industry: str, target_vendor: str,
                              research_text: str, cap_data: list,
-                             modules: list[str], spend_lines: str, agg_ref: str) -> str:
-    """Step 2: No-search scoring. Vendor deployment from cap_data; other signals from research."""
+                             modules: list[str], spend_lines: str, agg_ref: str,
+                             vendor_rel_map: dict | None = None) -> str:
+    """Search-grounded scoring. existing_rel scores are PRE-COMPUTED from cap_data and locked."""
     vendor = target_vendor or "the vendor"
     n = len(modules)
     modules_list = ", ".join(modules)
 
-    # Build vendor deployment context from already-researched capabilities
-    from collections import defaultdict
-    cap_by_domain: dict = defaultdict(lambda: {"techs": [], "vendor_hit": False, "signals": []})
-    for r in (cap_data or []):
-        d = r.get("domain", "")
-        tech = r.get("technology", "")
-        rel = (r.get("vendor_relationship") or r.get("relationship") or "").lower()
-        vendor_lower = vendor.lower()
-        if tech and tech not in ("Unknown/Not Disclosed", "-"):
-            cap_by_domain[d]["techs"].append(tech)
-        if vendor_lower and (vendor_lower in tech.lower() or vendor_lower in rel):
-            cap_by_domain[d]["vendor_hit"] = True
-            cap_by_domain[d]["signals"].append(tech or rel)
+    # Pre-computed relationship scores — inject as LOCKED values
+    if vendor_rel_map is None:
+        vendor_rel_map = _build_vendor_rel_map(cap_data, vendor)
 
-    vendor_lines = []
-    for d, info in cap_by_domain.items():
-        if info["vendor_hit"]:
-            vendor_lines.append(f"  {d}: {vendor} DEPLOYED — {', '.join(info['signals'][:2])}")
-        elif info["techs"]:
-            vendor_lines.append(f"  {d}: {vendor} NOT found — current tech: {', '.join(info['techs'][:2])}")
-    vendor_context = "\n".join(vendor_lines) if vendor_lines else f"  No capabilities data available for {vendor}."
+    locked_lines = []
+    for m in modules:
+        info = vendor_rel_map.get(m, {"score": 5, "evidence": "No capability data", "techs": []})
+        locked_lines.append(
+            f"  {m}: existing_rel_score={info['score']} | evidence=\"{info['evidence']}\""
+        )
+    locked_rel = "\n".join(locked_lines)
 
     pre_research = research_text.strip() if research_text and research_text.strip() else ""
 
-    return f"""You are a vendor displacement readiness analyst. Use Google Search to find signal evidence for each module.
+    return f"""You are a vendor displacement readiness analyst. Use Google Search to find signal evidence.
 
 COMPANY: {company_name} ({industry})
 VENDOR BEING EVALUATED: {vendor}
 
-━━ EXISTING RELATIONSHIP (DO NOT SEARCH — use ONLY this section for existing_rel) ━━
-{vendor_context}
-Rule: domain shows "{vendor} DEPLOYED" → existing_rel_score=85, evidence="Deployed". Domain shows "NOT found" → existing_rel_score=10, evidence="Not deployed". No data → score=5.
+━━ EXISTING RELATIONSHIP SCORES — LOCKED, DO NOT CHANGE ━━
+These are computed from verified capability research. Copy them exactly into your JSON output.
+{locked_rel}
 
-━━ PRE-FETCHED SIGNALS (supplement with Google Search if thin) ━━
-{pre_research or "Not available — search Google for each signal type below."}
-
-━━ SPEND BY MODULE (copy exactly for total_domain_spend) ━━
-{spend_lines}
+━━ PRE-FETCHED SIGNALS (supplement with Google Search) ━━
+{pre_research or "Not available — use Google Search for each signal category below."}
 
 ━━ SEARCH INSTRUCTIONS ━━
-For each module, search Google for REAL recent (2022–2025) evidence for {company_name}:
-• IT_INVESTMENT: ERP/platform go-lives, vendor contracts, system implementations in this domain
-• EXEC_AGENDA: CTO/CIO/CDO quotes, strategy announcements relevant to this domain
-• BUDGET_SIGNAL: IT budget, RFP, tender, technology capex for this domain
-• HIRING_SIGNAL: open roles or hiring patterns in technology for this domain
+For each module listed, search Google for REAL recent (2022–2025) evidence for {company_name}:
+• IT_INVESTMENT: ERP/platform go-lives, vendor contracts, system implementations
+• EXEC_AGENDA: CTO/CIO/CDO quotes, digital strategy announcements
+• BUDGET_SIGNAL: IT budget announcements, RFPs, technology capex
+• HIRING_SIGNAL: open roles or hiring in technology/digital for this domain
 
-For EACH finding, record the URL. Evidence arrays must include source URLs.
+Record the URL for every finding.
 
 ━━ SCORING RULES ━━
-- existing_rel_score (0.30): from EXISTING RELATIONSHIP section ONLY (no search)
-- it_signals_score (0.15): IT_INVESTMENT + HIRING_SIGNAL for this domain
-- company_signals_score (0.20): growth, M&A, transformation signals for this domain
-- exec_signals_score (0.15): EXEC_AGENDA for this domain
-- budget_signals_score (0.20): BUDGET_SIGNAL for this domain
+- existing_rel_score: LOCKED — copy exactly from EXISTING RELATIONSHIP SCORES above
+- existing_rel_evidence: LOCKED — copy exactly from above
+- it_signals_score (0.15): evidence from IT_INVESTMENT + HIRING_SIGNAL
+- company_signals_score (0.20): growth, M&A, transformation signals
+- exec_signals_score (0.15): EXEC_AGENDA evidence
+- budget_signals_score (0.20): BUDGET_SIGNAL evidence
 - weighted_readiness = (existing_rel×0.30)+(it×0.15)+(company×0.20)+(exec×0.15)+(budget×0.20)
 - displacement_opp: High if ≥65, Medium if 40–64, Low if <40
-- total_domain_spend: copy exactly from SPEND BY MODULE above
-- vendor_adjusted_tam: a RANGE — multiply both ends of total_domain_spend by (weighted_readiness/100).
-  Example: spend "$2M–$5M", readiness=60% → vendor_adjusted_tam = "$1.2M–$3.0M"
-- tam_rationale: "Midpoint = ($low+$high)/2 = $mid × readiness% = $result vendor-adjusted TAM"
-  Example: "Midpoint = ($2M+$5M)/2 = $3.5M × 60% readiness = $2.1M vendor-adjusted TAM"
+- total_domain_spend and vendor_adjusted_tam: leave as "TBD" — will be calculated server-side
 
 MODULES: {modules_list}
 
-Return ONLY a valid JSON array — exactly {n} objects. Keep evidence fields as plain strings (no nested arrays):
-
+Return ONLY a valid JSON array — exactly {n} objects:
 [
   {{
     "domain": "<module name>",
     "current_system": "<known system or Unknown>",
-    "existing_rel_score": <0-100>,
-    "existing_rel_evidence": "<one sentence from EXISTING RELATIONSHIP section above>",
+    "existing_rel_score": <LOCKED value from above>,
+    "existing_rel_evidence": "<LOCKED evidence from above>",
     "it_signals_score": <0-100>,
-    "it_signals_evidence": "<specific finding with URL e.g. 'SAP S/4HANA go-live 2024. Source: https://...'>",
+    "it_signals_evidence": "<specific finding. Source: URL>",
     "company_signals_score": <0-100>,
-    "company_signals_evidence": "<specific finding with URL>",
+    "company_signals_evidence": "<specific finding. Source: URL>",
     "exec_signals_score": <0-100>,
-    "exec_signals_evidence": "<specific finding with URL>",
+    "exec_signals_evidence": "<specific finding. Source: URL>",
     "budget_signals_score": <0-100>,
-    "budget_signals_evidence": "<specific finding with URL>",
-    "weighted_readiness": <0-100>,
+    "budget_signals_evidence": "<specific finding. Source: URL>",
+    "weighted_readiness": <computed>,
     "displacement_opp": "<High|Medium|Low>",
-    "total_domain_spend": "<exact value from SPEND BY MODULE>",
-    "vendor_adjusted_tam": "<$lowXreadiness%–$highXreadiness% range>",
-    "tam_rationale": "Midpoint = ($low+$high)/2 = $mid × readiness% = $result vendor-adjusted TAM"
+    "total_domain_spend": "TBD",
+    "vendor_adjusted_tam": "TBD",
+    "tam_rationale": "TBD"
   }}
 ]
-
-If no evidence found for a signal: "No evidence found."
-Return ONLY the JSON array starting with [. No prose before or after. No markdown."""
+If no evidence found for a signal: "No public evidence found."
+Return ONLY the JSON array. No prose. No markdown."""
 
 
 def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str,
@@ -1104,6 +1193,9 @@ async def run_aftermarket_deep_dive(
         for r in agg_list[:4]
     )
 
+    # ── Pre-compute vendor relationship map from cap_data (Python, not LLM) ────
+    vendor_rel_map = _build_vendor_rel_map(all_cap_rows, target_vendor) if "readiness" in run else {}
+
     # ── Launch readiness scoring NOW (search-grounded, parallel with spend_module) ──
     readiness_rows = []
     if "readiness" in run:
@@ -1114,14 +1206,16 @@ async def run_aftermarket_deep_dive(
             None, _gemini_call_sync,
             _readiness_score_prompt(company_name, industry, target_vendor,
                                     research_text, all_cap_rows, _BATCH_A,
-                                    spend_lines_for_ready, agg_ref_for_ready),
+                                    spend_lines_for_ready, agg_ref_for_ready,
+                                    vendor_rel_map),
             True, "readiness_score_a", 16384, "gemini-2.5-flash",
         )
         score_b = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_score_prompt(company_name, industry, target_vendor,
                                     research_text, all_cap_rows, _BATCH_B,
-                                    spend_lines_for_ready, agg_ref_for_ready),
+                                    spend_lines_for_ready, agg_ref_for_ready,
+                                    vendor_rel_map),
             True, "readiness_score_b", 16384, "gemini-2.5-flash",
         )
 
@@ -1181,7 +1275,8 @@ async def run_aftermarket_deep_dive(
                     None, _gemini_call_sync,
                     _readiness_score_prompt(company_name, industry, target_vendor,
                                             research_text, all_cap_rows, _BATCH_A,
-                                            spend_lines_for_ready, agg_ref_for_ready),
+                                            spend_lines_for_ready, agg_ref_for_ready,
+                                            vendor_rel_map),
                     True, "readiness_retry_a", 16384, "gemini-2.5-flash",
                 ))
                 retry_labels.append("retry_a")
@@ -1190,7 +1285,8 @@ async def run_aftermarket_deep_dive(
                     None, _gemini_call_sync,
                     _readiness_score_prompt(company_name, industry, target_vendor,
                                             research_text, all_cap_rows, _BATCH_B,
-                                            spend_lines_for_ready, agg_ref_for_ready),
+                                            spend_lines_for_ready, agg_ref_for_ready,
+                                            vendor_rel_map),
                     True, "readiness_retry_b", 16384, "gemini-2.5-flash",
                 ))
                 retry_labels.append("retry_b")
@@ -1206,7 +1302,13 @@ async def run_aftermarket_deep_dive(
                 logger.warning("readiness retry timed out after 120s")
 
         _MODULE_ORDER = {m: i for i, m in enumerate(_ALL_MODULES)}
-        readiness_rows = sorted(collected, key=lambda r: _MODULE_ORDER.get(r.get("domain", ""), 99))
+        collected_sorted = sorted(collected, key=lambda r: _MODULE_ORDER.get(r.get("domain", ""), 99))
+
+        # ── Post-process: lock TAM from spend_module + recalculate weighted score ──
+        # spend_rows is now available (collected before we awaited scoring results)
+        effective_spend_final = spend_rows if isinstance(spend_rows, list) and spend_rows else (existing_spend_rows or [])
+        readiness_rows = _recalculate_tam(collected_sorted, effective_spend_final)
+        logger.info(f"Readiness post-process: {len(readiness_rows)} rows, spend_map domains: {[r.get('domain') for r in effective_spend_final]}")
 
     for row in (readiness_rows if isinstance(readiness_rows, list) else []):
         if isinstance(row, dict):
