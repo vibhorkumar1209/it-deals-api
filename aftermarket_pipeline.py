@@ -580,46 +580,34 @@ def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str,
     modules_list = ", ".join(modules_to_run)
     n_modules = len(modules_to_run)
 
-    return f"""You are a vendor readiness analyst. Use Google Search to find live signals.
+    return f"""You are a vendor displacement readiness analyst with deep knowledge of enterprise software markets.
 
 COMPANY: {company_name}{ind}
 VENDOR BEING EVALUATED: {vendor}
 
-KNOWN TECH STACK (from Capabilities research — use for existing_rel_score):
+KNOWN TECH STACK (from prior research — use for existing_rel_score):
 {cap_intel}
 
-SPEND BY MODULE — AUTHORITATIVE FIGURES (use these EXACTLY for total_domain_spend):
+SPEND BY MODULE (use EXACTLY for total_domain_spend):
 {spend_lines}
 
 AGGREGATE SPEND CONTEXT: {agg_ref}
 
-CRITICAL RULES FOR SPEND & TAM:
-1. total_domain_spend MUST copy the range from "SPEND BY MODULE" above for that domain exactly.
-   If a domain is missing from SPEND BY MODULE, use market benchmark but flag it.
-2. vendor_adjusted_tam = total_domain_spend × (weighted_readiness / 100)
-   Apply readiness % to BOTH ends of the range: e.g. $0.9M-$1.2M × 58% = $0.52M-$0.70M
-3. tam_rationale must show: midpoint = (low + high) / 2, then midpoint × readiness%
-4. existing_rel_score: if the KNOWN TECH STACK above shows "{vendor} ALREADY DEPLOYED" for this
-   domain, score must be ≥ 80. If not deployed but pilot/evaluation mentioned, score 40-70.
-   If no evidence, score ≤ 30.
+SPEND & TAM RULES:
+1. total_domain_spend: copy exactly from SPEND BY MODULE above. If missing, estimate from industry benchmarks.
+2. vendor_adjusted_tam = total_domain_spend × (weighted_readiness / 100) applied to both ends of range.
+3. tam_rationale: show midpoint = (low+high)/2, then × readiness%.
+4. existing_rel_score: if KNOWN TECH STACK shows "{vendor} ALREADY DEPLOYED" → score ≥ 80. Pilot/eval → 40-70. No evidence → ≤ 30.
 
-SEARCHES TO RUN:
-- "{company_name}" "{vendor}" deployed OR partnership OR implementation
-- "{company_name}" warranty service technology RFP OR tender 2023 OR 2024 OR 2025
-- "{company_name}" hiring "{vendor}" OR aftermarket technology
-- "{company_name}" CTO OR CIO digital transformation aftermarket 2024 OR 2025
-- "{company_name}" IT budget technology investment aftermarket service
+SCORING RULES (use your knowledge of {company_name} and the {industry} sector):
+- existing_rel_score (weight 0.30): Is {vendor} known to be deployed or piloted at {company_name}?
+- it_signals_score (weight 0.15): Does {company_name} show technology investment signals in this domain (hiring, RFPs, known projects)?
+- company_signals_score (weight 0.20): Is {company_name} growing, undergoing digital transformation, or investing in this domain?
+- exec_signals_score (weight 0.15): Are executives at {company_name} known to prioritise this domain?
+- budget_signals_score (weight 0.20): Does {company_name} have budget signals or IT spend patterns supporting this domain?
+- weighted_readiness = (existing_rel_score×0.30)+(it_signals_score×0.15)+(company_signals_score×0.20)+(exec_signals_score×0.15)+(budget_signals_score×0.20)
 
-TASK: For EACH of the {n_modules} modules listed below, assess vendor displacement readiness using 5 scored signal categories.
-
-SCORING RULES:
-- Score each category 0-100 based on evidence found
-- existing_rel_score (weight 0.30): Is {vendor} already deployed or in a pilot at this company? (see CRITICAL RULE 4)
-- it_signals_score (weight 0.15): IT job postings, RFPs, tech evaluations mentioning this domain?
-- company_signals_score (weight 0.20): Is company growing, transforming, or investing in this domain?
-- exec_signals_score (weight 0.15): Executive statements, LinkedIn posts, conference talks about this domain?
-- budget_signals_score (weight 0.20): Budget announcements, IT spend news, contract renewals in this domain?
-- weighted_readiness = (existing_rel_score × 0.30) + (it_signals_score × 0.15) + (company_signals_score × 0.20) + (exec_signals_score × 0.15) + (budget_signals_score × 0.20)
+Base scores on your training knowledge of {company_name}, its known technology landscape, and typical patterns for {industry} companies of its size. Be concrete and specific in evidence fields.
 
 MODULES: {modules_list}
 
@@ -806,15 +794,17 @@ async def run_aftermarket_deep_dive(
     # Use gemini-2.0-flash for readiness: 3-5x faster than 2.5-flash, no thinking overhead,
     # sufficient quality for structured signal scoring + TAM estimation.
     if "readiness" in run:
+        # use_search=False: removes Google Search grounding which causes 2-5 min hangs.
+        # gemini-2.0-flash without grounding completes in 5-15s from training knowledge.
         ready_future_a = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_tam_prompt(company_name, industry, target_vendor, [], [], [], _BATCH_A),
-            True, "readiness_tam_a", 16384, "gemini-2.0-flash",
+            False, "readiness_tam_a", 16384, "gemini-2.0-flash",
         )
         ready_future_b = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_tam_prompt(company_name, industry, target_vendor, [], [], [], _BATCH_B),
-            True, "readiness_tam_b", 16384, "gemini-2.0-flash",
+            False, "readiness_tam_b", 16384, "gemini-2.0-flash",
         )
     else:
         ready_future_a = ready_future_b = None
