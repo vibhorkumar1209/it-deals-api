@@ -629,9 +629,10 @@ For EACH finding, record the URL. Evidence arrays must include source URLs.
 - weighted_readiness = (existing_rel×0.30)+(it×0.15)+(company×0.20)+(exec×0.15)+(budget×0.20)
 - displacement_opp: High if ≥65, Medium if 40–64, Low if <40
 - total_domain_spend: copy exactly from SPEND BY MODULE above
-- vendor_adjusted_tam: a SINGLE dollar figure within the total_domain_spend range proportional to readiness.
-  Example: spend "$2M–$5M", readiness=60% → adjusted TAM = $2M + ($5M−$2M)×0.60 = $3.8M
-- tam_rationale: show the arithmetic: low + (high−low) × readiness%
+- vendor_adjusted_tam: a RANGE — multiply both ends of total_domain_spend by (weighted_readiness/100).
+  Example: spend "$2M–$5M", readiness=60% → vendor_adjusted_tam = "$1.2M–$3.0M"
+- tam_rationale: "Midpoint = ($low+$high)/2 = $mid × readiness% = $result vendor-adjusted TAM"
+  Example: "Midpoint = ($2M+$5M)/2 = $3.5M × 60% readiness = $2.1M vendor-adjusted TAM"
 
 MODULES: {modules_list}
 
@@ -654,8 +655,8 @@ Return ONLY a valid JSON array — exactly {n} objects. Each evidence field is a
     "weighted_readiness": <0-100>,
     "displacement_opp": "<High|Medium|Low>",
     "total_domain_spend": "<exact value from SPEND BY MODULE>",
-    "vendor_adjusted_tam": "<single $ figure within spend range>",
-    "tam_rationale": "<low + (high−low) × readiness% = result>"
+    "vendor_adjusted_tam": "<$lowXreadiness%–$highXreadiness% range>",
+    "tam_rationale": "Midpoint = ($low+$high)/2 = $mid × readiness% = $result vendor-adjusted TAM"
   }}
 ]
 
