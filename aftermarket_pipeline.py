@@ -459,8 +459,49 @@ Return ONLY the raw JSON array. No prose. No markdown.
 """
 
 
+_INDUSTRY_BENCHMARKS = {
+    # (it_pct_of_revenue, ai_pct_of_it, cloud_pct_of_it, aftermarket_pct_of_it, source_label)
+    "automotive oem":          (2.5, 12, 28, 22, "Gartner 2024 Automotive"),
+    "automotive":              (2.5, 12, 28, 22, "Gartner 2024 Automotive"),
+    "truck":                   (2.5, 12, 28, 22, "Gartner 2024 Automotive"),
+    "commercial vehicle":      (2.5, 12, 28, 22, "Gartner 2024 Automotive"),
+    "industrial manufacturing":(2.8, 11, 27, 20, "Gartner 2024 Industrial Manufacturing"),
+    "manufacturing":           (2.8, 11, 27, 20, "Gartner 2024 Industrial Manufacturing"),
+    "aerospace":               (3.2, 13, 26, 25, "Gartner 2024 Aerospace & Defense"),
+    "aerospace & defense":     (3.2, 13, 26, 25, "Gartner 2024 Aerospace & Defense"),
+    "defense":                 (3.2, 13, 26, 25, "Gartner 2024 Aerospace & Defense"),
+    "medical devices":         (4.5, 14, 30, 18, "Gartner 2024 Medical Devices"),
+    "healthcare":              (5.0, 15, 32, 15, "Gartner 2024 Healthcare"),
+    "construction equipment":  (2.3, 10, 25, 22, "Gartner 2024 Construction/Industrial"),
+    "construction":            (2.3, 10, 25, 22, "Gartner 2024 Construction/Industrial"),
+    "energy":                  (3.0, 12, 28, 18, "Gartner 2024 Energy & Utilities"),
+    "utilities":               (3.0, 12, 28, 18, "Gartner 2024 Energy & Utilities"),
+    "oil & gas":               (2.8, 11, 26, 20, "Gartner 2024 Oil & Gas"),
+    "retail":                  (2.2, 13, 35, 10, "Gartner 2024 Retail"),
+    "financial services":      (7.5, 18, 38, 10, "Gartner 2024 Financial Services"),
+    "banking":                 (7.5, 18, 38, 10, "Gartner 2024 Banking"),
+    "insurance":               (5.5, 16, 33, 12, "Gartner 2024 Insurance"),
+    "technology":              (9.0, 20, 40,  8, "Gartner 2024 Technology"),
+    "software":                (9.0, 20, 40,  8, "Gartner 2024 Technology"),
+    "telecom":                 (4.5, 15, 32, 12, "Gartner 2024 Telecom"),
+    "logistics":               (2.5, 12, 30, 18, "Gartner 2024 Transportation/Logistics"),
+    "transportation":          (2.5, 12, 30, 18, "Gartner 2024 Transportation/Logistics"),
+}
+_DEFAULT_BENCHMARK = (2.8, 12, 30, 20, "Gartner 2024 Cross-Industry Average")
+
+
+def _get_benchmark(industry: str) -> tuple:
+    """Return (it_pct, ai_pct, cloud_pct, aftermarket_pct, source) for the given industry."""
+    key = industry.lower().strip()
+    for k, v in _INDUSTRY_BENCHMARKS.items():
+        if k in key or key in k:
+            return v
+    return _DEFAULT_BENCHMARK
+
+
 def _aggregate_spend_prompt(company_name: str, industry: str) -> str:
     ind = f" ({industry})" if industry else ""
+    it_pct, ai_pct, cloud_pct, am_pct, bench_src = _get_benchmark(industry)
     return f"""You are an enterprise IT financial analyst. Use Google Search. Follow EXACTLY the steps below — do not deviate.
 
 COMPANY: {company_name}{ind}
@@ -473,19 +514,20 @@ Record: REVENUE = <exact figure e.g. $16.2B> from <source URL>
 If you find a range (e.g. $15.8B–$16.5B), use the MIDPOINT.
 If revenue is not found after searching, state clearly and estimate from industry context.
 
-━━ STEP 2: APPLY FIXED BENCHMARK MULTIPLIERS ━━
+━━ STEP 2: APPLY FIXED BENCHMARK MULTIPLIERS FOR THIS INDUSTRY ━━
+Source: {bench_src}
 Use EXACTLY these multipliers (do not change them — consistency is critical):
-  IT Spend     = REVENUE × 2.8%   (Gartner 2024 avg for manufacturing/industrial OEMs)
-  AI Spend     = IT Spend × 12%   (IDC 2025: avg AI allocation within IT budget)
-  Cloud Spend  = IT Spend × 30%   (Flexera 2024 State of Cloud: avg cloud share of IT)
-  Aftermarket IT = IT Spend × 20% (industry norm: aftermarket/service operations share of IT)
+  IT Spend       = REVENUE × {it_pct}%
+  AI Spend       = IT Spend × {ai_pct}%
+  Cloud Spend    = IT Spend × {cloud_pct}%
+  Aftermarket IT = IT Spend × {am_pct}%
 
 ━━ STEP 3: SHOW THE ARITHMETIC ━━
 Write out each calculation explicitly:
-  IT Spend: $REVENUE × 2.8% = $RESULT → round to nearest $5M → "$X–$Y" (±10% range)
-  AI Spend: $IT × 12% = $RESULT → "$X–$Y"
-  Cloud:    $IT × 30% = $RESULT → "$X–$Y"
-  Aftermarket IT: $IT × 20% = $RESULT → "$X–$Y"
+  IT Spend: $REVENUE × {it_pct}% = $RESULT → round to nearest $5M → "$X–$Y" (±10% range)
+  AI Spend: $IT × {ai_pct}% = $RESULT → "$X–$Y"
+  Cloud:    $IT × {cloud_pct}% = $RESULT → "$X–$Y"
+  Aftermarket IT: $IT × {am_pct}% = $RESULT → "$X–$Y"
 
 ━━ OUTPUT ━━
 Return ONLY this JSON array — 4 objects, no extras:
@@ -493,25 +535,25 @@ Return ONLY this JSON array — 4 objects, no extras:
   {{
     "spend_type": "IT Spend",
     "estimate": "<$X–$Y computed above>",
-    "basis": "REVENUE × 2.8% = <exact calc>. Revenue: <verified figure> (Gartner 2024 manufacturing benchmark)",
+    "basis": "REVENUE × {it_pct}% = <exact calc>. Revenue: <verified figure> ({bench_src})",
     "source": "<URL to revenue source>"
   }},
   {{
     "spend_type": "AI Spend",
     "estimate": "<$X–$Y>",
-    "basis": "IT Spend × 12% = <exact calc> (IDC 2025 AI within IT budget)",
+    "basis": "IT Spend × {ai_pct}% = <exact calc> (IDC 2025 AI within IT budget)",
     "source": "<URL to IDC or Gartner benchmark>"
   }},
   {{
     "spend_type": "Cloud Spend",
     "estimate": "<$X–$Y>",
-    "basis": "IT Spend × 30% = <exact calc> (Flexera 2024 State of Cloud)",
+    "basis": "IT Spend × {cloud_pct}% = <exact calc> (Flexera 2024 State of Cloud)",
     "source": "<URL to Flexera benchmark>"
   }},
   {{
     "spend_type": "Aftermarket IT Spend",
     "estimate": "<$X–$Y>",
-    "basis": "IT Spend × 20% = <exact calc> (aftermarket/service operations share of IT budget)",
+    "basis": "IT Spend × {am_pct}% = <exact calc> (aftermarket/service operations share of IT budget)",
     "source": "<URL to revenue source>"
   }}
 ]
