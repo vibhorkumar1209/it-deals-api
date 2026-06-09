@@ -596,67 +596,71 @@ def _readiness_score_prompt(company_name: str, industry: str, target_vendor: str
 
     pre_research = research_text.strip() if research_text and research_text.strip() else ""
 
-    return f"""You are a vendor displacement readiness analyst. Use Google Search to find evidence for each module below.
+    return f"""You are a vendor displacement readiness analyst. Use Google Search to find signal evidence for each module.
 
 COMPANY: {company_name} ({industry})
 VENDOR BEING EVALUATED: {vendor}
 
-VENDOR DEPLOYMENT — ALREADY VERIFIED (use for existing_rel_score only):
+━━ EXISTING RELATIONSHIP (DO NOT SEARCH — use ONLY this section for existing_rel) ━━
 {vendor_context}
+Rule: domain shows "{vendor} DEPLOYED" → existing_rel_score=85, evidence="Deployed". Domain shows "NOT found" → existing_rel_score=10, evidence="Not deployed". No data → score=5.
 
-PRE-FETCHED SIGNALS (may be partial — search for more if needed):
-{pre_research or "Not available — use Google Search to find evidence."}
+━━ PRE-FETCHED SIGNALS (supplement with Google Search if thin) ━━
+{pre_research or "Not available — search Google for each signal type below."}
 
-SPEND BY MODULE:
+━━ SPEND BY MODULE (copy exactly for total_domain_spend) ━━
 {spend_lines}
 
-INSTRUCTIONS:
-For each module in MODULES, search Google for recent (2022–2025) evidence specific to {company_name}:
-- IT_INVESTMENT: technology implementations, ERP/platform go-lives, vendor contracts in this domain
-- EXEC_AGENDA: executive statements on digital/technology strategy relevant to this domain
-- BUDGET_SIGNAL: IT budget, RFP, tender, capex for technology in this domain
-- HIRING_SIGNAL: open roles or hiring in technology/digital relevant to this domain
+━━ SEARCH INSTRUCTIONS ━━
+For each module, search Google for REAL recent (2022–2025) evidence for {company_name}:
+• IT_INVESTMENT: ERP/platform go-lives, vendor contracts, system implementations in this domain
+• EXEC_AGENDA: CTO/CIO/CDO quotes, strategy announcements relevant to this domain
+• BUDGET_SIGNAL: IT budget, RFP, tender, technology capex for this domain
+• HIRING_SIGNAL: open roles or hiring patterns in technology for this domain
 
-Use PRE-FETCHED SIGNALS above first. If a signal type is missing or thin, search Google now for that specific signal for {company_name}.
+For EACH finding, record the URL. Evidence arrays must include source URLs.
 
-SCORING RULES:
-- existing_rel_score (0.30 weight): VENDOR DEPLOYMENT only. DEPLOYED→≥75. Partial/mentioned→40-70. Not found→≤20.
-- it_signals_score (0.15): IT_INVESTMENT or HIRING_SIGNAL for this specific domain
-- company_signals_score (0.20): IT_INVESTMENT or growth signals for this domain
+━━ SCORING RULES ━━
+- existing_rel_score (0.30): from EXISTING RELATIONSHIP section ONLY (no search)
+- it_signals_score (0.15): IT_INVESTMENT + HIRING_SIGNAL for this domain
+- company_signals_score (0.20): growth, M&A, transformation signals for this domain
 - exec_signals_score (0.15): EXEC_AGENDA for this domain
 - budget_signals_score (0.20): BUDGET_SIGNAL for this domain
 - weighted_readiness = (existing_rel×0.30)+(it×0.15)+(company×0.20)+(exec×0.15)+(budget×0.20)
 - displacement_opp: High if ≥65, Medium if 40–64, Low if <40
-- For evidence fields: quote the actual finding with source URL, or "No evidence found after search"
-- total_domain_spend: copy from SPEND BY MODULE, else industry benchmark
-- vendor_adjusted_tam = total_domain_spend × weighted_readiness/100
-- tam_rationale: show midpoint × readiness% calculation
+- total_domain_spend: copy exactly from SPEND BY MODULE above
+- vendor_adjusted_tam: a SINGLE dollar figure within the total_domain_spend range proportional to readiness.
+  Example: spend "$2M–$5M", readiness=60% → adjusted TAM = $2M + ($5M−$2M)×0.60 = $3.8M
+- tam_rationale: show the arithmetic: low + (high−low) × readiness%
 
 MODULES: {modules_list}
 
-Return ONLY a JSON array — exactly {n} objects:
+Return ONLY a valid JSON array — exactly {n} objects. Each evidence field is an ARRAY of signal objects with text and source:
+
 [
   {{
     "domain": "<module name>",
     "current_system": "<known system or Unknown>",
     "existing_rel_score": <0-100>,
-    "existing_rel_evidence": "<quote from VENDOR DEPLOYMENT or Not deployed>",
+    "existing_rel_evidence": [{{"text": "<from EXISTING RELATIONSHIP section>", "source": ""}}],
     "it_signals_score": <0-100>,
-    "it_signals_evidence": "<finding with source URL or No evidence found after search>",
+    "it_signals_evidence": [{{"text": "<specific finding>", "source": "<URL>"}}],
     "company_signals_score": <0-100>,
-    "company_signals_evidence": "<finding with source URL or No evidence found after search>",
+    "company_signals_evidence": [{{"text": "<specific finding>", "source": "<URL>"}}],
     "exec_signals_score": <0-100>,
-    "exec_signals_evidence": "<finding with source URL or No evidence found after search>",
+    "exec_signals_evidence": [{{"text": "<specific finding>", "source": "<URL>"}}],
     "budget_signals_score": <0-100>,
-    "budget_signals_evidence": "<finding with source URL or No evidence found after search>",
+    "budget_signals_evidence": [{{"text": "<specific finding>", "source": "<URL>"}}],
     "weighted_readiness": <0-100>,
     "displacement_opp": "<High|Medium|Low>",
-    "total_domain_spend": "<from SPEND BY MODULE or benchmark>",
-    "vendor_adjusted_tam": "<range × readiness%>",
-    "tam_rationale": "<midpoint × readiness% calculation>"
+    "total_domain_spend": "<exact value from SPEND BY MODULE>",
+    "vendor_adjusted_tam": "<single $ figure within spend range>",
+    "tam_rationale": "<low + (high−low) × readiness% = result>"
   }}
 ]
-Return ONLY the JSON array. No prose."""
+
+If no evidence found for a signal after searching: [{{"text": "No evidence found", "source": ""}}]
+Return ONLY the JSON array. No prose before or after."""
 
 
 def _readiness_tam_prompt(company_name: str, industry: str, target_vendor: str,
