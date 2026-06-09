@@ -298,46 +298,89 @@ async def _run_async(prompt: str, use_search: bool, label: str, timeout: int = 1
 # ── Table 1: Capability Assessment ───────────────────────────────────────────
 
 def _cap_batch_prompt(company_name: str, domains: list[str], industry: str, target_vendor: str = "") -> str:
-    """Single prompt covering multiple domains — reduces simultaneous Gemini calls from 12 to 4."""
+    """Single prompt covering multiple domains — runs rich per-domain + vendor-match searches."""
     ind = f" ({industry})" if industry else ""
     domains_list = "\n".join(f"  - {d}" for d in domains)
-    vendor_line = f'\n- "{company_name}" "{target_vendor}" aftermarket technology platform' if target_vendor else ""
+
+    # Build domain-specific search keywords
+    _DOMAIN_KEYWORDS = {
+        "Warranty Management": 'warranty management OR "warranty claim" OR "warranty processing" OR "dealer warranty" system software',
+        "Service & Repair Operations": '"service management" OR "repair management" OR "work order" OR "service order" OR "workshop management" software',
+        "Parts & Inventory Management": '"parts management" OR "spare parts" OR "parts catalog" OR "inventory" OR "parts ordering" software system',
+        "Field Service Management": '"field service" OR FSM OR "technician dispatch" OR "service scheduling" OR "mobile workforce" software',
+        "Technical Knowledge & Documentation": '"technical documentation" OR "service manual" OR "knowledge base" OR "technical information system" OR TIS software',
+        "Dealer & Distribution Network": '"dealer management" OR DMS OR "dealer portal" OR "distribution management" OR "channel management" software',
+        "Customer Service & Support": '"customer service" OR CRM OR "contact center" OR "customer portal" OR "service portal" software',
+        "Telematics & Connected Products": 'telematics OR "connected equipment" OR "fleet management" OR "remote monitoring" OR IoT platform',
+        "Predictive Maintenance & IoT": '"predictive maintenance" OR "condition monitoring" OR "asset health" OR "IoT platform" OR "remote diagnostics"',
+        "Digital Commerce & Self-Service": '"digital commerce" OR "ecommerce parts" OR "self-service portal" OR "online parts ordering" OR "B2B portal"',
+        "Analytics & Business Intelligence": '"analytics" OR "business intelligence" OR BI OR "data analytics" OR "service analytics" OR "reporting platform"',
+        "AI & Automation": '"AI" OR "machine learning" OR "automation" OR "RPA" OR "generative AI" OR "AI-powered" aftermarket service',
+    }
+
+    per_domain_searches = []
+    for i, d in enumerate(domains, 1):
+        kw = _DOMAIN_KEYWORDS.get(d, f'"{d.lower()}" software technology')
+        per_domain_searches.append(f'{i*3-2}. "{company_name}" {kw} 2022 OR 2023 OR 2024 OR 2025')
+        per_domain_searches.append(f'{i*3-1}. "{company_name}" {kw} vendor implementation case study OR deployment')
+        if target_vendor:
+            per_domain_searches.append(f'{i*3}.  "{company_name}" "{target_vendor}" {kw} — does {target_vendor} have a deployment here?')
+        else:
+            per_domain_searches.append(f'{i*3}.  site:linkedin.com/jobs "{company_name}" {d.split()[0].lower()} — job titles reveal active systems')
+
+    per_domain_block = "\n".join(per_domain_searches)
+
+    vendor_searches = ""
+    if target_vendor:
+        vendor_searches = f"""
+VENDOR MATCH SEARCHES — run for every domain:
+- "{company_name}" "{target_vendor}" — any deployment, partnership, or pilot
+- "{target_vendor}" "{company_name}" case study OR customer OR deployment OR implementation
+- site:linkedin.com "{company_name}" "{target_vendor}" — employee mentions of the vendor
+- "{target_vendor}" customer "{company_name}" press release OR announcement
+"""
+
     return f"""You are an aftermarket service technology analyst with live Google Search.
 
 COMPANY: {company_name}{ind}
+{"TARGET VENDOR: " + target_vendor if target_vendor else ""}
 
-Search for technologies used by {company_name} across these aftermarket domains:
+Your task: find every technology platform, software product, and vendor deployment at {company_name} across these aftermarket domains:
 {domains_list}
 
-Run these searches:
-- "{company_name}" aftermarket service technology platform software vendor
-- "{company_name}" warranty OR "field service" OR "spare parts" OR "dealer management" system 2022 OR 2023 OR 2024 OR 2025
-- "{company_name}" ERP CRM service software implementation SAP OR Salesforce OR ServiceMax OR Oracle OR Microsoft
-- "{company_name}" aftermarket digital transformation technology investment{vendor_line}
-- site:linkedin.com/jobs "{company_name}" aftermarket service software systems
+MANDATORY SEARCHES — run EVERY search below before answering:
 
-For each technology found, return ONE JSON object per domain × capability × technology combination.
+BROAD COMPANY SEARCHES (run first to establish baseline):
+A1. "{company_name}" aftermarket service technology platform software vendor list 2024
+A2. "{company_name}" ERP OR CRM OR DMS OR FSM OR warranty OR telematics software implementation SAP OR Salesforce OR Oracle OR Microsoft OR ServiceMax OR ServiceNow
+A3. "{company_name}" digital transformation aftermarket service technology investment 2022 OR 2023 OR 2024 OR 2025
+A4. site:linkedin.com/jobs "{company_name}" aftermarket OR service OR warranty OR parts systems software
+A5. "{company_name}" technology vendor partner case study OR implementation OR deployment
+{vendor_searches}
+PER-DOMAIN SEARCHES (run for each domain in scope):
+{per_domain_block}
 
-Return ONLY a JSON array:
+For each technology found, return ONE JSON object per domain × technology combination.
+
+Return ONLY a JSON array — aim for MAXIMUM coverage, one row per technology per domain:
 [
   {{
-    "domain": "<one of the domains listed above — must match exactly>",
-    "capability": "<specific capability e.g. 'Claim Submission', 'Parts Ordering', 'Work Order Management', 'Fleet Telematics'>",
-    "technology": "<exact product/vendor name e.g. 'Tavant Warranty', 'SAP S/4HANA', 'Salesforce Service Cloud', 'ServiceMax'>",
-    "use_case": "<one sentence: how this technology is used at {company_name} for this capability>",
-    "install_base": "<estimated scope e.g. '~500 dealer users', 'Global deployment', 'Enterprise-wide'>",
-    "source": "<URL to press release, case study, or job posting — or '-'>"
+    "domain": "<must exactly match one of: {', '.join(domains)}>",
+    "capability": "<specific sub-capability e.g. 'Claim Submission', 'Parts Ordering', 'Work Order Management', 'Fleet Telematics', 'Dealer Portal'>",
+    "technology": "<exact product/vendor name — never generic e.g. 'Tavant Warranty', 'SAP S/4HANA', 'Salesforce Service Cloud', 'ServiceMax', 'Trimble'>",
+    "vendor_match": "<if target_vendor is set: 'Deployed' | 'Pilot' | 'Competitor' | 'Not Found' | 'Unknown' — else '-'>",
+    "use_case": "<one sentence: how {company_name} uses this technology>",
+    "install_base": "<scope e.g. '~500 dealer users', 'Global', 'North America', 'Enterprise-wide'>",
+    "source": "<URL to press release, case study, job posting, or LinkedIn — or '-'>"
   }}
 ]
 
 Rules:
-- Cover ALL domains listed above — include at least one row per domain if evidence exists
-- Only include a technology if there is actual evidence {company_name} uses it
-- Do not include rows for "vendor offers products generally" or "no deployment found"
-- If no evidence for a domain, omit it entirely (do not add empty/speculative rows)
-- Multiple rows per domain if multiple technologies found
-
-Return ONLY the raw JSON array. No prose."""
+- Cover ALL {len(domains)} domains — include every technology found per domain, multiple rows if multiple tools
+- Only include a technology if there is real evidence {company_name} uses it (press release, job posting, case study, LinkedIn)
+- Do NOT speculate or add rows without evidence
+- For vendor_match: 'Deployed' = confirmed {target_vendor + " deployment" if target_vendor else "N/A"}, 'Competitor' = competing product in same domain
+- Return ONLY the raw JSON array. No prose. No markdown."""
 
 
 def _cap_prompt(company_name: str, domain: str, industry: str, target_vendor: str = "") -> str:
@@ -1062,7 +1105,7 @@ async def run_aftermarket_deep_dive(
     cap_futures = [
         loop.run_in_executor(None, _gemini_call_sync,
                              _cap_batch_prompt(company_name, batch, industry, target_vendor),
-                             True, f"cap_batch_{bi}")
+                             True, f"cap_batch_{bi}", 24576)
         for bi, batch in enumerate(_CAP_BATCHES)
     ] if "capabilities" in run else []
     agg_future  = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend", 4096, "gemini-2.5-flash", False, 0.0) if "agg_spend" in run else None
@@ -1109,7 +1152,7 @@ async def run_aftermarket_deep_dive(
     pending_caps = list(enumerate(cap_futures))
     elapsed = 0
     N_BATCHES = len(_CAP_BATCHES) if cap_futures else 0
-    PARALLEL_TIMEOUT = 120  # 4 batched calls — generous timeout per batch
+    PARALLEL_TIMEOUT = 160  # 4 batched calls — each now runs 30+ searches, needs more time
 
     while pending_caps and elapsed < PARALLEL_TIMEOUT:
         try:
