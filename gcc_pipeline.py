@@ -157,39 +157,44 @@ async def _collect(loop, fn_args: tuple, label: str, timeout: int = 200):
 
 def _location_discovery_prompt(company_name: str, domain: str, location_filter: str) -> str:
     loc_clause = f"LOCATION FILTER: Only include locations in or near: {location_filter}" if location_filter else \
-                 "SCOPE: Return ALL worldwide locations — do not limit by region."
-    return f"""Find every Global Capability Center (GCC), technology hub, shared services center, and offshore delivery center that {company_name} operates worldwide.{f" (official website: {domain})" if domain else ""}
+                 "SCOPE: Return ALL worldwide locations — cover every continent equally. Do NOT bias toward any single region."
+    domain_hint = f" (official website: {domain})" if domain else ""
+    return f"""Find every Global Capability Center (GCC), technology hub, shared services center, and offshore delivery center that {company_name} operates worldwide.{domain_hint}
 
 {loc_clause}
 
-IMPORTANT: Run EVERY one of these searches before answering — do not skip any:
-1. "{company_name}" "global capability center" OR "GCC" locations worldwide list
-2. "{company_name}" "technology center" OR "engineering center" OR "development center" city country
-3. "{company_name}" "shared services center" OR "global business services" OR "GBS" locations
-4. "{company_name}" India Chennai OR Bengaluru OR Bangalore OR Pune OR Hyderabad OR Mumbai OR Noida OR Gurugram center hub
-5. "{company_name}" Poland OR Romania OR Hungary OR Czech Republic OR Slovakia OR Portugal technology center
-6. "{company_name}" Philippines OR Malaysia OR Singapore OR Vietnam OR Thailand OR Indonesia hub operations center
-7. "{company_name}" Mexico OR Brazil OR Colombia OR Argentina OR Costa Rica OR Chile technology center
-8. "{company_name}" China OR Guangzhou OR Shanghai OR Shenzhen OR Beijing OR Chengdu center hub
-9. "{company_name}" Egypt OR Morocco OR South Africa OR Kenya technology OR operations center
-10. "{company_name}" offices locations employees headcount site:linkedin.com/company
-11. site:nasscom.in OR site:globalcapabilitycenters.com OR site:zinnov.com "{company_name}"
-12. "{company_name}" annual report 2024 global offices technology hubs locations
+CRITICAL INSTRUCTION: You MUST run ALL searches below before answering. Many companies have GCCs outside India — in the Americas, Europe, and Southeast Asia. Do not default to India-only results.
+
+Run EVERY one of these 14 searches:
+1. "{company_name}" "global capability center" OR "GCC" locations worldwide full list 2024 2025
+2. "{company_name}" "technology center" OR "tech hub" OR "engineering center" OR "development center" global locations
+3. "{company_name}" "shared services" OR "global business services" OR "GBS" OR "captive center" locations worldwide
+4. site:linkedin.com/company "{company_name}" offices locations worldwide — check the Locations tab
+5. "{company_name}" global offices employees headcount 2024 site:linkedin.com
+6. "{company_name}" annual report 2024 OR 2025 global offices technology hubs locations operations
+7. "{company_name}" United States OR Canada OR Mexico OR "Costa Rica" OR Brazil OR Colombia OR Chile technology center hub
+8. "{company_name}" United Kingdom OR Ireland OR Poland OR Romania OR Hungary OR Portugal OR Spain OR Germany OR "Czech Republic" technology center
+9. "{company_name}" India OR "Bengaluru" OR "Hyderabad" OR "Chennai" OR "Pune" OR "Gurugram" OR "Mumbai" engineering center
+10. "{company_name}" Philippines OR Malaysia OR Singapore OR Vietnam OR Indonesia OR Thailand hub operations center
+11. "{company_name}" China OR Shanghai OR Beijing OR "Hong Kong" OR Taiwan technology center
+12. "{company_name}" Egypt OR Morocco OR "South Africa" OR Kenya OR UAE OR Israel technology center
+13. site:nasscom.in OR site:globalcapabilitycenters.com OR site:zinnov.com OR site:everestgrp.com "{company_name}" GCC
+14. "{company_name}" "center of excellence" OR "CoE" OR "innovation hub" OR "delivery center" location city country
 
 RULES:
-- Include EVERY city where {company_name} has a GCC/tech/ops center — even if only 500 staff
-- If a company has multiple centers in the same city (e.g. Chennai DLF + Chennai Tidel Park), list them separately
-- Never omit a location just because it is smaller or less well-known
-- Headcount: use the most recent figure available; if unknown, estimate from job postings
+- Include EVERY city where {company_name} has any GCC/tech/ops center regardless of size
+- List centers in ALL regions found — Americas, Europe, Asia-Pacific, MEA — not just India
+- If a company has multiple centers in the same country, list each city separately
+- Headcount: use the most recent figure; if unknown write "Unknown"
 
 Return a JSON array. Each element must have exactly these fields:
 [
   {{
-    "gcc_name": "<official center name, e.g. 'Standard Chartered GBS, Chennai'>",
+    "gcc_name": "<official center name, e.g. 'Walmart Global Tech, Bengaluru'>",
     "gcc_location": "<City, Country>",
     "city": "<city only>",
     "country": "<country only>",
-    "headcount": "<number or range, e.g. '13,000' or '2,000–3,000' or 'Unknown'>",
+    "headcount": "<number or range e.g. '13,000' or '2,000–3,000' or 'Unknown'>",
     "established_year": "<4-digit year or 'Unknown'>",
     "operating_model": "<Pure Captive | BOT | GCC-as-a-Service | Unknown>",
     "primary_focus": "<Engineering & R&D | Shared Services | Digital Transformation | AI/ML & Data | Customer Experience | Mixed>",
@@ -201,15 +206,17 @@ Return ONLY the raw JSON array. No explanation. No markdown. No prose before or 
 
 def _location_discovery_prompt_simple(company_name: str) -> str:
     """Simpler fallback discovery prompt — used on retry when full prompt fails to parse."""
-    return f"""Search for all office and technology center locations of {company_name} worldwide.
+    return f"""Search for all GCC, technology hub, and shared services center locations of {company_name} worldwide.
 
-Run these searches:
-1. "{company_name}" GCC OR "global capability center" OR "technology center" locations list
-2. "{company_name}" India offices employees engineering 2024
-3. "{company_name}" Poland Philippines Malaysia Singapore China offices 2024
-4. "{company_name}" global offices locations annual report 2024
+Run ALL of these searches — do not skip any:
+1. "{company_name}" "global capability center" OR "technology center" OR "tech hub" locations worldwide list
+2. "{company_name}" offices global locations employees 2024 site:linkedin.com
+3. "{company_name}" United States OR Canada OR Mexico OR "Costa Rica" technology center hub
+4. "{company_name}" India OR Poland OR Philippines OR Malaysia technology center 2024
+5. "{company_name}" annual report 2024 global offices locations
+6. "{company_name}" GCC OR "shared services" OR "engineering center" OR "delivery center" city country
 
-List every city where {company_name} has a GCC, technology hub, or shared services center.
+IMPORTANT: Include ALL regions — Americas, Europe, Asia-Pacific, and MEA. Do not focus only on India.
 
 Return a JSON array — one entry per city:
 [{{"gcc_name": "<name>", "gcc_location": "<City, Country>", "city": "<city>", "country": "<country>", "headcount": "<number or Unknown>", "established_year": "<year or Unknown>", "operating_model": "Unknown", "primary_focus": "Mixed", "source": "<URL>"}}]
@@ -251,32 +258,34 @@ Return ONLY the JSON array. No prose. No markdown."""
 
 def _projects_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -> str:
     city = gcc_location.split(",")[0].strip()
-    country = gcc_location.split(",")[-1].strip() if "," in gcc_location else ""
+    country = gcc_location.split(",")[-1].strip() if "," in gcc_location else gcc_location.strip()
     entity = gcc_name if gcc_name and gcc_name != "-" else company_name
-    return f"""What are the active projects, technology investments, strategic partnerships, and expansion plans at {company_name}'s GCC in {gcc_location} as of 2025–2026?{f" (center: {gcc_name})" if gcc_name and gcc_name != '-' else ""}
+    return f"""What are the active projects, technology investments, strategic partnerships, and expansion plans at {company_name}'s center in {gcc_location} as of 2024–2026?{f" (center: {gcc_name})" if gcc_name and gcc_name != '-' else ""}
 
-Include any recent announcements, new center openings, and LinkedIn or job posting signals indicating hiring velocity.
+Include facility openings, headcount expansions, new technology programs, vendor partnerships, AI/cloud/digital initiatives, CoE launches, and LinkedIn hiring signals.
 
 Run ALL of these searches — do not skip any:
-1. "{company_name}" {city} expansion investment hiring announcement 2024 OR 2025 OR 2026
-2. site:businesswire.com OR site:prnewswire.com "{company_name}" {city} OR {country} 2024 OR 2025
-3. "{company_name}" {country} center project initiative technology investment 2024 OR 2025
-4. "{entity}" project initiative expansion partnership announcement strategic
-5. "{company_name}" {city} new office facility campus expansion 2024 OR 2025
-6. "{company_name}" {city} hiring 500 OR 1000 OR 2000 OR 3000 OR 5000 employees engineers
-7. "{company_name}" {country} AI OR cloud OR digital transformation program initiative 2024 OR 2025
-8. "{company_name}" {country} technology vendor Microsoft OR AWS OR Azure OR SAP OR ServiceNow partnership
-9. site:linkedin.com "{company_name}" {city} new jobs hiring 2025 — check hiring velocity
-10. "{company_name}" {city} OR {country} centre of excellence OR CoE launch 2024 OR 2025
+1. "{company_name}" "{city}" expansion OR investment OR initiative OR hiring announcement 2024 OR 2025 OR 2026
+2. "{company_name}" "{country}" expansion OR "center of excellence" OR CoE OR facility announcement 2024 OR 2025
+3. site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com "{company_name}" "{city}" OR "{country}" 2024 OR 2025
+4. "{company_name}" "{city}" OR "{country}" AI OR "artificial intelligence" OR cloud OR "digital transformation" program 2024 OR 2025
+5. "{company_name}" "{city}" OR "{country}" new office OR campus OR facility OR "square feet" 2024 OR 2025
+6. "{company_name}" "{city}" OR "{country}" hiring engineers OR developers OR architects 2025 jobs
+7. site:linkedin.com/jobs "{company_name}" "{city}" 2025 — scan job titles for new initiative signals
+8. "{company_name}" "{country}" Microsoft OR AWS OR Azure OR "Google Cloud" OR SAP OR ServiceNow partnership 2024 OR 2025
+9. "{entity}" technology investment OR digital program OR innovation lab announcement 2024 OR 2025
+10. "{company_name}" global technology OR engineering strategy 2024 OR 2025 — any global programs that this center participates in
 
-Count as a project/initiative: headcount expansions, facility openings, technology programs, vendor partnerships, digital/AI/cloud initiatives, CoE launches.
+IMPORTANT: If {city}-specific results are sparse, broaden to {country}-wide and global company initiatives. Any project where {gcc_location} plays a role counts.
 
-Return a JSON array — one per project, initiative, or announcement found:
+Count as a project/initiative: headcount expansions, facility openings, technology programs, vendor partnerships, digital/AI/cloud initiatives, CoE launches, R&D programs, automation rollouts.
+
+Return a JSON array — one object per distinct project, initiative, or announcement:
 [
   {{
-    "project_name": "<specific name or short title>",
+    "project_name": "<specific name or short descriptive title>",
     "category": "<Headcount Expansion | New Facility | Technology Investment | Digital Initiative | AI/ML Program | Partnership | R&D Program | Automation | Centre of Excellence | Other>",
-    "description": "<concrete description — include numbers, dates, technologies>",
+    "description": "<concrete description — include numbers, dates, technologies, impact>",
     "status": "<Active | Announced | Completed | Planning>",
     "investment_value": "<$ amount or headcount target or Unknown>",
     "partner_vendor": "<partner/vendor if mentioned or '-'>",
@@ -285,7 +294,7 @@ Return a JSON array — one per project, initiative, or announcement found:
     "source": "<URL of press release, news article, or LinkedIn post>"
   }}
 ]
-Return ONLY the JSON array. If genuinely nothing found, return []."""
+Return ONLY the JSON array. If genuinely nothing found after all searches, return []."""
 
 
 def _talent_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -> str:
@@ -367,40 +376,44 @@ Return ONLY the JSON object."""
 
 def _techstack_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -> str:
     city = gcc_location.split(",")[0].strip()
-    country = gcc_location.split(",")[-1].strip() if "," in gcc_location else ""
-    return f"""What is the technology stack and digital maturity of {company_name}'s GCC in {gcc_location}?
+    country = gcc_location.split(",")[-1].strip() if "," in gcc_location else gcc_location.strip()
+    return f"""What is the technology stack and digital maturity of {company_name}'s center in {gcc_location}?
 
-Cover: cloud providers and migration status, automation and RPA/hyper-automation adoption, DevOps/DevSecOps maturity, key technology vendors and partnerships, and the estimated split between modern cloud-native vs legacy on-premise workloads.
+Cover: cloud providers and migration status, automation and RPA/hyper-automation, DevOps/DevSecOps maturity, key technology vendors, programming languages and frameworks in active use, and estimated modern-cloud vs legacy split.
 
-Run ALL of these searches:
-1. site:linkedin.com/jobs "{company_name}" {city} software engineer developer — extract required tech skills from job descriptions
-2. site:naukri.com "{company_name}" {city} engineer developer — India job postings for tech stack signals
-3. site:glassdoor.com "{company_name}" {city} engineer interview — tech stack and tooling mentions
-4. "{company_name}" {city} AWS OR Azure OR "Google Cloud" cloud infrastructure migration 2024 OR 2025
-5. "{company_name}" {city} kubernetes OR docker OR microservices OR DevOps OR DevSecOps
-6. "{company_name}" {city} RPA OR automation OR "hyper-automation" OR UiPath OR Automation Anywhere
-7. "{company_name}" technology blog OR engineering blog OR tech stack OR open source contribution
-8. github.com "{company_name}" — check public repositories for primary language and framework usage
-9. "{company_name}" {country} SAP OR Salesforce OR ServiceNow OR Oracle OR Microsoft OR Workday deployment
-10. "{company_name}" {city} AI OR "machine learning" OR LLM OR "generative AI" platform 2024 OR 2025
+Run ALL of these searches — do not skip any:
+1. site:linkedin.com/jobs "{company_name}" "{city}" software engineer OR developer OR architect — extract required tech skills from job descriptions
+2. site:linkedin.com/jobs "{company_name}" "{country}" engineer developer data scientist — broaden to country if city sparse
+3. site:glassdoor.com "{company_name}" "{city}" OR "{country}" engineer interview tech stack
+4. site:indeed.com OR site:monster.com "{company_name}" "{city}" software engineer developer 2025
+5. "{company_name}" "{city}" OR "{country}" AWS OR Azure OR "Google Cloud" OR GCP cloud infrastructure migration 2024 OR 2025
+6. "{company_name}" "{city}" OR "{country}" Kubernetes OR Docker OR microservices OR DevOps OR DevSecOps OR CI/CD
+7. "{company_name}" "{city}" OR "{country}" RPA OR automation OR UiPath OR "Automation Anywhere" OR "Power Automate"
+8. "{company_name}" engineering blog OR tech blog OR open source GitHub technology stack 2024 2025
+9. github.com "{company_name}" repositories — check public repos for primary languages and frameworks
+10. "{company_name}" global SAP OR Salesforce OR ServiceNow OR Oracle OR Microsoft OR Workday — enterprise vendors
+11. "{company_name}" "{city}" OR "{country}" AI OR "machine learning" OR LLM OR "generative AI" technology platform 2024 OR 2025
+12. "{company_name}" technology strategy 2024 2025 — global tech investments relevant to {gcc_location}
+
+NOTE: Job postings on LinkedIn/Indeed/Glassdoor are the BEST signal for tech stack — search those first. Also use company engineering blogs and GitHub.
 
 Extract from job postings: required programming languages, preferred tools, frameworks, cloud platforms, and certifications mentioned.
 
 Return a JSON object:
 {{
-  "cloud_providers": "<AWS | Azure | GCP | Multi-Cloud | On-Premise | Hybrid — cite evidence>",
-  "cloud_maturity_score": <integer 0-100: 80+=Cloud-Native, 60-79=Hybrid, 40-59=Migrating, <40=Legacy-Heavy, 0 only if truly no signal>,
+  "cloud_providers": "<AWS | Azure | GCP | Multi-Cloud | On-Premise | Hybrid — cite evidence source>",
+  "cloud_maturity_score": <integer 0-100: 80+=Cloud-Native, 60-79=Hybrid, 40-59=Migrating, <40=Legacy-Heavy>,
   "cloud_migration_maturity": "<Cloud-Native | Hybrid | Migrating | Legacy-Heavy | Unknown>",
   "automation_index": "<Hyper-Automated | High | Medium | Low>",
-  "devops_tools": "<specific CI/CD and DevOps tools found: e.g. Jenkins, GitHub Actions, GitLab CI, Terraform, Ansible>",
-  "programming_languages": "<languages from job postings — comma separated: e.g. Java, Python, TypeScript, Go, C++>",
-  "frameworks_tools": "<frameworks and tools: e.g. Spring Boot, React, Node.js, Kubernetes, Kafka, Spark>",
+  "devops_tools": "<specific CI/CD and DevOps tools: e.g. Jenkins, GitHub Actions, GitLab CI, Terraform, Ansible>",
+  "programming_languages": "<from job postings — comma separated: e.g. Java, Python, TypeScript, Go, C++>",
+  "frameworks_tools": "<e.g. Spring Boot, React, Node.js, Kubernetes, Kafka, Spark>",
   "ai_ml_platforms": "<AI/ML stack: TensorFlow, PyTorch, Azure ML, SageMaker, LangChain, or '-'>",
-  "enterprise_vendors": "<SAP, Salesforce, Oracle, ServiceNow, Microsoft, Workday etc. in use>",
-  "modern_vs_legacy_split": "<estimate e.g. '70% modern cloud / 30% legacy' — base on job posting signals>",
+  "enterprise_vendors": "<SAP, Salesforce, Oracle, ServiceNow, Microsoft, Workday etc.>",
+  "modern_vs_legacy_split": "<estimate e.g. '70% modern cloud / 30% legacy' — based on job posting evidence>",
   "digital_maturity_level": "<Foundational | Developing | Advanced | Leading>",
-  "tech_highlights": "<2-3 sentence summary of the tech posture — cite specific tools and evidence found>",
-  "source": "<URL of job posting, tech blog, or news article used>"
+  "tech_highlights": "<2-3 sentence summary citing specific tools and sources found>",
+  "source": "<URL of job posting, tech blog, GitHub, or news article used>"
 }}
 Return ONLY the JSON object."""
 
@@ -613,12 +626,16 @@ async def run_gcc_enrichment(
                 locations = loc_result2 if isinstance(loc_result2, list) and len(loc_result2) > 0 else []
 
             if not locations:
-                # Last resort: synthesize entries for the most common GCC hubs if user gave no filter
+                # Last resort: synthesize entries for the most common worldwide GCC hubs
                 if loc_filter:
                     fallback_locs = [loc_filter]
                 else:
-                    # Use major GCC hubs as seed — better than single "India" default
-                    fallback_locs = ["India", "Poland", "Philippines", "Malaysia", "China"]
+                    # Balanced global fallback — Americas + Europe + Asia (not India-only)
+                    fallback_locs = [
+                        "Bengaluru, India", "Hyderabad, India",
+                        "Warsaw, Poland", "Mexico City, Mexico",
+                        "Kuala Lumpur, Malaysia", "Manila, Philippines",
+                    ]
                 locations = [
                     {"gcc_name": f"{cname} GCC", "gcc_location": fl, "city": fl.split(",")[0].strip(),
                      "country": fl.split(",")[-1].strip() if "," in fl else fl,
