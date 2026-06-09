@@ -152,7 +152,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
             return []
         try:
             # http_options timeout ensures the call fails fast rather than hanging indefinitely.
-            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": CALL_TIMEOUT})
+            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options=types.HttpOptions(timeout=CALL_TIMEOUT))
             response = client.models.generate_content(
                 model=model,
                 contents=prompt,
@@ -1027,28 +1027,15 @@ async def run_aftermarket_deep_dive(
         await asyncio.sleep(0)
 
         research_text = ""
-        RESEARCH_TIMEOUT = 120
-        elapsed_r = 0
-        while not ready_research_future.done() and elapsed_r < RESEARCH_TIMEOUT:
-            try:
-                research_text = await asyncio.wait_for(asyncio.shield(ready_research_future), timeout=25)
-                break
-            except asyncio.TimeoutError:
-                elapsed_r += 25
-                yield {"type": "heartbeat", "message": f"🔍 Searching for evidence… ({elapsed_r}s)"}
-                await asyncio.sleep(0)
-
-        if ready_research_future.done() and not research_text:
-            try:
-                research_text = ready_research_future.result() or ""
-            except Exception as e:
-                logger.error(f"readiness_research error: {e}")
-
-        if not research_text:
-            ready_research_future.cancel()
-            logger.warning("readiness_research: timed out — proceeding with empty evidence")
-
-        research_text = research_text if isinstance(research_text, str) else ""
+        try:
+            research_text = await asyncio.wait_for(ready_research_future, timeout=100)
+            research_text = research_text if isinstance(research_text, str) else ""
+        except asyncio.TimeoutError:
+            research_text = ""
+            logger.warning("readiness_research: timed out after 100s — proceeding with cap_data only")
+        except Exception as e:
+            research_text = ""
+            logger.error(f"readiness_research failed: {e} — proceeding with cap_data only")
 
         # ── Step 4b: Score both batches in parallel (no search, ~10-15s each) ──
         yield {"type": "heartbeat", "message": "🎯 Scoring readiness for all 9 modules from real evidence…"}
