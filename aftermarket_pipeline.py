@@ -537,26 +537,31 @@ READINESS_FIELDS = [
 
 
 def _readiness_research_prompt(company_name: str, industry: str) -> str:
-    """Step 1: Search-grounded signal gathering — vendor deployment comes from cap_data instead.
-    Searches only for IT investment, exec agenda, budget, and hiring signals."""
-    return f"""You are a technology intelligence analyst. Use Google Search to find REAL evidence.
+    """Step 1: Broad search-grounded signal gathering for IT investment, exec, budget, hiring."""
+    return f"""You are a technology intelligence analyst researching {company_name} ({industry}).
 
-COMPANY: {company_name} ({industry})
+Use Google Search to find REAL, RECENT evidence on the following topics. Search broadly — use company name, abbreviations, and parent/subsidiary names.
 
-Run ALL of these searches and report ONLY what you actually find:
-1. "{company_name}" aftermarket OR warranty OR "field service" OR "dealer management" technology 2023 OR 2024 OR 2025
-2. "{company_name}" CTO OR CIO OR "digital transformation" OR "technology investment" 2024 OR 2025
-3. "{company_name}" IT budget OR technology spend OR RFP OR tender 2024 OR 2025
-4. "{company_name}" hiring "software engineer" OR "technology" OR "digital" job postings 2024
+SEARCH TOPICS:
+1. Digital transformation, IT modernisation, ERP/CRM/field service technology investments by {company_name} (2022–2025)
+2. Technology announcements, partnerships with software vendors, system implementations at {company_name}
+3. CTO, CIO, CDO, VP Technology statements or interviews about {company_name}'s technology strategy
+4. Annual reports, earnings calls, investor presentations mentioning IT spend or digital at {company_name}
+5. Job postings: {company_name} hiring for IT, software, data, digital roles (2023–2025)
+6. News: {company_name} RFP, tender, contract award for technology systems
 
-For each search, report ONLY confirmed findings with their source URL.
-Format: [CATEGORY] Finding. Source: URL
+For EVERY piece of evidence found, record:
+[CATEGORY] One-sentence finding with specific detail. Source: <URL>
 
-Categories: IT_INVESTMENT, EXEC_AGENDA, BUDGET_SIGNAL, HIRING_SIGNAL
+Use these categories:
+- IT_INVESTMENT: technology system purchases, ERP/CRM/platform go-lives, vendor contracts
+- EXEC_AGENDA: executive quotes or strategy statements on digital/technology
+- BUDGET_SIGNAL: IT budget announcements, RFPs, tenders, capex for technology
+- HIRING_SIGNAL: open roles or hiring patterns in technology/digital/software
 
-If a search returns nothing relevant for a category, write: [CATEGORY] No evidence found.
+If genuinely nothing found for a category after searching: [CATEGORY] No public evidence found.
 
-Do NOT invent or infer. Only report what search results actually show."""
+Report every real finding — aim for at least 2–3 findings per category if they exist."""
 
 
 def _readiness_score_prompt(company_name: str, industry: str, target_vendor: str,
@@ -589,51 +594,61 @@ def _readiness_score_prompt(company_name: str, industry: str, target_vendor: str
             vendor_lines.append(f"  {d}: {vendor} NOT found — current tech: {', '.join(info['techs'][:2])}")
     vendor_context = "\n".join(vendor_lines) if vendor_lines else f"  No capabilities data available for {vendor}."
 
-    return f"""You are a vendor displacement readiness analyst.
+    pre_research = research_text.strip() if research_text and research_text.strip() else ""
+
+    return f"""You are a vendor displacement readiness analyst. Use Google Search to find evidence for each module below.
 
 COMPANY: {company_name} ({industry})
 VENDOR BEING EVALUATED: {vendor}
 
-VENDOR DEPLOYMENT — FROM CAPABILITIES RESEARCH (authoritative, already verified):
+VENDOR DEPLOYMENT — ALREADY VERIFIED (use for existing_rel_score only):
 {vendor_context}
 
-OTHER SIGNALS — FROM LIVE SEARCH (use ONLY what is listed here):
-{research_text or "No search evidence available."}
+PRE-FETCHED SIGNALS (may be partial — search for more if needed):
+{pre_research or "Not available — use Google Search to find evidence."}
 
 SPEND BY MODULE:
 {spend_lines}
 
-SCORING RULES — base scores ONLY on the evidence sections above:
-- existing_rel_score (weight 0.30): Use VENDOR DEPLOYMENT section only. DEPLOYED→≥75. Mentioned/partial→40-70. Not found→≤20.
-- it_signals_score (weight 0.15): IT_INVESTMENT or HIRING_SIGNAL findings from OTHER SIGNALS for this domain?
-- company_signals_score (weight 0.20): IT_INVESTMENT findings from OTHER SIGNALS for this domain?
-- exec_signals_score (weight 0.15): EXEC_AGENDA findings from OTHER SIGNALS for this domain?
-- budget_signals_score (weight 0.20): BUDGET_SIGNAL findings from OTHER SIGNALS for this domain?
-- weighted_readiness = (existing_rel_score×0.30)+(it_signals_score×0.15)+(company_signals_score×0.20)+(exec_signals_score×0.15)+(budget_signals_score×0.20)
-- displacement_opp: "High" if weighted_readiness≥65, "Medium" if 40-64, "Low" if <40
-- existing_rel_evidence: quote from VENDOR DEPLOYMENT section, or "Not deployed"
-- other evidence fields: quote the exact [CATEGORY] finding from OTHER SIGNALS, or "No evidence found"
-- total_domain_spend: copy from SPEND BY MODULE, else use industry benchmark
-- vendor_adjusted_tam = total_domain_spend × weighted_readiness/100 (apply to both ends of range)
-- tam_rationale: midpoint = (low+high)/2, then × readiness%
+INSTRUCTIONS:
+For each module in MODULES, search Google for recent (2022–2025) evidence specific to {company_name}:
+- IT_INVESTMENT: technology implementations, ERP/platform go-lives, vendor contracts in this domain
+- EXEC_AGENDA: executive statements on digital/technology strategy relevant to this domain
+- BUDGET_SIGNAL: IT budget, RFP, tender, capex for technology in this domain
+- HIRING_SIGNAL: open roles or hiring in technology/digital relevant to this domain
+
+Use PRE-FETCHED SIGNALS above first. If a signal type is missing or thin, search Google now for that specific signal for {company_name}.
+
+SCORING RULES:
+- existing_rel_score (0.30 weight): VENDOR DEPLOYMENT only. DEPLOYED→≥75. Partial/mentioned→40-70. Not found→≤20.
+- it_signals_score (0.15): IT_INVESTMENT or HIRING_SIGNAL for this specific domain
+- company_signals_score (0.20): IT_INVESTMENT or growth signals for this domain
+- exec_signals_score (0.15): EXEC_AGENDA for this domain
+- budget_signals_score (0.20): BUDGET_SIGNAL for this domain
+- weighted_readiness = (existing_rel×0.30)+(it×0.15)+(company×0.20)+(exec×0.15)+(budget×0.20)
+- displacement_opp: High if ≥65, Medium if 40–64, Low if <40
+- For evidence fields: quote the actual finding with source URL, or "No evidence found after search"
+- total_domain_spend: copy from SPEND BY MODULE, else industry benchmark
+- vendor_adjusted_tam = total_domain_spend × weighted_readiness/100
+- tam_rationale: show midpoint × readiness% calculation
 
 MODULES: {modules_list}
 
-Return ONLY a JSON array — {n} entries, one per module:
+Return ONLY a JSON array — exactly {n} objects:
 [
   {{
     "domain": "<module name>",
     "current_system": "<known system or Unknown>",
     "existing_rel_score": <0-100>,
-    "existing_rel_evidence": "<exact quote from evidence above or No evidence found>",
+    "existing_rel_evidence": "<quote from VENDOR DEPLOYMENT or Not deployed>",
     "it_signals_score": <0-100>,
-    "it_signals_evidence": "<exact quote from evidence above or No evidence found>",
+    "it_signals_evidence": "<finding with source URL or No evidence found after search>",
     "company_signals_score": <0-100>,
-    "company_signals_evidence": "<exact quote from evidence above or No evidence found>",
+    "company_signals_evidence": "<finding with source URL or No evidence found after search>",
     "exec_signals_score": <0-100>,
-    "exec_signals_evidence": "<exact quote from evidence above or No evidence found>",
+    "exec_signals_evidence": "<finding with source URL or No evidence found after search>",
     "budget_signals_score": <0-100>,
-    "budget_signals_evidence": "<exact quote from evidence above or No evidence found>",
+    "budget_signals_evidence": "<finding with source URL or No evidence found after search>",
     "weighted_readiness": <0-100>,
     "displacement_opp": "<High|Medium|Low>",
     "total_domain_spend": "<from SPEND BY MODULE or benchmark>",
@@ -1056,22 +1071,23 @@ async def run_aftermarket_deep_dive(
             for r in (agg_rows if isinstance(agg_rows, list) else [])[:4]
         )
 
-        # Pass all_cap_rows so existing_rel scores use the already-researched capabilities data
+        # Search-grounded scoring: model can search for domain-specific evidence beyond research_text
+        has_research = bool(research_text and "No public evidence found" not in research_text)
         score_future_a = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_score_prompt(company_name, industry, target_vendor, research_text, all_cap_rows, _BATCH_A, spend_lines_for_score, agg_ref_for_score),
-            False, "readiness_score_a", 16384, "gemini-2.5-flash",
+            True, "readiness_score_a", 16384, "gemini-2.5-flash",
         )
         score_future_b = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_score_prompt(company_name, industry, target_vendor, research_text, all_cap_rows, _BATCH_B, spend_lines_for_score, agg_ref_for_score),
-            False, "readiness_score_b", 16384, "gemini-2.5-flash",
+            True, "readiness_score_b", 16384, "gemini-2.5-flash",
         )
 
         collected: list = []
         for label_s, fut in [("readiness_score_a", score_future_a), ("readiness_score_b", score_future_b)]:
             try:
-                rows = await asyncio.wait_for(fut, timeout=90)
+                rows = await asyncio.wait_for(fut, timeout=150)
                 if isinstance(rows, list):
                     collected.extend(rows)
                     logger.info(f"{label_s} returned {len(rows)} rows")
