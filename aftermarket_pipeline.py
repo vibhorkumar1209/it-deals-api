@@ -151,13 +151,19 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
             logger.warning(f"Gemini [{label}] total budget {TOTAL_BUDGET}s exceeded — giving up")
             return []
         try:
-            # http_options timeout ensures the call fails fast rather than hanging indefinitely.
-            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options=types.HttpOptions(timeout=CALL_TIMEOUT))
+            # Build http_options — try typed class first, fall back to dict.
+            try:
+                http_opts = types.HttpOptions(timeout=CALL_TIMEOUT)
+            except Exception:
+                http_opts = {"timeout": CALL_TIMEOUT}
+            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options=http_opts)
+            logger.info(f"Gemini [{label}] attempt {attempt}/{MAX_RETRIES} starting (model={model})")
             response = client.models.generate_content(
                 model=model,
                 contents=prompt,
                 config=types.GenerateContentConfig(**config_kwargs),
             )
+            logger.info(f"Gemini [{label}] attempt {attempt} succeeded")
             break
         except Exception as e:
             err = str(e)
@@ -175,7 +181,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
                 logger.warning(f"Gemini [{label}] attempt {attempt}/{MAX_RETRIES} failed ({err[:60]}), retry in {wait:.0f}s")
                 _time.sleep(wait)
                 continue
-            logger.error(f"Aftermarket Gemini [{label}]: {err[:120]}")
+            logger.error(f"Aftermarket Gemini [{label}] failed (attempt {attempt}): {err[:200]}")
             return []
     else:
         return []
@@ -1068,32 +1074,16 @@ async def run_aftermarket_deep_dive(
         )
 
         collected: list = []
-        SCORE_TIMEOUT = 90
-        elapsed_s = 0
-        futures_pending = {score_future_a, score_future_b}
-        while futures_pending and elapsed_s < SCORE_TIMEOUT:
-            await asyncio.sleep(15)
-            elapsed_s += 15
-            done_now = {f for f in futures_pending if f.done()}
-            for f in done_now:
-                try:
-                    rows = f.result()
-                    if isinstance(rows, list):
-                        collected.extend(rows)
-                except Exception as e:
-                    logger.error(f"readiness score batch error: {e}")
-            futures_pending -= done_now
-
-        for f in futures_pending:
-            if f.done():
-                try:
-                    rows = f.result()
-                    if isinstance(rows, list):
-                        collected.extend(rows)
-                except Exception:
-                    pass
-            else:
-                f.cancel()
+        for label_s, fut in [("readiness_score_a", score_future_a), ("readiness_score_b", score_future_b)]:
+            try:
+                rows = await asyncio.wait_for(fut, timeout=90)
+                if isinstance(rows, list):
+                    collected.extend(rows)
+                    logger.info(f"{label_s} returned {len(rows)} rows")
+            except asyncio.TimeoutError:
+                logger.warning(f"{label_s} timed out after 90s")
+            except Exception as e:
+                logger.error(f"{label_s} failed: {e}")
 
         _MODULE_ORDER = {m: i for i, m in enumerate(_ALL_MODULES)}
         readiness_rows = sorted(collected, key=lambda r: _MODULE_ORDER.get(r.get("domain", ""), 99))
