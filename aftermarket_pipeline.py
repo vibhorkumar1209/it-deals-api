@@ -939,7 +939,7 @@ async def run_aftermarket_deep_dive(
     all_cap_rows = []
     pending_caps = list(enumerate(cap_futures))
     elapsed = 0
-    PARALLEL_TIMEOUT = 180  # 3 min total for all parallel calls
+    PARALLEL_TIMEOUT = 90  # 90s max — slow domains are dropped, pipeline moves on
 
     # Poll until all futures done or timeout
     completed_caps = set()
