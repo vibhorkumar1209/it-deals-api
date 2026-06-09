@@ -121,7 +121,7 @@ AFTERMARKET_DOMAINS = [
 
 # ── Shared Gemini call ────────────────────────────────────────────────────────
 
-def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_tokens: int = 16384, model: str = "gemini-2.5-flash", return_raw: bool = False):
+def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_tokens: int = 16384, model: str = "gemini-2.5-flash", return_raw: bool = False, temperature: float = 0.15):
     try:
         from google import genai
         from google.genai import types
@@ -131,7 +131,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
     if not GOOGLE_AI_KEY:
         return []
 
-    config_kwargs = dict(temperature=0.15, max_output_tokens=max_output_tokens)
+    config_kwargs = dict(temperature=temperature, max_output_tokens=max_output_tokens)
     if use_search:
         config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
     # Only disable thinking for 2.5 models — 2.0-flash has no thinking capability
@@ -461,62 +461,61 @@ Return ONLY the raw JSON array. No prose. No markdown.
 
 def _aggregate_spend_prompt(company_name: str, industry: str) -> str:
     ind = f" ({industry})" if industry else ""
-    return f"""You are an enterprise IT financial analyst. Use Google Search to find VERIFIED, CURRENT data.
+    return f"""You are an enterprise IT financial analyst. Use Google Search. Follow EXACTLY the steps below — do not deviate.
 
 COMPANY: {company_name}{ind}
 
-STEP 1 — Find actual revenue (search these):
-- "{company_name}" revenue 2024 OR 2025 annual report OR earnings
-- "{company_name}" fiscal year 2024 financial results
-- site:annualreports.com OR site:ir.* "{company_name}" 2024
+━━ STEP 1: FIND VERIFIED ANNUAL REVENUE ━━
+Search: "{company_name}" annual revenue 2024 OR 2025 site:annualreports.com OR site:ir.*.com OR site:businesswire.com OR site:prnewswire.com
+Search: "{company_name}" fiscal year 2024 earnings results revenue
 
-STEP 2 — Find IT/technology spend data (search these):
-- "{company_name}" IT spend technology investment 2024 OR 2025
-- "{company_name}" digital transformation budget 2024
-- "{company_name}" cloud computing spend AWS Azure 2024 OR 2025
-- "{company_name}" AI artificial intelligence investment 2024 OR 2025
+Record: REVENUE = <exact figure e.g. $16.2B> from <source URL>
+If you find a range (e.g. $15.8B–$16.5B), use the MIDPOINT.
+If revenue is not found after searching, state clearly and estimate from industry context.
 
-STEP 3 — Apply LATEST 2024/2025 industry benchmarks (verify benchmark source via search):
-- IT spend as % of revenue: manufacturing/industrial ~2.5–3.5%, automotive OEM ~2.0–3.0%, tech/software ~8–12%
-- AI spend: ~10–15% of IT budget (2025 Gartner/IDC benchmarks)
-- Cloud spend: ~28–35% of IT budget (2024 Flexera State of Cloud)
-- Aftermarket/service IT: ~15–25% of total IT budget for OEMs with service business
+━━ STEP 2: APPLY FIXED BENCHMARK MULTIPLIERS ━━
+Use EXACTLY these multipliers (do not change them — consistency is critical):
+  IT Spend     = REVENUE × 2.8%   (Gartner 2024 avg for manufacturing/industrial OEMs)
+  AI Spend     = IT Spend × 12%   (IDC 2025: avg AI allocation within IT budget)
+  Cloud Spend  = IT Spend × 30%   (Flexera 2024 State of Cloud: avg cloud share of IT)
+  Aftermarket IT = IT Spend × 20% (industry norm: aftermarket/service operations share of IT)
 
-CALCULATION RULES:
-1. Use the ACTUAL verified revenue figure found in Step 1 as the base
-2. Apply the MOST RELEVANT industry benchmark for this company's sector
-3. Cross-check: if IT deals / announcements from search suggest a higher/lower figure, adjust accordingly
-4. Cite the actual source URL for revenue and the benchmark source
+━━ STEP 3: SHOW THE ARITHMETIC ━━
+Write out each calculation explicitly:
+  IT Spend: $REVENUE × 2.8% = $RESULT → round to nearest $5M → "$X–$Y" (±10% range)
+  AI Spend: $IT × 12% = $RESULT → "$X–$Y"
+  Cloud:    $IT × 30% = $RESULT → "$X–$Y"
+  Aftermarket IT: $IT × 20% = $RESULT → "$X–$Y"
 
-Return ONLY a JSON array:
+━━ OUTPUT ━━
+Return ONLY this JSON array — 4 objects, no extras:
 [
   {{
     "spend_type": "IT Spend",
-    "estimate": "<e.g. '$420M–$480M'>",
-    "basis": "<benchmark%> of <verified revenue from source> — <benchmark source name and year>",
-    "source": "<URL to annual report, earnings release, or verified benchmark>"
+    "estimate": "<$X–$Y computed above>",
+    "basis": "REVENUE × 2.8% = <exact calc>. Revenue: <verified figure> (Gartner 2024 manufacturing benchmark)",
+    "source": "<URL to revenue source>"
   }},
   {{
     "spend_type": "AI Spend",
-    "estimate": "<e.g. '$42M–$72M'>",
-    "basis": "<10–15%> of IT budget per <2025 benchmark source>",
-    "source": "<URL>"
+    "estimate": "<$X–$Y>",
+    "basis": "IT Spend × 12% = <exact calc> (IDC 2025 AI within IT budget)",
+    "source": "<URL to IDC or Gartner benchmark>"
   }},
   {{
     "spend_type": "Cloud Spend",
-    "estimate": "<e.g. '$120M–$165M'>",
-    "basis": "<28–35%> of IT budget per <2024 Flexera or equivalent>",
-    "source": "<URL>"
+    "estimate": "<$X–$Y>",
+    "basis": "IT Spend × 30% = <exact calc> (Flexera 2024 State of Cloud)",
+    "source": "<URL to Flexera benchmark>"
   }},
   {{
     "spend_type": "Aftermarket IT Spend",
-    "estimate": "<e.g. '$65M–$110M'>",
-    "basis": "<15–25%> of IT budget allocated to aftermarket/service operations",
-    "source": "<URL>"
+    "estimate": "<$X–$Y>",
+    "basis": "IT Spend × 20% = <exact calc> (aftermarket/service operations share of IT budget)",
+    "source": "<URL to revenue source>"
   }}
 ]
-
-Return ONLY the raw JSON array. Every estimate must be grounded in verified revenue data."""
+Return ONLY the JSON array. Same company = same numbers every time."""
 
 
 # ── Table 4: Readiness Matrix + TAM ──────────────────────────────────────────
@@ -915,7 +914,7 @@ async def run_aftermarket_deep_dive(
 
     # Phase 1: Fire search-grounded calls in parallel (capabilities + aggregate spend + IT deals)
     cap_futures    = [loop.run_in_executor(None, _gemini_call_sync, _cap_prompt(company_name, dom, industry, target_vendor), True, f"cap_{dom}") for dom in AFTERMARKET_DOMAINS] if "capabilities" in run else []
-    agg_future     = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend") if "agg_spend" in run else None
+    agg_future     = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend", 4096, "gemini-2.5-flash", False, 0.0) if "agg_spend" in run else None
     deals_future   = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals") if "spend_deals" in run else None
 
     # If spend_module (but NOT readiness-only) is requested without capabilities,
@@ -1031,7 +1030,7 @@ async def run_aftermarket_deep_dive(
         spend_future = loop.run_in_executor(
             None, _gemini_call_sync,
             _spend_module_prompt(company_name, industry, all_cap_rows, agg_rows if isinstance(agg_rows, list) else []),
-            False, "spend_module"
+            False, "spend_module", 8192, "gemini-2.5-flash", False, 0.0
         )
 
     # Collect IT deals in parallel while spend_module synthesises
