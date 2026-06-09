@@ -1044,38 +1044,88 @@ async def run_aftermarket_deep_dive(
         yield {"type": "heartbeat", "message": f"✅ Context collected: {len(all_cap_rows)} signals for synthesis"}
         await asyncio.sleep(0)
 
-    yield {"type": "heartbeat", "message": f"✅ Capabilities: {len(all_cap_rows)} rows — launching Phase 2 synthesis…"}
+    yield {"type": "heartbeat", "message": f"✅ Capabilities: {len(all_cap_rows)} rows — launching Phase 2…"}
     await asyncio.sleep(0)
 
-    # Collect aggregate spend (needed as context for spend_module synthesis)
+    # ── Collect agg_spend (already running since t=0, likely done) ────────────
     if agg_future:
         agg_rows = await _collect_future(agg_future, "agg_spend", timeout=90)
     elif "spend_module" in run:
-        # Fetch aggregate spend as context for spend_module synthesis
-        yield {"type": "heartbeat", "message": "💰 Fetching spend context for Phase 2…"}
+        yield {"type": "heartbeat", "message": "💰 Fetching spend context…"}
         await asyncio.sleep(0)
         agg_rows = await _run_async(_aggregate_spend_prompt(company_name, industry), True, "agg_context", timeout=90)
     else:
         agg_rows = []
-    # Only emit aggregate_spend_row events if agg_spend is explicitly requested
-    # (otherwise it's just context for Phase 2 — don't add duplicate cards to frontend)
     if "agg_spend" in run:
         for row in (agg_rows if isinstance(agg_rows, list) else []):
             if isinstance(row, dict):
                 yield {"type": "aggregate_spend_row", "row": row}
                 await asyncio.sleep(0.04)
-    yield {"type": "heartbeat", "message": f"✅ Aggregate spend: {len(agg_rows) if isinstance(agg_rows, list) else 0} categories — now synthesising spend by module & readiness…"}
+    yield {"type": "heartbeat", "message": f"✅ Aggregate spend ready — launching spend synthesis + readiness in parallel…"}
     await asyncio.sleep(0)
 
-    # Phase 2a: Spend by module (no search grounding — pure synthesis from cap + agg data)
+    # ── NOW collect research (was running since t=0) ──────────────────────────
+    # Budget: research started at t=0, cap loop ran ~90s, so research has had ~90s already.
+    # Give it 30s more — if not done by now it's probably stuck.
+    research_text = ""
+    if ready_research_future and "readiness" in run:
+        try:
+            research_text = await asyncio.wait_for(ready_research_future, timeout=30)
+            research_text = research_text if isinstance(research_text, str) else ""
+            logger.info(f"readiness_research collected: {len(research_text)} chars")
+        except asyncio.TimeoutError:
+            research_text = ""
+            logger.warning("readiness_research: still not done after 120s total — using cap_data only")
+        except Exception as e:
+            research_text = ""
+            logger.warning(f"readiness_research failed: {e}")
+
+    # ── Launch spend_module AND readiness scoring AT THE SAME TIME ────────────
+    # Critical: do NOT wait for spend_module before starting readiness.
+    # Use agg_rows as spend reference for readiness TAM (accurate enough).
+    # spend_module rows stream out independently once done.
+    agg_list = agg_rows if isinstance(agg_rows, list) else []
+    effective_spend = existing_spend_rows or []  # caller passes these when regen-only
+
     if "spend_module" in run:
         spend_future = loop.run_in_executor(
             None, _gemini_call_sync,
-            _spend_module_prompt(company_name, industry, all_cap_rows, agg_rows if isinstance(agg_rows, list) else []),
+            _spend_module_prompt(company_name, industry, all_cap_rows, agg_list),
             False, "spend_module", 8192, "gemini-2.5-flash", False, 0.0
         )
 
-    # Collect IT deals in parallel while spend_module synthesises
+    # Build spend lines from agg_rows for readiness TAM (module-level spend not yet available)
+    spend_lines_for_ready = "\n".join(
+        f"  {r.get('domain','')}: {r.get('current_spend','')}"
+        for r in effective_spend if r.get("domain") and r.get("current_spend")
+    ) or "  (use industry benchmarks — spend_module not yet available)"
+    agg_ref_for_ready = " | ".join(
+        f"{r.get('spend_type')}: {r.get('estimate','?')}"
+        for r in agg_list[:4]
+    )
+
+    # ── Launch readiness scoring NOW (search-grounded, parallel with spend_module) ──
+    readiness_rows = []
+    if "readiness" in run:
+        yield {"type": "heartbeat", "message": "🎯 Scoring readiness with live search (parallel with spend synthesis)…"}
+        await asyncio.sleep(0)
+
+        score_a = loop.run_in_executor(
+            None, _gemini_call_sync,
+            _readiness_score_prompt(company_name, industry, target_vendor,
+                                    research_text, all_cap_rows, _BATCH_A,
+                                    spend_lines_for_ready, agg_ref_for_ready),
+            True, "readiness_score_a", 16384, "gemini-2.5-flash",
+        )
+        score_b = loop.run_in_executor(
+            None, _gemini_call_sync,
+            _readiness_score_prompt(company_name, industry, target_vendor,
+                                    research_text, all_cap_rows, _BATCH_B,
+                                    spend_lines_for_ready, agg_ref_for_ready),
+            True, "readiness_score_b", 16384, "gemini-2.5-flash",
+        )
+
+    # ── Collect IT deals (already running since t=0) ──────────────────────────
     spend_deal_rows = await _collect_future(deals_future, "spend_deals", timeout=90) if deals_future else []
     for row in (spend_deal_rows if isinstance(spend_deal_rows, list) else []):
         if isinstance(row, dict):
@@ -1084,7 +1134,7 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"✅ IT deals: {len(spend_deal_rows) if isinstance(spend_deal_rows, list) else 0} deals"}
     await asyncio.sleep(0)
 
-    # Collect spend by module — must complete BEFORE launching readiness so TAM uses real spend figures
+    # ── Collect spend_module ──────────────────────────────────────────────────
     spend_rows = await _collect_future(spend_future, "spend_module", timeout=120) if spend_future else []
     for row in (spend_rows if isinstance(spend_rows, list) else []):
         if isinstance(row, dict):
@@ -1093,106 +1143,67 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": f"✅ Spend by module: {len(spend_rows) if isinstance(spend_rows, list) else 0} rows"}
     await asyncio.sleep(0)
 
-    # Readiness was already launched at startup — nothing to do here.
-
+    # ── Collect readiness scoring (was running in parallel with spend_module) ──
     # ── Step 4: Readiness Matrix + TAM ───────────────────────────────────────
-    yield {"type": "heartbeat", "message": "🎯 Table 4: Scoring readiness for all 9 modules…"}
+    yield {"type": "heartbeat", "message": "🎯 Collecting readiness results…"}
     await asyncio.sleep(0)
 
-    readiness_rows = []
     if "readiness" in run:
-
-        # Collect research text — was launched at t=0, likely already done
-        research_text = ""
-        if ready_research_future:
-            try:
-                research_text = await asyncio.wait_for(ready_research_future, timeout=60)
-                research_text = research_text if isinstance(research_text, str) else ""
-                logger.info(f"readiness_research: {len(research_text)} chars")
-            except asyncio.TimeoutError:
-                research_text = ""
-                logger.warning("readiness_research: timed out after 60s — using cap_data only")
-            except Exception as e:
-                research_text = ""
-                logger.warning(f"readiness_research failed: {e}")
-
-        effective_spend = (spend_rows if isinstance(spend_rows, list) and spend_rows
-                           else (existing_spend_rows or []))
-        agg_list = agg_rows if isinstance(agg_rows, list) else []
-
-        # ── Primary: both batches in parallel, NO search grounding ──────────
-        # use_search=False eliminates all 503 retries and the 300s TOTAL_BUDGET risk.
-        # Model inference completes in 10-20s. Always reliable.
-        yield {"type": "heartbeat", "message": "🎯 Running readiness scoring (no-search, fast parallel batches)…"}
-        await asyncio.sleep(0)
-
-        p_a = loop.run_in_executor(
-            None, _gemini_call_sync,
-            _readiness_tam_prompt(company_name, industry, target_vendor,
-                                  all_cap_rows, agg_list, effective_spend, _BATCH_A),
-            False, "readiness_a", 16384, "gemini-2.5-flash",
-        )
-        p_b = loop.run_in_executor(
-            None, _gemini_call_sync,
-            _readiness_tam_prompt(company_name, industry, target_vendor,
-                                  all_cap_rows, agg_list, effective_spend, _BATCH_B),
-            False, "readiness_b", 16384, "gemini-2.5-flash",
-        )
-
         collected: list = []
         try:
+            # Both batches have been running since before spend_module — should be nearly done
+            remaining_budget = 180  # generous: they've had ~120s head start already
             results_ab = await asyncio.wait_for(
-                asyncio.gather(p_a, p_b, return_exceptions=True),
-                timeout=90,   # no-search inference is fast — 90s is generous
+                asyncio.gather(score_a, score_b, return_exceptions=True),
+                timeout=remaining_budget,
             )
             for i, res in enumerate(results_ab):
+                label_s = f"readiness_score_{'a' if i==0 else 'b'}"
                 if isinstance(res, Exception):
-                    logger.error(f"readiness_{'a' if i==0 else 'b'} raised: {res}")
+                    logger.error(f"{label_s} raised: {res}")
                 elif isinstance(res, list) and res:
                     collected.extend(res)
-                    logger.info(f"readiness_{'a' if i==0 else 'b'} returned {len(res)} rows")
+                    logger.info(f"{label_s} returned {len(res)} rows")
                 else:
-                    logger.warning(f"readiness_{'a' if i==0 else 'b'} empty")
+                    logger.warning(f"{label_s} empty")
         except asyncio.TimeoutError:
-            logger.warning("readiness primary: timed out after 90s")
+            logger.warning("readiness scoring timed out after 180s")
 
-        # ── Retry: if either batch is missing, retry only the empty one(s) ──
-        got_a = len([r for r in collected if r.get("domain","") in _BATCH_A]) > 0
-        got_b = len([r for r in collected if r.get("domain","") in _BATCH_B]) > 0
-
+        # ── Retry only empty batches ──────────────────────────────────────────
+        got_a = any(r.get("domain","") in _BATCH_A for r in collected)
+        got_b = any(r.get("domain","") in _BATCH_B for r in collected)
         if not got_a or not got_b:
-            retry_futs = []
-            retry_labels = []
+            yield {"type": "heartbeat", "message": "🔄 Retrying empty readiness batch(es) with search…"}
+            await asyncio.sleep(0)
+            retry_futs, retry_labels = [], []
             if not got_a:
                 retry_futs.append(loop.run_in_executor(
                     None, _gemini_call_sync,
-                    _readiness_tam_prompt(company_name, industry, target_vendor,
-                                          all_cap_rows, agg_list, effective_spend, _BATCH_A),
-                    False, "readiness_retry_a", 16384, "gemini-2.5-flash",
+                    _readiness_score_prompt(company_name, industry, target_vendor,
+                                            research_text, all_cap_rows, _BATCH_A,
+                                            spend_lines_for_ready, agg_ref_for_ready),
+                    True, "readiness_retry_a", 16384, "gemini-2.5-flash",
                 ))
                 retry_labels.append("retry_a")
             if not got_b:
                 retry_futs.append(loop.run_in_executor(
                     None, _gemini_call_sync,
-                    _readiness_tam_prompt(company_name, industry, target_vendor,
-                                          all_cap_rows, agg_list, effective_spend, _BATCH_B),
-                    False, "readiness_retry_b", 16384, "gemini-2.5-flash",
+                    _readiness_score_prompt(company_name, industry, target_vendor,
+                                            research_text, all_cap_rows, _BATCH_B,
+                                            spend_lines_for_ready, agg_ref_for_ready),
+                    True, "readiness_retry_b", 16384, "gemini-2.5-flash",
                 ))
                 retry_labels.append("retry_b")
-
-            yield {"type": "heartbeat", "message": f"🔄 Retrying {len(retry_futs)} empty readiness batch(es)…"}
-            await asyncio.sleep(0)
             try:
                 retry_results = await asyncio.wait_for(
-                    asyncio.gather(*retry_futs, return_exceptions=True),
-                    timeout=90,
+                    asyncio.gather(*retry_futs, return_exceptions=True), timeout=120,
                 )
                 for lbl, res in zip(retry_labels, retry_results):
                     if isinstance(res, list) and res:
                         collected.extend(res)
                         logger.info(f"readiness_{lbl} returned {len(res)} rows")
             except asyncio.TimeoutError:
-                logger.warning("readiness retry timed out after 90s")
+                logger.warning("readiness retry timed out after 120s")
 
         _MODULE_ORDER = {m: i for i, m in enumerate(_ALL_MODULES)}
         readiness_rows = sorted(collected, key=lambda r: _MODULE_ORDER.get(r.get("domain", ""), 99))
