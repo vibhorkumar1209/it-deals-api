@@ -18,8 +18,9 @@ logger = logging.getLogger(__name__)
 GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
 
 TECH_STACK_FIELDS = [
-    {"key": "core_tech_category",  "label": "Core Tech Category"},
-    {"key": "tech_stack_category", "label": "Tech Stack Category"},
+    {"key": "tech_level1",         "label": "Level 1"},
+    {"key": "tech_level2",         "label": "Level 2"},
+    {"key": "tech_level3",         "label": "Level 3"},
     {"key": "vendor",              "label": "Tech"},
     {"key": "integration_partner", "label": "Implementation Partner"},
     {"key": "last_detected",       "label": "Last Detected"},
@@ -163,8 +164,9 @@ For each software tool found, return one JSON object with these EXACT keys:
 {fields_desc}
 
 Rules:
-- core_tech_category: Core Enterprise Operations | Customer-Facing & Revenue | Infrastructure & Cloud | Development & Engineering | Data Analytics & AI | Security & Compliance | Unclassified
-- tech_stack_category: use standard names like "ERP & Finance", "CRM & Account Management", "Cloud Hosting" etc., or a descriptive name if none fits
+- tech_level3: most specific technology category (e.g. "Core Banking Platform", "CRM", "Warranty Management", "Cloud IaaS", "SIEM", "Data Warehouse", "HR Management")
+- tech_level2: mid-level grouping of the tool's tech_level3 (e.g. "Enterprise Applications", "Aftermarket Technology", "Cloud Infrastructure", "Security Operations", "Analytics Platforms", "Human Capital Management")
+- tech_level1: top-level category (e.g. "Business Applications", "Operations Technology", "Infrastructure & Cloud", "Data & Analytics", "Security & Compliance", "People & Workforce")
 - integration_partner: SI/consulting firm that implemented it (e.g. "Accenture", "TCS") or "-"
 - last_detected: month-year only if known e.g. "Mar 2024", "Jan 2025" — or just year "2024" — or "-"
 - tech_install: numeric range only e.g. "500–2,000", "10,000–50,000", "100,000+" — or "-" if unknown

@@ -20,19 +20,29 @@ GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
 
 # Fixed output schema — matches the IT Deal Details preset in the frontend
 SCHEMA_FIELDS = [
-    {"key": "vendor",      "label": "Vendor Name",     "type": "string",
+    {"key": "vendor",          "label": "Vendor Name",        "type": "string",
      "description": "Technology vendor or service provider name"},
-    {"key": "deal_type",   "label": "Deal Type",        "type": "string",
-     "description": "e.g. ERP, Cloud Migration, Cybersecurity, Outsourcing, Managed Services"},
-    {"key": "deal_value",  "label": "Deal Value",       "type": "string",
-     "description": "Contract value in USD millions if publicly known"},
-    {"key": "date_signed", "label": "Last Detected",    "type": "date",
-     "description": "Announcement or contract signing date (YYYY-MM-DD or YYYY-MM or YYYY)"},
-    {"key": "deal_focus",  "label": "Deal Focus",       "type": "string",
-     "description": "Primary technology focus area(s) of the deal, e.g. AI, ML, Cloud, Big Data, Analytics, Cybersecurity, IoT, Automation, ERP, Digital Transformation"},
-    {"key": "description", "label": "Deal Description", "type": "string",
+    {"key": "tech_level3",     "label": "Level 3 Category",   "type": "string",
+     "description": "Most specific tech category (e.g. Warranty Management, Core Banking, CRM, ERP, Cloud IaaS)"},
+    {"key": "tech_level2",     "label": "Level 2 Category",   "type": "string",
+     "description": "Mid-level tech category derived from Level 3 (e.g. Aftermarket Tech, Enterprise Applications, Infrastructure)"},
+    {"key": "tech_level1",     "label": "Level 1 Category",   "type": "string",
+     "description": "Top-level tech category (e.g. Operations Technology, Business Applications, Infrastructure & Cloud)"},
+    {"key": "deal_value",      "label": "Deal Value",         "type": "string",
+     "description": "Contract value — use public figure if available, else estimate from benchmarks for this deal type and vendor"},
+    {"key": "start_date",      "label": "Start Date",         "type": "date",
+     "description": "Contract start or go-live date (YYYY-MM-DD or YYYY-MM or YYYY)"},
+    {"key": "end_date",        "label": "End Date",           "type": "date",
+     "description": "Contract end or renewal date if known"},
+    {"key": "duration_months", "label": "Duration (months)",  "type": "string",
+     "description": "Contract duration in months (e.g. '36'); derive from start+end dates if not stated"},
+    {"key": "last_detected",   "label": "Last Detected",      "type": "date",
+     "description": "Date of press release or announcement (YYYY-MM-DD or YYYY-MM or YYYY)"},
+    {"key": "deal_focus",      "label": "Deal Focus",         "type": "string",
+     "description": "1-3 primary technology focus tags e.g. AI, Cloud, ERP"},
+    {"key": "description",     "label": "Deal Description",   "type": "string",
      "description": "One sentence describing what was agreed"},
-    {"key": "source",      "label": "Source",           "type": "string",
+    {"key": "source",          "label": "Source",             "type": "string",
      "description": "URL of the press release, news article, or filing"},
 ]
 
@@ -142,15 +152,24 @@ Return ONLY a valid JSON array:
 
 FIELD RULES:
 - vendor: exact name (e.g. "Infosys", "SAP S/4HANA", "Microsoft Azure", "Trimble")
-- deal_type: IT Outsourcing | Cloud Migration | ERP | CRM | HCM | SCM | Cybersecurity |
-  Analytics/AI | Digital Transformation | Infrastructure | SaaS | IT Acquisition |
-  Joint Venture | Corporate Venture | Disinvestment | Managed Services | Other
-- deal_value: e.g. "$3.2 billion" — omit if not public
-- date_signed: YYYY-MM-DD or YYYY-MM or YYYY
-- deal_focus: 1-3 primary technology focus tags from: AI | ML | Cloud | Big Data | Analytics |
-  Cybersecurity | IoT | Automation | ERP | Digital Transformation | Blockchain | Edge Computing |
-  5G | Robotics | Autonomous | Payments | Open Banking | DevOps | Data Platform | Other
-  e.g. "AI, Cloud" or "Big Data, Analytics" or "ERP"
+- tech_level3: most specific technology category name (e.g. "Warranty Management", "Core Banking Platform", "CRM", "Cloud IaaS", "Cybersecurity - Endpoint")
+- tech_level2: mid-level grouping of tech_level3 (e.g. "Aftermarket Technology", "Enterprise Applications", "Cloud Infrastructure", "Security")
+- tech_level1: top-level grouping (e.g. "Operations Technology", "Business Applications", "Infrastructure & Cloud", "Data & Analytics")
+- deal_value: ALWAYS provide a value — use public figure if stated (e.g. "$3.2 billion"), otherwise ESTIMATE using industry benchmarks:
+  * Large IT outsourcing (5+ yr, major vendor): $100M–$2B
+  * Mid-size ERP/platform implementation: $10M–$100M
+  * SaaS subscription (enterprise): $1M–$20M/yr
+  * Cloud migration programme: $20M–$200M
+  * Managed services (3–5 yr): $30M–$300M
+  * Cybersecurity contract: $5M–$50M
+  Format: "$X million (estimated)" or "$X billion (public)"
+- start_date: contract start or go-live date if mentioned
+- end_date: contract expiry or renewal date if mentioned
+- duration_months: contract length in months — derive from start+end if not stated explicitly; typical outsourcing=60, SaaS=12 or 36
+- last_detected: date of the press release or news article (YYYY-MM-DD or YYYY-MM or YYYY)
+- deal_focus: 1-3 tags from: AI | ML | Cloud | Big Data | Analytics | Cybersecurity | IoT |
+  Automation | ERP | Digital Transformation | Blockchain | Edge Computing | 5G | Robotics |
+  Autonomous | Payments | Open Banking | DevOps | Data Platform | Other
 - description: one concise sentence — what was agreed and why it matters
 - source: direct URL to press release, article, or filing
 
