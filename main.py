@@ -732,6 +732,7 @@ class AftermarketRequest(BaseModel):
     competitors: str = Field(default="")
     target_vendor: str = Field(default="")
     sections_to_run: list[str] = Field(default_factory=list)  # empty = all sections
+    existing_spend_rows: list[dict] = Field(default_factory=list)  # pass when regenerating readiness-only
 
 
 @app.post("/api/aftermarket-dive")
@@ -757,6 +758,7 @@ async def aftermarket_dive(req: AftermarketRequest):
                 competitors=req.competitors,
                 target_vendor=req.target_vendor,
                 sections_to_run=sections,
+                existing_spend_rows=req.existing_spend_rows or [],
             ):
                 yield _sse(event)
         except Exception as e:

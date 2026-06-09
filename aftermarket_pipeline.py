@@ -853,6 +853,7 @@ async def run_aftermarket_deep_dive(
     competitors: str = "",
     target_vendor: str = "",
     sections_to_run: set | None = None,   # None = all sections
+    existing_spend_rows: list | None = None,  # caller passes previously computed spend rows
 ) -> AsyncGenerator[dict, None]:
     """
     Yields: heartbeat | capability_row | gap_row | spend_module_row |
@@ -1053,9 +1054,13 @@ async def run_aftermarket_deep_dive(
         yield {"type": "heartbeat", "message": "🎯 Scoring readiness for all 9 modules from real evidence…"}
         await asyncio.sleep(0)
 
+        # Use spend_rows from this run; fall back to existing_spend_rows passed by caller
+        # (set when regenerating readiness-only — spend_module wasn't re-run).
+        effective_spend = (spend_rows if isinstance(spend_rows, list) and spend_rows
+                           else (existing_spend_rows or []))
         spend_lines_for_score = "\n".join(
             f"  {r.get('domain','')}: {r.get('current_spend','')}"
-            for r in (spend_rows if isinstance(spend_rows, list) else [])
+            for r in effective_spend
             if r.get("domain") and r.get("current_spend")
         ) or "  (not available — use industry benchmarks)"
         agg_ref_for_score = " | ".join(
