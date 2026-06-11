@@ -464,7 +464,7 @@ async def find_tech_stack(
 
     seen_keys: set[str] = set()
     total = 0
-    CALL_TIMEOUT = 120
+    CALL_TIMEOUT = 240  # Render Pro: each call now runs 30+ searches, needs full time budget
 
     CALL_LABELS = {
         1: "enterprise apps & digital footprint",
@@ -481,25 +481,24 @@ async def find_tech_stack(
         loop = asyncio.get_event_loop()
         future = loop.run_in_executor(None, _gemini_tech_stack_sync, prompt, company_name)
 
+        # Poll without asyncio.shield — shield causes hangs on timeout in Python 3.11+
         elapsed = 0
         call_tools: list[dict] = []
-
         while elapsed < CALL_TIMEOUT:
-            try:
-                call_tools = await asyncio.wait_for(asyncio.shield(future), timeout=10)
+            await asyncio.sleep(10)
+            elapsed += 10
+            if future.done():
+                try:
+                    call_tools = future.result() or []
+                except Exception as e:
+                    logger.error(f"Tech stack call {call_num} error for {company_name}: {e}", exc_info=True)
+                    yield {"type": "heartbeat", "message": f"⚠️ Call {call_num} error: {e}"}
                 break
-            except asyncio.TimeoutError:
-                elapsed += 10
-                yield {"type": "heartbeat", "message": f"🌐 [{call_num}/{num_calls}] Scanning… ({elapsed}s)"}
-                await asyncio.sleep(0)
-            except Exception as e:
-                logger.error(f"Tech stack call {call_num} error for {company_name}: {e}", exc_info=True)
-                yield {"type": "heartbeat", "message": f"⚠️ Call {call_num} error: {e}"}
-                call_tools = []
-                break
+            yield {"type": "heartbeat", "message": f"🌐 [{call_num}/{num_calls}] Scanning… ({elapsed}s)"}
+            await asyncio.sleep(0)
         else:
             future.cancel()
-            yield {"type": "heartbeat", "message": f"⏱ Call {call_num} timed out — partial results below"}
+            yield {"type": "heartbeat", "message": f"⏱ Call {call_num} timed out after {CALL_TIMEOUT}s — partial results below"}
 
         new_tools = 0
         for tool in call_tools:
@@ -530,16 +529,16 @@ async def find_tech_stack(
         elapsed = 0
         fallback_tools: list[dict] = []
         while elapsed < CALL_TIMEOUT:
-            try:
-                fallback_tools = await asyncio.wait_for(asyncio.shield(future), timeout=10)
+            await asyncio.sleep(10)
+            elapsed += 10
+            if future.done():
+                try:
+                    fallback_tools = future.result() or []
+                except Exception as e:
+                    logger.error(f"Fallback error for {brand_name}: {e}", exc_info=True)
                 break
-            except asyncio.TimeoutError:
-                elapsed += 10
-                yield {"type": "heartbeat", "message": f"🌐 Fallback scan… ({elapsed}s)"}
-                await asyncio.sleep(0)
-            except Exception as e:
-                logger.error(f"Fallback error for {brand_name}: {e}", exc_info=True)
-                break
+            yield {"type": "heartbeat", "message": f"🌐 Fallback scan… ({elapsed}s)"}
+            await asyncio.sleep(0)
         else:
             future.cancel()
 

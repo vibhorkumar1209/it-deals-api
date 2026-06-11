@@ -144,7 +144,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
 
     MAX_RETRIES = 4
     CALL_TIMEOUT = 120   # hard per-call HTTP timeout in seconds
-    TOTAL_BUDGET = 300   # all attempts combined must finish within this
+    TOTAL_BUDGET = 360   # Render Pro: dedicated CPU, extend budget for deep searches
     call_start = _time.time()
     for attempt in range(1, MAX_RETRIES + 1):
         if _time.time() - call_start > TOTAL_BUDGET:

@@ -3,9 +3,9 @@ services:
     name: it-deals-api
     env: python
     region: oregon
-    plan: free
+    plan: standard
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 4 --timeout-keep-alive 120
     envVars:
       - key: SERPAPI_KEY
         sync: false
@@ -24,6 +24,8 @@ services:
       - key: SCRAPEDO_KEY
         sync: false
       - key: PARALLEL_API_KEY
+        sync: false
+      - key: GOOGLE_AI_API_KEY
         sync: false
       - key: PYTHON_VERSION
         value: 3.11.0

@@ -34,7 +34,7 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192):
         logger.error(f"[{label}] GOOGLE_AI_API_KEY not set")
         return None
 
-    TOTAL_BUDGET = 200
+    TOTAL_BUDGET = 300
     call_start = _time.time()
 
     cfg_extra = {}
