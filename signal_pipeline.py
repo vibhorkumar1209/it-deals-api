@@ -210,7 +210,7 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - person_name: name of executive(s) involved (or "Multiple" for mass exodus)
 - previous_company: where they came from (or "Internal" for promotions)
 - date: exact date or month (e.g. "May 2025") — must be within {window}
-- source: URL or publication name
+- source: MUST be a direct URL to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." — not just a publication name
 
 Omit any signal whose date falls outside {window}. Return [] if nothing found within the window.
 Return ONLY the JSON array, no commentary."""
@@ -243,7 +243,7 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary including the sales implication
 - magnitude: quantitative detail where available (e.g. "+35% headcount", "15 new roles", "3 new cities")
 - date: month or quarter — must be within {window}
-- source: URL or publication name
+- source: MUST be a direct URL to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." — not just a publication name
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
@@ -275,7 +275,7 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary including the sales implication
 - financial_detail: amount raised / deal value / revenue change (e.g. "$50M Series B", "Acquired Acme Corp for $200M")
 - date: announcement date — must be within {window}
-- source: URL or publication name
+- source: MUST be a direct URL to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." — not just a publication name
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
@@ -307,7 +307,7 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary including the sales implication
 - urgency: "Immediate" | "Within 6 months" | "Within 12 months" | "Watch"
 - date: date or deadline — must be within or triggered within {window}
-- source: URL or publication name
+- source: MUST be a direct URL to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." — not just a publication name
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
@@ -341,6 +341,46 @@ Return the SAME array with two fields added/updated per object: "importance" and
 Return ONLY the JSON array, no commentary."""
 
 
+# ── Date sort helper ──────────────────────────────────────────────────────────
+
+_MONTH_MAP = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+def _date_sort_key(date_str: str) -> tuple:
+    """Return (year, month) for reverse-chronological sort. Unknown → (0, 0)."""
+    if not date_str or date_str in ("-", "Unknown", ""):
+        return (0, 0)
+    s = date_str.strip()
+    # ISO: "2024-09" or "2024-09-15"
+    m = re.match(r"(\d{4})-(\d{1,2})", s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    # "Sep 2024" / "September 2024"
+    m = re.match(r"([A-Za-z]+)\s+(\d{4})", s)
+    if m:
+        mo = _MONTH_MAP.get(m.group(1).lower()[:3], 0)
+        return (int(m.group(2)), mo)
+    # "2024 Sep" / "2024 September"
+    m = re.match(r"(\d{4})\s+([A-Za-z]+)", s)
+    if m:
+        mo = _MONTH_MAP.get(m.group(2).lower()[:3], 0)
+        return (int(m.group(1)), mo)
+    # Quarter: "Q2 2025" / "Q2 2025"
+    m = re.match(r"Q([1-4])\s+(\d{4})", s, re.IGNORECASE)
+    if m:
+        return (int(m.group(2)), (int(m.group(1)) - 1) * 3 + 1)
+    # Year only: "2024"
+    m = re.match(r"(\d{4})$", s)
+    if m:
+        return (int(m.group(1)), 0)
+    return (0, 0)
+
+def _sort_by_date_desc(rows: list) -> list:
+    return sorted(rows, key=lambda r: _date_sort_key(r.get("date", "")), reverse=True)
+
+
 # ── Per-company signal runner ─────────────────────────────────────────────────
 
 def _run_category_sync(
@@ -361,15 +401,38 @@ def _run_category_sync(
     label = f"{company[:20]}|{category}"
     rows = _gemini_call_sync(prompt, use_search=True, label=label, max_output_tokens=8192)
 
-    # Normalize rows — inject company + category
+    # Tech keywords — if a non-tech signal mentions these, re-tag to Tech category
+    _TECH_KEYWORDS = (
+        "erp", "crm", "saas", "cloud", "platform", "software", "system", "technology",
+        "digital transformation", "ai ", " ai,", "machine learning", "automation",
+        "data warehouse", "cybersecurity", "it infrastructure", "legacy", "migration",
+        "vendor", "implementation", "rollout", "deployment", "upgrade", "tech stack",
+        "salesforce", "sap ", " sap,", "oracle", "microsoft", "workday", "servicenow",
+        "aws", "azure", "gcp", "kubernetes", "devops", "api", "integration", "iot",
+        "blockchain", "analytics", "bi ", " bi,", "database", "rpa", "fintech", "regtech",
+    )
+
     result = []
     for r in rows:
         if not isinstance(r, dict):
             continue
         r["company"] = company
         r["domain"] = domain
-        r["category"] = CATEGORY_LABELS[category]
-        r["category_key"] = category
+
+        # Re-tag to Tech if signal text mentions tech keywords but came from another category
+        assigned_cat = category
+        if category != "tech_legal":
+            text_check = " ".join([
+                str(r.get("signal_title", "")),
+                str(r.get("summary", "")),
+                str(r.get("signal_type", "")),
+            ]).lower()
+            if any(kw in text_check for kw in _TECH_KEYWORDS):
+                assigned_cat = "tech_legal"
+
+        r["category"] = CATEGORY_LABELS[assigned_cat]
+        r["category_key"] = assigned_cat
+
         # Default importance if not ranked yet
         if "importance" not in r:
             r["importance"] = "—"
@@ -450,6 +513,9 @@ async def run_signal_intelligence(
                     logger.error(f"Category {cat} error for {name}: {result}")
                     continue
                 company_rows.extend(result)
+
+            # Sort by date descending before streaming — newest signals first
+            company_rows = _sort_by_date_desc(company_rows)
 
             # Stream raw rows immediately
             for row in company_rows:
