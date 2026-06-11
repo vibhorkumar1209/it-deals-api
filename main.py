@@ -897,6 +897,85 @@ async def signal_intel(req: SignalIntelRequest):
     )
 
 
+# ── Competitive Intelligence ──────────────────────────────────────────────────
+
+class CompetitiveDiscoverRequest(BaseModel):
+    target_company: str = Field(..., min_length=1)
+    target_domain: str = Field(default="")
+
+
+class CompetitorInput(BaseModel):
+    name: str = Field(..., min_length=1)
+    domain: str = Field(default="")
+
+
+class CompetitiveAnalyzeRequest(BaseModel):
+    target_company: str = Field(..., min_length=1)
+    target_domain: str = Field(default="")
+    competitors: list[CompetitorInput] = Field(default_factory=list, max_length=5)
+    enabled_modules: list[str] = Field(default_factory=list)
+    benchmark_focus: str = Field(default="Overall Competitiveness")
+
+
+@app.post("/api/competitive/discover")
+async def competitive_discover(req: CompetitiveDiscoverRequest):
+    """Return 8-10 competitor suggestions for the target company."""
+    if not os.getenv("GOOGLE_AI_API_KEY"):
+        raise HTTPException(status_code=500, detail="GOOGLE_AI_API_KEY not set on server.")
+
+    from competitive_pipeline import discover_competitors
+    try:
+        competitors = await asyncio.wait_for(
+            discover_competitors(req.target_company, req.target_domain),
+            timeout=120,
+        )
+        return {"competitors": competitors}
+    except Exception as e:
+        logger.error(f"Competitive discover error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/competitive/analyze")
+async def competitive_analyze(req: CompetitiveAnalyzeRequest):
+    """SSE stream: full competitive analysis across selected modules."""
+    from competitive_pipeline import run_competitive_analysis, MODULES
+
+    async def _generate():
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        if not os.getenv("GOOGLE_AI_API_KEY"):
+            yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set on server."})
+            return
+
+        # Default to all modules if none specified
+        enabled = [m for m in req.enabled_modules if m in MODULES] or list(MODULES.keys())
+        # core is always first
+        if "core" in enabled:
+            enabled = ["core"] + [m for m in enabled if m != "core"]
+
+        competitors = [{"name": c.name, "domain": c.domain} for c in req.competitors]
+
+        try:
+            async for event in run_competitive_analysis(
+                target_company=req.target_company,
+                target_domain=req.target_domain,
+                competitors=competitors,
+                enabled_modules=enabled,
+                benchmark_focus=req.benchmark_focus,
+            ):
+                yield _sse(event)
+        except Exception as e:
+            logger.error(f"Competitive analyze error: {e}", exc_info=True)
+            yield _sse({"type": "error", "message": str(e)})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=4001, reload=True)
