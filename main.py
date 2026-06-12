@@ -92,7 +92,12 @@ def _request_to_config(req: ScrapeRequest) -> ScraperConfig:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "it-deals-api"}
+    keys = {
+        "GOOGLE_AI_API_KEY": bool(os.getenv("GOOGLE_AI_API_KEY")),
+        "ANTHROPIC_API_KEY": bool(os.getenv("ANTHROPIC_API_KEY")),
+        "PARALLEL_API_KEY":  bool(os.getenv("PARALLEL_API_KEY")),
+    }
+    return {"status": "ok", "service": "it-deals-api", "v": "2.1.0", "env": keys}
 
 
 @app.post("/api/scrape")
