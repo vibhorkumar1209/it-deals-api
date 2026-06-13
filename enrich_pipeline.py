@@ -187,8 +187,12 @@ SCHEMA_FIELDS = [
      "description": "Mid-level tech category derived from Level 3 (e.g. Aftermarket Tech, Enterprise Applications, Infrastructure)"},
     {"key": "tech_level1",     "label": "Level 1 Category",   "type": "string",
      "description": "Top-level tech category (e.g. Operations Technology, Business Applications, Infrastructure & Cloud)"},
-    {"key": "deal_value",      "label": "Deal Value",         "type": "string",
-     "description": "Contract value — use public figure if available, else estimate from benchmarks for this deal type and vendor"},
+    {"key": "deal_value",      "label": "TCV",                "type": "string",
+     "description": "Total contract value — numeric $ only (e.g. '$50M', '$2.5B'). Public figure if stated; else estimate from benchmarks. NO other text."},
+    {"key": "deal_acv",       "label": "ACV",                "type": "string",
+     "description": "Annual contract value / annual fee — numeric $ only (e.g. '$10M'). Empty string if single TCV payment or not derivable."},
+    {"key": "deal_estimated", "label": "Est",                "type": "string",
+     "description": "'Y' if deal_value was estimated from benchmarks (not public). Empty string if value came from a confirmed public source."},
     {"key": "start_date",      "label": "Start Date",         "type": "date",
      "description": "Contract start or go-live date (YYYY-MM-DD or YYYY-MM or YYYY)"},
     {"key": "end_date",        "label": "End Date",           "type": "date",
@@ -315,14 +319,16 @@ FIELD RULES:
 {TECH_L3_LIST}
 - tech_level2: leave empty string — derived automatically from taxonomy
 - tech_level1: leave empty string — derived automatically from taxonomy
-- deal_value: ALWAYS provide a value — use public figure if stated (e.g. "$3.2 billion"), otherwise ESTIMATE using industry benchmarks:
-  * Large IT outsourcing (5+ yr, major vendor): $100M–$2B
-  * Mid-size ERP/platform implementation: $10M–$100M
-  * SaaS subscription (enterprise): $1M–$20M/yr
-  * Cloud migration programme: $20M–$200M
-  * Managed services (3–5 yr): $30M–$300M
-  * Cybersecurity contract: $5M–$50M
-  Format: "$X million (estimated)" or "$X billion (public)"
+- deal_value: TCV (total contract value). NUMERIC $ ONLY — "$XM" or "$XB" (e.g. "$50M", "$2.5B"). ALWAYS provide a value: use public figure if stated, else ESTIMATE from benchmarks:
+  * Large IT outsourcing (5+ yr, major vendor): $100M–$2B → e.g. "$500M"
+  * Mid-size ERP/platform implementation: $10M–$100M → e.g. "$40M"
+  * SaaS subscription (enterprise): $1M–$20M/yr → e.g. "$5M"
+  * Cloud migration programme: $20M–$200M → e.g. "$80M"
+  * Managed services (3–5 yr): $30M–$300M → e.g. "$120M"
+  * Cybersecurity contract: $5M–$50M → e.g. "$20M"
+  NO other text — output exactly like "$50M" or "$2.5B"
+- deal_acv: ACV (annual contract value). NUMERIC $ ONLY (e.g. "$10M"). Empty string if it is a one-off TCV with no annual breakdown or if not derivable.
+- deal_estimated: "Y" if deal_value was estimated from benchmarks (not a stated public figure). Empty string "" if value came from a confirmed public source.
 - start_date: contract start or go-live date if mentioned
 - end_date: contract expiry or renewal date if mentioned
 - duration_months: contract length in months — derive from start+end if not stated explicitly; typical outsourcing=60, SaaS=12 or 36

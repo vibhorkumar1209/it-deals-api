@@ -34,6 +34,9 @@ TECH_STACK_FIELDS = [
     {"key": "tech_install",        "label": "Install Size (approx)"},
     {"key": "renewal_date",        "label": "Renewal"},
     {"key": "confidence_score",    "label": "Confidence"},
+    {"key": "deal_value",         "label": "TCV"},
+    {"key": "deal_acv",           "label": "ACV"},
+    {"key": "deal_estimated",     "label": "Est"},
     {"key": "source_info",         "label": "Source"},
 ]
 
@@ -254,6 +257,9 @@ Field rules:
 - tech_install: numeric estimate of licensed users/seats based on company headcount and deployment scope (e.g. "500–2,000", "10,000–50,000", "100,000+") — or "-"
 - renewal_date: estimated contract renewal quarter (e.g. "Q2 2027") — infer from: contract age (typical 3-5yr enterprise), press release dates, or R1/R3 search results — or "-"
 - confidence_score: "87%" etc — 95-99% for DNS/pixel/public API key; 85-94% for vendor case study/press release; 75-84% for job posting; 60-74% for industry inference
+- deal_value: TCV of this technology contract. NUMERIC $ ONLY — "$XM" or "$XB" (e.g. "$5M", "$120M"). Use public figure if stated, else estimate from benchmarks for enterprise SaaS/platform deals. NO other text.
+- deal_acv: Annual contract value. NUMERIC $ ONLY (e.g. "$2M/yr → "$2M"). Empty string if single TCV or not derivable.
+- deal_estimated: "Y" if deal_value was estimated from benchmarks. Empty string "" if from a confirmed public source.
 - source_info: "Job posting", "Vendor case study", "Press release", "Annual report", "Privacy policy", "LinkedIn jobs", "BuiltWith", "G2 review", etc.
 
 Return ONLY a raw JSON array, no markdown:
