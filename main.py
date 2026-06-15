@@ -728,6 +728,74 @@ async def gcc_enrich(req: GCCEnrichRequest):
     )
 
 
+# ── GCC Profile (Table 2) ────────────────────────────────────────────────────
+
+class GCCProfileRequest(BaseModel):
+    company_name: str = Field(..., min_length=1)
+    gcc_location: str = Field(..., min_length=1)
+
+
+@app.post("/api/gcc-profile")
+async def gcc_profile(req: GCCProfileRequest):
+    """SSE: generate 8-dimension operational profile (Table 2) for a specific GCC."""
+    from gcc_pipeline import run_gcc_profile
+
+    async def _generate():
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        if not os.getenv("GOOGLE_AI_API_KEY"):
+            yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set."})
+            return
+
+        try:
+            async for event in run_gcc_profile(req.company_name, req.gcc_location):
+                yield _sse(event)
+        except Exception as e:
+            logger.error(f"GCC Profile error: {e}", exc_info=True)
+            yield _sse({"type": "error", "message": str(e)})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+# ── GCC Design (Table 3) ──────────────────────────────────────────────────────
+
+class GCCDesignRequest(BaseModel):
+    company_name: str = Field(..., min_length=1)
+    gcc_location: str = Field(..., min_length=1)
+
+
+@app.post("/api/gcc-design")
+async def gcc_design(req: GCCDesignRequest):
+    """SSE: generate 3-pillar operational design profile (Table 3) for a specific GCC."""
+    from gcc_pipeline import run_gcc_design
+
+    async def _generate():
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        if not os.getenv("GOOGLE_AI_API_KEY"):
+            yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set."})
+            return
+
+        try:
+            async for event in run_gcc_design(req.company_name, req.gcc_location):
+                yield _sse(event)
+        except Exception as e:
+            logger.error(f"GCC Design error: {e}", exc_info=True)
+            yield _sse({"type": "error", "message": str(e)})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
 # ── Aftermarket Deep Dive ─────────────────────────────────────────────────────
 
 class AftermarketRequest(BaseModel):

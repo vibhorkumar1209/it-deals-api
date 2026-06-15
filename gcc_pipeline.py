@@ -673,6 +673,198 @@ async def run_gcc_enrichment(
     yield {"type": "complete", "total_companies": total_cos}
 
 
+# ── TEXT GEMINI CALLER (returns raw text, not JSON) ──────────────────────────
+
+def _gemini_text_sync(prompt: str, label: str, max_output_tokens: int = 12288) -> str | None:
+    """Like _gemini_call_sync but returns raw text instead of parsed JSON."""
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        logger.error(f"[{label}] google-genai not installed")
+        return None
+
+    if not GOOGLE_AI_KEY:
+        logger.error(f"[{label}] GOOGLE_AI_API_KEY not set")
+        return None
+
+    TOTAL_BUDGET = 300
+    call_start = _time.time()
+    cfg_extra = {}
+    try:
+        cfg_extra["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    except Exception:
+        pass
+
+    for attempt in range(1, 5):
+        if _time.time() - call_start > TOTAL_BUDGET:
+            return None
+        try:
+            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    temperature=0.1,
+                    max_output_tokens=max_output_tokens,
+                    **cfg_extra,
+                ),
+            )
+            break
+        except Exception as e:
+            err = str(e)
+            if "RESOURCE_EXHAUSTED" in err or "free_tier" in err:
+                raise RuntimeError("Gemini quota exhausted") from e
+            retryable = any(x in err for x in ("503","UNAVAILABLE","overloaded","timeout","TimeoutError","DeadlineExceeded","429","500","502","504","Read timed out"))
+            if retryable and attempt < 4:
+                remaining = TOTAL_BUDGET - (_time.time() - call_start)
+                wait = min(12 * attempt, max(remaining - 5, 1))
+                _time.sleep(wait)
+                continue
+            logger.error(f"[{label}] error: {err[:150]}")
+            return None
+    else:
+        return None
+
+    raw = ""
+    try:
+        for cand in (response.candidates or []):
+            for part in (cand.content.parts or []):
+                t = getattr(part, "text", None)
+                if t and not getattr(part, "thought", False):
+                    raw += t
+    except Exception:
+        try:
+            raw = response.text or ""
+        except Exception:
+            pass
+    return raw.strip() if raw.strip() else None
+
+
+# ── TABLE 2 PROMPT: 8-Dimension Operational Profile ──────────────────────────
+
+def _table2_prompt(company_name: str, gcc_location: str) -> str:
+    return f"""You are an expert management consultant specializing in Global Capability Center (GCC) strategies, commercial architecture, and banking IT operations.
+
+Build a highly granular, data-driven operational profile for {company_name}'s GCC in {gcc_location}.
+
+MANDATORY RESEARCH — run ALL of these searches before writing:
+1. "{company_name}" "{gcc_location.split(',')[0]}" GCC headcount campus office location employees 2024 2025
+2. "{company_name}" "{gcc_location.split(',')[0]}" workflows processes operations teams functions
+3. "{company_name}" "{gcc_location.split(',')[0]}" upcoming plans AI cloud digital transformation 2025 2026
+4. "{company_name}" "{gcc_location.split(',')[0]}" vendors partners real estate cloud GSI ServiceNow SAP 2024 2025
+5. "{company_name}" "{gcc_location.split(',')[0]}" outsourcing vendors third-party spend headcount contractors
+6. "{company_name}" India OR "{gcc_location.split(',')[0]}" salary rate card developers engineers analysts 2024 2025
+7. "{company_name}" "{gcc_location.split(',')[0]}" challenges risks talent attrition legacy tech debt
+8. "{company_name}" "{gcc_location.split(',')[0]}" leaders executives VP director head site:linkedin.com 2024 2025
+9. site:linkedin.com "{company_name}" "{gcc_location.split(',')[0]}" employees leaders title
+10. "{company_name}" annual report 2024 global technology centers headcount
+11. India GCC outsourcing rate card 2024 USD per hour developer analyst engineer
+12. "{gcc_location.split(',')[0]}" commercial real estate office rent Grade-A 2024 2025
+
+Output ONLY a Markdown table with exactly 2 columns and 8 rows as specified below.
+No prose before or after the table. Start immediately with the table.
+
+CRITICAL SOURCE RULES:
+• Every claim that names a specific figure, building, person, or price MUST have an inline source link in format [Source](URL)
+• Only include URLs you have confirmed exist during your Google Search — no guessed or hallucinated URLs
+• If you cannot find a verified URL for a claim, write "(Source: [publication name], [year])" without a hyperlink rather than fabricating a URL
+
+| Operational Dimension | Granular Field & Data Matrix |
+|---|---|
+| **1. People (Headcount & Distribution)** | • Estimated total headcount at {gcc_location} and split across major campus buildings (use real campus names where found) • Which functions dominate which physical locations • Breakdown: Engineering vs Ops vs Shared Services vs AI/Data headcount percentage • Real estate micro-market location and Grade-A rent range for {gcc_location.split(',')[0]} per sq. ft./month • Source links for headcount and campus data |
+| **2. Workflows (Core Processes Executed)** | • Specific business, engineering, or operations workflows this GCC runs • Named internal platforms, frameworks, or banking/corporate systems used • Which workflow types are run exclusively from {gcc_location} vs shared globally • Concrete examples: e.g. trade settlement, IFRS reporting, CI/CD pipelines, model risk validation |
+| **3. Upcoming Focus Areas** | • 3 specific technology, structural, or strategic initiatives the center is prioritizing over the next 12–24 months • For each: initiative name, expected timeline, and confirmed investment signal (job postings, announcements) • Source link for each initiative |
+| **4. Partners & Tier-1 System Vendors** | • Real estate partner / campus developer (e.g. Embassy, RMZ, Prestige, DLF) • Cloud provider(s) active at this GCC (AWS / Azure / GCP) with evidence • Top 3 GSIs / SIs active at this location (e.g. TCS, Infosys, Wipro, Accenture) • Key SaaS vendors in use (ServiceNow, Workday, SAP, Salesforce, etc.) • Source links for partnerships |
+| **5. Outsourcing Details & Run-Rate** | • Estimated annual local India-to-India (or region-specific) vendor spend in USD millions • Percentage of total headcount that is outsourced/contingent vs internal FTEs • What is explicitly allowed to be outsourced (transactional, commoditized) vs insourced (core IP, proprietary) • Specific vendor names for outsourced functions if known |
+| **6. Expected Rate Card (Hourly Blended Cost USD)** | • Junior/Entry-Level Ops: $X–$Y/hr • Mid-Level/QA Analyst: $X–$Y/hr • Senior DevOps/Cloud Engineer: $X–$Y/hr • Niche Specialist (AI/Data Scientist): $X–$Y/hr • Source: industry benchmark or salary survey used |
+| **7. Structural White-Spaces (Risk Areas)** | • Top 3 hidden operational bottlenecks, legacy tech debts, or talent-retention gaps specific to {company_name} at {gcc_location} • For each: name the risk, explain why it's unique to this GCC's scale and mandate, and estimate impact |
+| **8. Key Leaders & Leadership Contact Framework** | • Names and exact corporate titles of top regional executives at {gcc_location} (Site Head, Managing Director, VP Engineering, etc.) • Global technology/operations heads overseeing this center • Official channels: LinkedIn profile URLs or company directory if public • Source links (LinkedIn or company page) for each leader |
+
+Return ONLY the Markdown table above, filled with real data for {company_name} in {gcc_location}. Do not add any text before or after the table."""
+
+
+# ── TABLE 3 PROMPT: 3-Pillar Operational Design Profile ──────────────────────
+
+def _table3_prompt(company_name: str, gcc_location: str) -> str:
+    return f"""You are an expert enterprise management consultant and GCC architect specializing in offshore commercial design, organizational design, and corporate cost optimization.
+
+Build a highly granular, data-driven operational design profile for {company_name}'s GCC in {gcc_location}.
+
+MANDATORY RESEARCH — run ALL of these searches before writing:
+1. "{company_name}" "{gcc_location.split(',')[0]}" real estate facilities cost rent office space 2024 2025
+2. "{company_name}" GCC total cost of ownership TCO non-payroll multiplier India 2024
+3. India GCC non-payroll cost breakdown real estate tech infrastructure compliance 2024 Nasscom Zinnov Everest
+4. "{company_name}" "{gcc_location.split(',')[0]}" outsourcing insourcing vendors TCS Infosys Wipro Accenture 2024 2025
+5. "{company_name}" "{gcc_location.split(',')[0]}" org structure management ratios span of control 2024
+6. India GCC span of control management ratio engineering banking technology 2024 Mercer Aon Korn Ferry
+7. "{company_name}" salary survey org design India 2024 Mercer Aon Korn Ferry Hay Group
+8. India IT GCC fully loaded cost multiplier payroll 2024 Nasscom KPMG Deloitte
+9. "{company_name}" "{gcc_location.split(',')[0]}" procurement sourcing strategy vendors 2024
+10. India Grade-A office rent "{gcc_location.split(',')[0]}" 2024 JLL CBRE Cushman Wakefield Knight Frank
+
+CRITICAL SOURCE RULES:
+• Column 3 "Verified Sources & Benchmarks" MUST contain real URLs that actually exist
+• Only link to URLs confirmed during Google Search — no guessed URLs
+• Acceptable sources: JLL/CBRE/Knight Frank market reports, Nasscom GCC reports, Everest/Zinnov research, Mercer/Aon/Korn Ferry salary surveys, company annual reports, LinkedIn, press releases
+• If a URL cannot be verified, write "(Source: [publication], [year])" without a hyperlink
+
+| Core Design Pillar | Granular Strategic Matrix & Operational Metrics | Verified Sources & Benchmarks Used |
+|---|---|---|
+| **Pillar 1: Non-Payroll TCO Breakup & Multipliers** | • Real Estate/Facilities: X% of total cost (Grade-A rent in {gcc_location.split(',')[0]} at ₹X–Y/sq.ft./month = ~$X/employee/month) • Tech/Cyber Infrastructure: X% (cloud, security tooling, networking) • Professional Services/Compliance: X% (legal, audit, regulatory) • Talent Acquisition/Branding: X% (recruiter fees, employer brand spend, campus hiring) • Travel/Mobility: X% (expat assignments, cross-border travel) • **Fully loaded cost multiplier over base payroll: X.XXx** specific to {company_name} at {gcc_location} | • JLL/CBRE/Knight Frank India Office Market Report 2024 [URL] • Nasscom GCC in India Report 2024 [URL] • Everest Group GCC Benchmark 2024 [URL] |
+| **Pillar 2: Sourcing Framework (Insourcing vs Outsourcing)** | **Corporate Functions (HR, Finance, Legal):** • Strictly Insourced: [list specific workflows at {company_name} that contain core IP] • Outsourced/Co-sourced: [list transactional/commoditized workflows, name vendors] **Core Engineering:** • Strictly Insourced: [list proprietary systems and core product IP] • Outsourced/Co-sourced: [list commodity engineering tasks, name vendors and scope] **Governance boundary:** percentage of engineering headcount allowed to be third-party/contingent at {company_name} specifically | • Everest Group IT Sourcing Report 2024 [URL] • Nasscom GCC Sourcing Whitepaper [URL] • {company_name} vendor/partner announcements [URL] |
+| **Pillar 3: Typical Span of Control (SoC) Ratios** | **Core Engineering Teams at {gcc_location}:** • Executive → Senior Mgmt (MD/ED : VP): X:X ratio • Senior Mgmt → Middle Mgmt (VP : Manager): X:X ratio • Middle Mgmt → ICs (Manager : Engineer): X:X ratio **Corporate Support Functions:** • Executive → Senior Mgmt: X:X ratio • Senior Mgmt → Middle Mgmt: X:X ratio • Middle Mgmt → ICs: X:X ratio • High-attrition flag: note any layer where {gcc_location} SoC is stretched beyond benchmark (risk zone) | • Mercer Total Remuneration Survey India 2024 [URL] • Korn Ferry Organizational Design Report [URL] • Aon Radford Tech Compensation Survey [URL] |
+
+Return ONLY the Markdown table above, filled with real data for {company_name} in {gcc_location}. Do not add any text before or after the table."""
+
+
+# ── TABLE 2 RUNNER ────────────────────────────────────────────────────────────
+
+async def run_gcc_profile(company_name: str, gcc_location: str) -> AsyncGenerator[dict, None]:
+    """Stream Table 2: 8-dimension operational profile for a specific GCC."""
+    yield {"type": "heartbeat", "message": f"🔍 Researching {company_name} at {gcc_location}…"}
+    await asyncio.sleep(0)
+
+    loop = asyncio.get_event_loop()
+    prompt = _table2_prompt(company_name, gcc_location)
+
+    fut = loop.run_in_executor(None, _gemini_text_sync, prompt, "gcc_profile", 12288)
+    try:
+        text = await asyncio.wait_for(fut, timeout=280)
+    except asyncio.TimeoutError:
+        text = None
+
+    if text:
+        yield {"type": "profile_text", "text": text}
+        yield {"type": "complete"}
+    else:
+        yield {"type": "error", "message": "Profile generation failed — Gemini returned no content"}
+
+
+# ── TABLE 3 RUNNER ────────────────────────────────────────────────────────────
+
+async def run_gcc_design(company_name: str, gcc_location: str) -> AsyncGenerator[dict, None]:
+    """Stream Table 3: 3-pillar operational design profile for a specific GCC."""
+    yield {"type": "heartbeat", "message": f"🏗️ Building design profile for {company_name} at {gcc_location}…"}
+    await asyncio.sleep(0)
+
+    loop = asyncio.get_event_loop()
+    prompt = _table3_prompt(company_name, gcc_location)
+
+    fut = loop.run_in_executor(None, _gemini_text_sync, prompt, "gcc_design", 12288)
+    try:
+        text = await asyncio.wait_for(fut, timeout=280)
+    except asyncio.TimeoutError:
+        text = None
+
+    if text:
+        yield {"type": "design_text", "text": text}
+        yield {"type": "complete"}
+    else:
+        yield {"type": "error", "message": "Design profile generation failed — Gemini returned no content"}
+
+
 # ── LEGACY ────────────────────────────────────────────────────────────────────
 
 def _gcc_search_prompt_legacy(company_name: str, domain: str, location: str) -> str:
