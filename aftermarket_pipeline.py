@@ -729,13 +729,31 @@ def _parse_spend_millions(spend_str: str) -> tuple[float, float] | None:
     return None
 
 
+def _normalize_domain(d: str) -> str:
+    """Lowercase, strip punctuation/spaces for fuzzy domain matching."""
+    import re as _re
+    return _re.sub(r'[^a-z0-9]', '', d.lower())
+
+
 def _recalculate_tam(readiness_rows: list, spend_rows: list) -> list:
     """
     Post-process readiness rows: replace total_domain_spend, vendor_adjusted_tam,
     and tam_rationale using actual spend_module figures.
     Also recalculate weighted_readiness from the 5 component scores to ensure arithmetic is correct.
     """
-    spend_map = {r.get("domain", ""): r.get("current_spend", "") for r in (spend_rows or []) if r.get("domain")}
+    # Build spend_map with both exact and normalised keys for fuzzy lookup
+    spend_map_exact: dict = {}
+    spend_map_norm: dict = {}
+    for r in (spend_rows or []):
+        d = r.get("domain", "")
+        cs = r.get("current_spend", "")
+        if d and cs:
+            spend_map_exact[d] = cs
+            spend_map_norm[_normalize_domain(d)] = cs
+
+    def _lookup_spend(domain: str) -> str:
+        return spend_map_exact.get(domain) or spend_map_norm.get(_normalize_domain(domain), "")
+
     out = []
     for row in readiness_rows:
         row = dict(row)
@@ -755,7 +773,7 @@ def _recalculate_tam(readiness_rows: list, spend_rows: list) -> list:
             computed = int(row.get("weighted_readiness", 0))
 
         # ── Replace TAM using actual spend_module figure ──────────────────────
-        actual_spend = spend_map.get(domain, "")
+        actual_spend = _lookup_spend(domain)
         if actual_spend:
             row["total_domain_spend"] = actual_spend
             parsed = _parse_spend_millions(actual_spend)
@@ -1368,7 +1386,11 @@ async def run_aftermarket_deep_dive(
         # spend_rows is now available (collected before we awaited scoring results)
         effective_spend_final = spend_rows if isinstance(spend_rows, list) and spend_rows else (existing_spend_rows or [])
         readiness_rows = _recalculate_tam(collected_sorted, effective_spend_final)
-        logger.info(f"Readiness post-process: {len(readiness_rows)} rows, spend_map domains: {[r.get('domain') for r in effective_spend_final]}")
+        spend_domains = [r.get('domain') for r in effective_spend_final]
+        logger.info(f"Readiness post-process: {len(readiness_rows)} rows, spend_map domains: {spend_domains}")
+        for r in readiness_rows:
+            if r.get("vendor_adjusted_tam") in ("TBD", "", None):
+                logger.warning(f"TAM still TBD for domain='{r.get('domain')}' — no spend match in {spend_domains}")
 
     for row in (readiness_rows if isinstance(readiness_rows, list) else []):
         if isinstance(row, dict):
