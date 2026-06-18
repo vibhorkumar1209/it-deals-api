@@ -132,16 +132,16 @@ async def fetch_type1_static(url: str) -> tuple[str, str] | None:
             result = await fetch_via_jina_reader(url)
             if result:
                 return result
-        # Last resort: Apify Website Content Crawler
-        return await fetch_via_apify(url)
+        # Last resort: Gemini url_context fetch
+        return await fetch_via_gemini(url)
 
 
 async def fetch_type2_js(url: str) -> tuple[str, str] | None:
-    """JS-rendered SPA — Jina Reader first, Apify fallback, scrape.do last resort."""
+    """JS-rendered SPA — Jina Reader first, Gemini fallback, scrape.do last resort."""
     result = await fetch_via_jina_reader(url)
     if result:
         return result
-    result = await fetch_via_apify(url)
+    result = await fetch_via_gemini(url)
     if result:
         return result
     return await fetch_via_scrapedo(url)
@@ -269,10 +269,10 @@ async def fetch_type6_bot_protected(url: str, proxy_pool: list[str] | None = Non
         except Exception as e:
             logger.warning(f"TYPE6 browserless failed: {e}")
 
-    # Apify fallback — handles JS rendering + Cloudflare bypass
-    result = await fetch_via_apify(url)
+    # Gemini fallback — handles JS rendering + Cloudflare bypass
+    result = await fetch_via_gemini(url)
     if result:
-        logger.info(f"TYPE6 Apify success: {url}")
+        logger.info(f"TYPE6 Gemini success: {url}")
         return result
 
     # scrape.do last resort
@@ -440,46 +440,59 @@ async def fetch_via_jina_reader(url: str) -> tuple[str, str] | None:
         return None
 
 
-async def fetch_via_apify(url: str) -> tuple[str, str] | None:
-    """Fetch a URL via Apify Website Content Crawler actor.
+GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
 
-    Uses the synchronous Items API so we get results in one HTTP call
-    without polling. Returns (text, text) on success, None on failure.
-    Requires APIFY_API_KEY env var.
-    """
-    key = os.getenv("APIFY_API_KEY", "")
-    if not key:
-        return None
+
+def _gemini_url_fetch_sync(url: str) -> str | None:
+    """Sync worker: fetch+render a URL via Gemini's url_context tool."""
     try:
-        actor_url = (
-            "https://api.apify.com/v2/acts/apify~website-content-crawler/run-sync-get-dataset-items"
-            f"?token={key}&timeout=60&memory=256"
-        )
-        payload = {
-            "startUrls": [{"url": url}],
-            "maxCrawlPages": 1,
-            "crawlerType": "cheerio",          # fast HTML-only mode
-            "removeElementsCssSelector": "nav,footer,header,script,style,.cookie-banner",
-            "htmlTransformer": "readableText",  # returns clean readable text
-        }
-        async with httpx.AsyncClient(timeout=70) as client:
-            r = await client.post(actor_url, json=payload)
-            if not r.is_success:
-                logger.warning(f"Apify {r.status_code} for {url}: {r.text[:200]}")
-                return None
-            items = r.json()
-            if not items:
-                logger.warning(f"Apify returned empty items for {url}")
-                return None
-            text = items[0].get("text") or items[0].get("markdown") or ""
-            if not text or len(text.split()) < 50:
-                logger.warning(f"Apify too-short text ({len(text.split())} words) for {url}")
-                return None
-            logger.info(f"Apify success: {url[:80]} ({len(text)} chars)")
-            return text, text
-    except Exception as e:
-        logger.warning(f"Apify fetch failed for {url}: {e}")
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        logger.error("google-genai not installed")
         return None
+
+    if not GOOGLE_AI_KEY:
+        return None
+
+    try:
+        client = genai.Client(api_key=GOOGLE_AI_KEY)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=(
+                f"Fetch the page at {url} and return its full readable body "
+                "text verbatim — article content, headings, and visible text. "
+                "Strip navigation, ads, cookie banners, and footers. "
+                "Do not summarize or add commentary; return only the page text."
+            ),
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(url_context=types.UrlContext())],
+                temperature=0,
+            ),
+        )
+        text = (response.text or "").strip()
+        return text or None
+    except Exception as e:
+        logger.warning(f"Gemini url_context fetch failed for {url}: {e}")
+        return None
+
+
+async def fetch_via_gemini(url: str) -> tuple[str, str] | None:
+    """Fetch a URL's rendered content via Gemini's url_context tool.
+
+    Replaces the old Apify Website Content Crawler actor — Gemini fetches
+    and renders the page directly as part of generation, no scraping infra
+    needed. Requires GOOGLE_AI_API_KEY env var.
+    """
+    if not GOOGLE_AI_KEY:
+        return None
+    loop = asyncio.get_event_loop()
+    text = await loop.run_in_executor(None, _gemini_url_fetch_sync, url)
+    if not text or len(text.split()) < 50:
+        logger.warning(f"Gemini url_context too-short/empty result for {url}")
+        return None
+    logger.info(f"Gemini url_context success: {url[:80]} ({len(text)} chars)")
+    return text, text
 
 
 async def fetch_via_scrapedo(url: str, token: str | None = None) -> tuple[str, str] | None:
