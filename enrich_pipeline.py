@@ -169,18 +169,50 @@ def _tokenize(s: str) -> set[str]:
     return {w for w in re.split(r"[^a-z0-9]+", s.lower()) if w and w not in _STOPWORDS}
 
 
+# Words too generic to count as a meaningful taxonomy match on their own — a single
+# shared hit on one of these (e.g. "data") must never be enough to win a category,
+# since it caused real misclassifications (a cloud/consulting deal mapped to the
+# Communications > "Fixed Data" category purely because both mention "data").
+_GENERIC_MATCH_WORDS = {
+    "data", "service", "services", "system", "systems", "management", "platform",
+    "solution", "solutions", "technology", "application", "applications", "digital",
+    "enterprise", "business", "software", "infrastructure", "network", "cloud",
+}
+
+# Minimum token-overlap score required to accept a fuzzy match — single generic-word
+# overlaps are excluded from scoring entirely (see _fuzzy_score), so any score >= 1
+# here already reflects at least one MEANINGFUL shared term.
+_MIN_FUZZY_SCORE = 1
+
+# Strong signal words that indicate an IT services / consulting / SI engagement —
+# used as a smarter fallback than the generic catch-all bucket when nothing else matches.
+_CONSULTING_SIGNAL_WORDS = (
+    "migrat", "consult", "implement", "integrat", "moderni", "transform",
+    "deploy", "rollout", "onboard", "advisory",
+)
+
+
+def _fuzzy_score(a_tokens: set[str], b_tokens: set[str]) -> int:
+    """Token overlap score that ignores matches made up entirely of generic words —
+    e.g. {"data"} ∩ {"fixed","data"} scores 0, not 1, since "data" alone is meaningless."""
+    shared = a_tokens & b_tokens
+    meaningful = shared - _GENERIC_MATCH_WORDS
+    return len(meaningful) if meaningful else 0
+
+
 def classify_tech(level3_raw: str, description: str = "") -> tuple[str, str, str]:
     """Return (level1, level2, canonical_level3) — mandatory, non-empty triple.
 
     Matching order:
       1. Exact / substring match on the model's own tech_level3 choice
-      2. Token-overlap fuzzy match on tech_level3 (handles paraphrasing)
-      3. Token-overlap fuzzy match on the deal DESCRIPTION text — this is the
-         compulsory content-based mapping: even if the model left tech_level3
-         blank or picked something unmatched, the deal description itself is
-         scanned against the taxonomy so Level 3 reflects what the deal is
-         actually about.
-      4. Guaranteed fallback bucket — never leaves Level 1/2/3 blank.
+      2. Token-overlap fuzzy match on tech_level3 (handles paraphrasing) — generic
+         single-word overlaps (e.g. "data", "service") are excluded from scoring
+      3. Token-overlap fuzzy match on the deal DESCRIPTION text — same generic-word
+         guard, so a long description doesn't spuriously win on common words
+      4. Consulting/SI signal fallback — if the description clearly describes an
+         implementation/migration engagement, default to "System Integration"
+         rather than an unrelated category
+      5. Guaranteed fallback bucket — never leaves Level 1/2/3 blank.
     """
     key = (level3_raw or "").strip().lower()
 
@@ -199,11 +231,24 @@ def classify_tech(level3_raw: str, description: str = "") -> tuple[str, str, str
         if key_tokens:
             best_score, best_lv = 0, None
             for lk, lv in _TAXONOMY_LOWER.items():
-                score = len(key_tokens & _tokenize(lk))
+                score = _fuzzy_score(key_tokens, _tokenize(lk))
                 if score > best_score:
                     best_score, best_lv = score, lv
-            if best_score > 0:
+            if best_score >= _MIN_FUZZY_SCORE:
                 canonical = best_lv
+
+    # Sanity-check override: the model can pick a literal taxonomy name (winning the
+    # exact-match check above) that's actually unrelated to the deal — e.g. choosing
+    # "Fixed Data" for a cloud/consulting migration just because "data" appears in
+    # the description. If the deal clearly reads as an IT services/SI engagement but
+    # landed in an implausible category (Communications/Hardware — never the right
+    # answer for a case-study/migration deal), reroute to System Integration.
+    if canonical and description:
+        l1_check, _ = TECH_TAXONOMY[canonical]
+        if l1_check in ("Communications", "Hardware"):
+            desc_lower = description.lower()
+            if any(sig in desc_lower for sig in _CONSULTING_SIGNAL_WORDS):
+                canonical = "System Integration"
 
     if not canonical and description:
         # Fall back to mapping the deal DESCRIPTION itself against the taxonomy
@@ -211,11 +256,16 @@ def classify_tech(level3_raw: str, description: str = "") -> tuple[str, str, str
         if desc_tokens:
             best_score, best_lv = 0, None
             for lk, lv in _TAXONOMY_LOWER.items():
-                score = len(desc_tokens & _tokenize(lk))
+                score = _fuzzy_score(desc_tokens, _tokenize(lk))
                 if score > best_score:
                     best_score, best_lv = score, lv
-            if best_score > 0:
+            if best_score >= _MIN_FUZZY_SCORE:
                 canonical = best_lv
+
+    if not canonical and description:
+        desc_lower = description.lower()
+        if any(sig in desc_lower for sig in _CONSULTING_SIGNAL_WORDS):
+            canonical = "System Integration"
 
     if not canonical:
         canonical = _FALLBACK_L3
@@ -1040,6 +1090,37 @@ async def enrich_company(
     )
     brand_name = _STRIP.sub("", company_name).strip()
 
+    def _vendor_core(v: str) -> str:
+        """Strip any '(Parent Company)' bracket so subsidiary-with-parent naming
+        doesn't break vendor-identity comparisons."""
+        return re.sub(r"\s*\([^)]*\)\s*$", "", (v or "").strip().lower())
+
+    emitted_deals: list[dict] = []  # all deals already yielded, for fuzzy dup check
+
+    def _is_fuzzy_duplicate(deal: dict) -> bool:
+        """Catches the SAME real-world deal being phrased differently across the
+        2-3 separate Gemini calls (different snippet wording, missing/different
+        dates) — the exact-match _dedup_key alone misses these, causing the same
+        deal to appear 2-3 times. A duplicate is: same vendor (ignoring parent
+        bracket) AND (same grounding source URL OR heavy description overlap)."""
+        vendor = _vendor_core(deal.get("vendor", ""))
+        if not vendor:
+            return False
+        source = (deal.get("source") or "").strip()
+        desc_tokens = _tokenize(deal.get("description", ""))
+        for existing in emitted_deals:
+            if _vendor_core(existing.get("vendor", "")) != vendor:
+                continue
+            if source and source == (existing.get("source") or "").strip():
+                return True
+            existing_tokens = _tokenize(existing.get("description", ""))
+            if not desc_tokens or not existing_tokens:
+                continue
+            smaller = min(len(desc_tokens), len(existing_tokens))
+            if smaller and len(desc_tokens & existing_tokens) / smaller >= 0.5:
+                return True
+        return False
+
     def _dedup_key(deal: dict, suffix: str = "") -> str:
         """Vendor + date + description snippet — NOT vendor alone, so a vendor
         with multiple distinct deals (common) isn't collapsed into one row."""
@@ -1090,9 +1171,10 @@ async def enrich_company(
         new_deals = 0
         for deal in call_deals:
             dedup_key = _dedup_key(deal)
-            if dedup_key in seen_keys:
+            if dedup_key in seen_keys or _is_fuzzy_duplicate(deal):
                 continue
             seen_keys.add(dedup_key)
+            emitted_deals.append(deal)
             row = {"company_name": company_name, "domain": domain, "_status": "ok", "_sources": 1}
             row.update(deal)
             yield {"type": "row_done", "row": row}
@@ -1138,9 +1220,10 @@ async def enrich_company(
 
             for deal in call_deals:
                 dedup_key = _dedup_key(deal)
-                if dedup_key in seen_keys:
+                if dedup_key in seen_keys or _is_fuzzy_duplicate(deal):
                     continue
                 seen_keys.add(dedup_key)
+                emitted_deals.append(deal)
                 row = {"company_name": company_name, "domain": domain,
                        "_status": "ok", "_sources": 1}
                 row.update(deal)
@@ -1224,9 +1307,10 @@ Return ONLY the raw JSON array. No prose. No markdown fences.
                    "message": f"✅ Found {len(partner_deals)} IT partners for {company_name}"}
             for deal in partner_deals:
                 dedup_key = _dedup_key(deal, suffix="partner")
-                if dedup_key in seen_keys:
+                if dedup_key in seen_keys or _is_fuzzy_duplicate(deal):
                     continue
                 seen_keys.add(dedup_key)
+                emitted_deals.append(deal)
                 row = {"company_name": company_name, "domain": domain, "_status": "ok", "_sources": 1}
                 row.update(deal)
                 yield {"type": "row_done", "row": row}
