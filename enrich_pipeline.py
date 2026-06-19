@@ -158,24 +158,49 @@ TECH_L3_LIST = "\n".join(
 )
 
 
+# Guaranteed fallback bucket — used only when Level 3 is blank or has zero
+# token overlap with any taxonomy entry, so L1/L2/L3 are never left empty.
+_FALLBACK_L3 = "Industry Specific Applications"
+
+_STOPWORDS = {"and", "or", "the", "for", "of", "a", "an", "to", "in", "on", "&"}
+
+
+def _tokenize(s: str) -> set[str]:
+    return {w for w in re.split(r"[^a-z0-9]+", s.lower()) if w and w not in _STOPWORDS}
+
+
 def classify_tech(level3_raw: str) -> tuple[str, str, str]:
-    """Return (level1, level2, canonical_level3) from a raw model output string."""
-    if not level3_raw:
-        return ("", "", "")
-    key = level3_raw.strip().lower()
-    # Exact match
-    canonical = _TAXONOMY_LOWER.get(key)
-    if not canonical:
-        # Partial match — find best substring hit
+    """Return (level1, level2, canonical_level3) from a raw model output string.
+    Always returns a non-empty triple — falls back to a generic taxonomy bucket
+    rather than leaving Level 1/2/3 blank, so every deal is fully categorized."""
+    key = (level3_raw or "").strip().lower()
+
+    canonical = _TAXONOMY_LOWER.get(key) if key else None
+
+    if not canonical and key:
+        # Substring match
         for lk, lv in _TAXONOMY_LOWER.items():
             if key in lk or lk in key:
                 canonical = lv
                 break
-    if canonical and canonical in TECH_TAXONOMY:
-        l1, l2 = TECH_TAXONOMY[canonical]
-        return (l1, l2, canonical)
-    # No match — return raw value with blanks for L1/L2
-    return ("", "", level3_raw)
+
+    if not canonical and key:
+        # Token-overlap fuzzy match — picks the taxonomy entry sharing the most words
+        key_tokens = _tokenize(key)
+        if key_tokens:
+            best_score, best_lv = 0, None
+            for lk, lv in _TAXONOMY_LOWER.items():
+                score = len(key_tokens & _tokenize(lk))
+                if score > best_score:
+                    best_score, best_lv = score, lv
+            if best_score > 0:
+                canonical = best_lv
+
+    if not canonical:
+        canonical = _FALLBACK_L3
+
+    l1, l2 = TECH_TAXONOMY[canonical]
+    return (l1, l2, canonical)
 
 # Fixed output schema — matches the IT Deal Details preset in the frontend
 SCHEMA_FIELDS = [
@@ -315,8 +340,10 @@ Return ONLY a valid JSON array:
 
 FIELD RULES:
 - vendor: exact name (e.g. "Infosys", "SAP S/4HANA", "Microsoft Azure", "Trimble")
-- tech_level3: pick the BEST matching Level 3 from this taxonomy (use exact name):
+- tech_level3: COMPULSORY — never leave blank. Pick the single BEST matching Level 3 value
+  from this exact taxonomy list (use the exact name as written, do not paraphrase):
 {TECH_L3_LIST}
+  If the deal doesn't cleanly fit one category, pick the closest one — do not return an empty string.
 - tech_level2: leave empty string — derived automatically from taxonomy
 - tech_level1: leave empty string — derived automatically from taxonomy
 - deal_value: TCV (total contract value). NUMERIC $ ONLY — "$XM" or "$XB" (e.g. "$50M", "$2.5B"). ALWAYS provide a value: use public figure if stated, else ESTIMATE from benchmarks:

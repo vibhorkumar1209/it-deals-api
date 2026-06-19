@@ -249,7 +249,8 @@ Fields (EXACT keys required):
 {fields_desc}
 
 Field rules:
-- tech_level3: exact name from this taxonomy:
+- tech_level3: COMPULSORY — never leave blank or "-". Exact name from this taxonomy
+  (pick the closest match if not a perfect fit):
 {TECH_L3_LIST}
 - tech_level2 / tech_level1: leave as empty string — derived automatically
 - integration_partner: SI/consulting firm that IMPLEMENTED it (e.g. "Accenture", "TCS", "Deloitte") — from P1–P4 searches — or "-"
@@ -416,13 +417,13 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
             for fk in FIELD_KEYS:
                 if fk not in row:
                     row[fk] = "-"
-            # Enforce taxonomy: derive L1/L2 from L3
-            l3_raw = row.get("tech_level3", "-")
-            if l3_raw and l3_raw != "-":
-                l1, l2, l3_canon = classify_tech(l3_raw)
-                row["tech_level1"] = l1 or row.get("tech_level1", "-")
-                row["tech_level2"] = l2 or row.get("tech_level2", "-")
-                row["tech_level3"] = l3_canon or l3_raw
+            # Enforce taxonomy: derive L1/L2 from L3 — always run, even if L3 is blank/"-",
+            # so every row is fully categorized (classify_tech guarantees a non-empty triple)
+            l3_raw = row.get("tech_level3", "")
+            l1, l2, l3_canon = classify_tech("" if l3_raw == "-" else l3_raw)
+            row["tech_level1"] = l1
+            row["tech_level2"] = l2
+            row["tech_level3"] = l3_canon
             # Skip rows with fewer than 2 real values (likely parsing artifacts)
             real_vals = sum(1 for v in row.values() if v and v != "-")
             if real_vals < 2:
