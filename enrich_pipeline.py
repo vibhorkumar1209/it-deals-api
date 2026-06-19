@@ -169,10 +169,19 @@ def _tokenize(s: str) -> set[str]:
     return {w for w in re.split(r"[^a-z0-9]+", s.lower()) if w and w not in _STOPWORDS}
 
 
-def classify_tech(level3_raw: str) -> tuple[str, str, str]:
-    """Return (level1, level2, canonical_level3) from a raw model output string.
-    Always returns a non-empty triple — falls back to a generic taxonomy bucket
-    rather than leaving Level 1/2/3 blank, so every deal is fully categorized."""
+def classify_tech(level3_raw: str, description: str = "") -> tuple[str, str, str]:
+    """Return (level1, level2, canonical_level3) — mandatory, non-empty triple.
+
+    Matching order:
+      1. Exact / substring match on the model's own tech_level3 choice
+      2. Token-overlap fuzzy match on tech_level3 (handles paraphrasing)
+      3. Token-overlap fuzzy match on the deal DESCRIPTION text — this is the
+         compulsory content-based mapping: even if the model left tech_level3
+         blank or picked something unmatched, the deal description itself is
+         scanned against the taxonomy so Level 3 reflects what the deal is
+         actually about.
+      4. Guaranteed fallback bucket — never leaves Level 1/2/3 blank.
+    """
     key = (level3_raw or "").strip().lower()
 
     canonical = _TAXONOMY_LOWER.get(key) if key else None
@@ -185,7 +194,7 @@ def classify_tech(level3_raw: str) -> tuple[str, str, str]:
                 break
 
     if not canonical and key:
-        # Token-overlap fuzzy match — picks the taxonomy entry sharing the most words
+        # Token-overlap fuzzy match on the model's tech_level3 choice
         key_tokens = _tokenize(key)
         if key_tokens:
             best_score, best_lv = 0, None
@@ -196,11 +205,52 @@ def classify_tech(level3_raw: str) -> tuple[str, str, str]:
             if best_score > 0:
                 canonical = best_lv
 
+    if not canonical and description:
+        # Fall back to mapping the deal DESCRIPTION itself against the taxonomy
+        desc_tokens = _tokenize(description)
+        if desc_tokens:
+            best_score, best_lv = 0, None
+            for lk, lv in _TAXONOMY_LOWER.items():
+                score = len(desc_tokens & _tokenize(lk))
+                if score > best_score:
+                    best_score, best_lv = score, lv
+            if best_score > 0:
+                canonical = best_lv
+
     if not canonical:
         canonical = _FALLBACK_L3
 
     l1, l2 = TECH_TAXONOMY[canonical]
     return (l1, l2, canonical)
+
+
+# Benchmark TCV ranges by Level 2 category — used only when the model leaves
+# deal_value blank, so every deal always has a value (marked as estimated).
+_VALUE_BENCHMARKS: list[tuple[tuple[str, ...], str]] = [
+    (("Application-Led Outsourcing", "Infrastructure-Led Outsourcing",
+      "Business Process Outsourcing"), "$150M"),
+    (("Cloud Services",), "$60M"),
+    (("Consulting & System Integration",), "$40M"),
+    (("End User Services", "Network Services"), "$25M"),
+    (("Enterprise Applications", "Application Development & Deployment"), "$30M"),
+    (("Software Infrastructure",), "$15M"),
+    (("Digital Enterprise", "Internet of Things (IoT)"), "$20M"),
+]
+_DEFAULT_ESTIMATE = "$10M"
+
+
+def estimate_deal_value(row: dict) -> tuple[str, str]:
+    """Return (deal_value, deal_estimated) — guarantees deal_value is never blank.
+    Only used when the model didn't provide a value; uses Level 2 category as the
+    benchmark anchor and marks the row as estimated."""
+    existing = (row.get("deal_value") or "").strip()
+    if existing and existing != "-":
+        return existing, row.get("deal_estimated", "")
+    l2 = row.get("tech_level2", "")
+    for cats, value in _VALUE_BENCHMARKS:
+        if l2 in cats:
+            return value, "Y"
+    return _DEFAULT_ESTIMATE, "Y"
 
 # Fixed output schema — matches the IT Deal Details preset in the frontend
 SCHEMA_FIELDS = [
@@ -347,12 +397,13 @@ Return ONLY a valid JSON array:
 
 FIELD RULES:
 - vendor: exact name (e.g. "Infosys", "SAP S/4HANA", "Microsoft Azure", "Trimble")
-- tech_level3: COMPULSORY — never leave blank. Pick the single BEST matching Level 3 value
+- tech_level3: COMPULSORY — never leave blank. Base your choice on what the "description"
+  field actually says this deal is about, then pick the single BEST matching Level 3 value
   from this exact taxonomy list (use the exact name as written, do not paraphrase):
 {TECH_L3_LIST}
   If the deal doesn't cleanly fit one category, pick the closest one — do not return an empty string.
-- tech_level2: leave empty string — derived automatically from taxonomy
-- tech_level1: leave empty string — derived automatically from taxonomy
+- tech_level2: leave empty string — automatically mapped from tech_level3
+- tech_level1: leave empty string — automatically mapped from tech_level3 (which in turn maps to tech_level2)
 - deal_value: TCV (total contract value). NUMERIC $ ONLY — "$XM" or "$XB" (e.g. "$50M", "$2.5B"). ALWAYS provide a value: use public figure if stated, else ESTIMATE from benchmarks:
   * Large IT outsourcing (5+ yr, major vendor): $100M–$2B → e.g. "$500M"
   * Mid-size ERP/platform implementation: $10M–$100M → e.g. "$40M"
@@ -737,12 +788,17 @@ def _gemini_extract_deals_sync(
             for key in field_keys:
                 val = item.get(key)
                 row[key] = str(val) if val not in (None, "null", "None", "") else ""
-            # Enforce taxonomy: derive L1/L2 from L3
-            l3_raw = row.get("tech_level3", "")
-            l1, l2, l3_canon = classify_tech(l3_raw)
+            # Enforce taxonomy: derive L1/L2 from L3 (mandatory — falls back to
+            # mapping the deal description itself if tech_level3 is unmatched)
+            l1, l2, l3_canon = classify_tech(row.get("tech_level3", ""), row.get("description", ""))
             row["tech_level1"] = l1
             row["tech_level2"] = l2
             row["tech_level3"] = l3_canon
+            # Enforce deal value: never blank — estimate from category benchmark
+            # and flag as estimated ("A" superscript shown by the frontend)
+            dv, est = estimate_deal_value(row)
+            row["deal_value"] = dv
+            row["deal_estimated"] = est
             out.append(row)
 
         logger.info(f"Parsed {len(out)} deals for {company_name}")

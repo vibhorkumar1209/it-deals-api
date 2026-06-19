@@ -19,9 +19,10 @@ GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
 
 # Import shared taxonomy from enrich_pipeline
 try:
-    from enrich_pipeline import classify_tech, TECH_L3_LIST
+    from enrich_pipeline import classify_tech, TECH_L3_LIST, estimate_deal_value
 except ImportError:
-    def classify_tech(l3): return ("", "", l3)
+    def classify_tech(l3, description=""): return ("", "", l3)
+    def estimate_deal_value(row): return (row.get("deal_value") or "$10M", "Y")
     TECH_L3_LIST = ""
 
 TECH_STACK_FIELDS = [
@@ -418,12 +419,17 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
                 if fk not in row:
                     row[fk] = "-"
             # Enforce taxonomy: derive L1/L2 from L3 — always run, even if L3 is blank/"-",
-            # so every row is fully categorized (classify_tech guarantees a non-empty triple)
+            # so every row is fully categorized (classify_tech guarantees a non-empty triple).
+            # Falls back to mapping the vendor/tool name itself when L3 is unmatched.
             l3_raw = row.get("tech_level3", "")
-            l1, l2, l3_canon = classify_tech("" if l3_raw == "-" else l3_raw)
+            l1, l2, l3_canon = classify_tech("" if l3_raw == "-" else l3_raw, row.get("vendor", ""))
             row["tech_level1"] = l1
             row["tech_level2"] = l2
             row["tech_level3"] = l3_canon
+            # Enforce deal value: never blank/"-" — estimate from category benchmark
+            dv, est = estimate_deal_value(row)
+            row["deal_value"] = dv
+            row["deal_estimated"] = est
             # Skip rows with fewer than 2 real values (likely parsing artifacts)
             real_vals = sum(1 for v in row.values() if v and v != "-")
             if real_vals < 2:
