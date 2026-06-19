@@ -393,7 +393,9 @@ SCHEMA_FIELDS = [
     {"key": "deal_focus",      "label": "Deal Focus",         "type": "string",
      "description": "1-3 primary technology focus tags e.g. AI, Cloud, ERP"},
     {"key": "description",     "label": "Deal Description",   "type": "string",
-     "description": "One sentence describing what was agreed"},
+     "description": "Detailed description of what was agreed — up to 100-200 words when "
+                     "enough information is available (scope, technical detail, scale, business "
+                     "rationale); a short one-sentence summary only if little is known"},
     {"key": "source",          "label": "Source",             "type": "string",
      "description": "URL of the press release, news article, or filing"},
 ]
@@ -568,7 +570,11 @@ FIELD RULES:
 - deal_focus: 1-3 tags from: AI | ML | Cloud | Big Data | Analytics | Cybersecurity | IoT |
   Automation | ERP | Digital Transformation | Blockchain | Edge Computing | 5G | Robotics |
   Autonomous | Payments | Open Banking | DevOps | Data Platform | Other
-- description: one concise sentence — what was agreed and why it matters
+- description: write UP TO 100-200 WORDS when the source material has enough detail — cover
+  what was agreed, the technical scope (systems/platforms involved, data volumes, team size,
+  duration), the business rationale, and why it matters. Use everything findable from the
+  source(s) rather than compressing to one line. Only write a short sentence if genuinely
+  little information is available — do not pad with filler or repeat the same fact twice.
 - source: direct URL to press release, article, or filing
 
 Return ONLY the raw JSON array. No prose. No markdown fences.
@@ -847,7 +853,10 @@ FIELD RULES:
   * 1PB+ or 20,000+ systems, multi-year enterprise programme: $20M–$80M
   Do not jump to enterprise-scale pricing just because the deal mentions "cloud migration" —
   most SI/implementation-partner case studies are mid-market engagements, not billion-dollar deals.
-- description: one sentence on what was migrated/modernized and onto which platform
+- description: write UP TO 100-200 WORDS when the source material supports it — what was
+  migrated/modernized, onto which platform, technical scope (data volume, systems/tables/
+  databases involved, team size, timeline), and business rationale. Only stay short if the
+  source genuinely has little detail.
 - source: leave as empty string — the real source link is attached automatically from
   search grounding, do not fabricate a URL
 
@@ -892,7 +901,7 @@ def _gemini_extract_deals_sync(
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
                     temperature=0.1,
-                    max_output_tokens=16384,
+                    max_output_tokens=24576,  # raised for longer (100-200 word) deal descriptions
                 ),
             )
             break   # success
@@ -1276,7 +1285,9 @@ FIELD RULES:
 - deal_type: must be one of the options listed above
 - date_signed: always populate if findable — search "[company] [partner] partnership announced"
 - deal_focus: specific technologies e.g. "AI, Cloud" or "CRM, Analytics" — not generic terms
-- description: explain what each company contributes and what customers get
+- description: write UP TO 100-200 WORDS when the source material supports it — explain what
+  each company contributes, what customers get, technical/commercial scope, and why the
+  partnership exists. Only stay short if the source genuinely has little detail.
 - source: real URL — press release preferred over generic partner page
 
 Return ONLY the raw JSON array. No prose. No markdown fences.
