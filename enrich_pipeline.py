@@ -781,6 +781,15 @@ async def enrich_company(
     )
     brand_name = _STRIP.sub("", company_name).strip()
 
+    def _dedup_key(deal: dict, suffix: str = "") -> str:
+        """Vendor + date + description snippet — NOT vendor alone, so a vendor
+        with multiple distinct deals (common) isn't collapsed into one row."""
+        vendor = (deal.get("vendor") or "").strip().lower()
+        date_part = (deal.get("start_date") or deal.get("last_detected")
+                     or deal.get("end_date") or deal.get("date_signed") or "").strip()
+        desc_part = (deal.get("description") or "")[:60].strip().lower()
+        return f"{vendor}|{date_part}|{desc_part}|{suffix}"
+
     prompts = _build_prompts(company_name, domain, linkedin_url, ft, fv)
     seen_keys: set[str] = set()   # deduplicate across the two calls
     total_deals = 0
@@ -820,7 +829,7 @@ async def enrich_company(
         # Deduplicate and stream new deals immediately
         new_deals = 0
         for deal in call_deals:
-            dedup_key = f"{deal.get('vendor','').lower()}|{deal.get('date_signed','')}"
+            dedup_key = _dedup_key(deal)
             if dedup_key in seen_keys:
                 continue
             seen_keys.add(dedup_key)
@@ -868,7 +877,7 @@ async def enrich_company(
                 future.cancel()
 
             for deal in call_deals:
-                dedup_key = f"{deal.get('vendor','').lower()}|{deal.get('date_signed','')}"
+                dedup_key = _dedup_key(deal)
                 if dedup_key in seen_keys:
                     continue
                 seen_keys.add(dedup_key)
@@ -951,7 +960,7 @@ Return ONLY the raw JSON array. No prose. No markdown fences.
             yield {"type": "heartbeat",
                    "message": f"✅ Found {len(partner_deals)} IT partners for {company_name}"}
             for deal in partner_deals:
-                dedup_key = f"{deal.get('vendor','').lower()}|partner"
+                dedup_key = _dedup_key(deal, suffix="partner")
                 if dedup_key in seen_keys:
                     continue
                 seen_keys.add(dedup_key)
