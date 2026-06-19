@@ -170,25 +170,68 @@ def _tokenize(s: str) -> set[str]:
 
 
 # Words too generic to count as a meaningful taxonomy match on their own — a single
-# shared hit on one of these (e.g. "data") must never be enough to win a category,
-# since it caused real misclassifications (a cloud/consulting deal mapped to the
-# Communications > "Fixed Data" category purely because both mention "data").
+# shared hit on one of these (e.g. "data", "customer") must never be enough to win a
+# category, since it caused real misclassifications (a cloud/consulting deal mapped
+# to "Fixed Data"/"Customer Premise Equipment" purely from one incidental shared word).
 _GENERIC_MATCH_WORDS = {
     "data", "service", "services", "system", "systems", "management", "platform",
     "solution", "solutions", "technology", "application", "applications", "digital",
     "enterprise", "business", "software", "infrastructure", "network", "cloud",
+    "customer", "customers", "company", "operations", "operation", "process",
+    "processes", "support", "team", "teams", "project", "projects", "client",
 }
 
-# Minimum token-overlap score required to accept a fuzzy match — single generic-word
-# overlaps are excluded from scoring entirely (see _fuzzy_score), so any score >= 1
-# here already reflects at least one MEANINGFUL shared term.
-_MIN_FUZZY_SCORE = 1
+# Description-text matching is noisier than matching the model's own concise
+# tech_level3 choice (long free text has far more chances of incidental word overlap)
+# so it requires a higher bar — at least 2 meaningful shared terms, not 1.
+_MIN_FUZZY_SCORE_KEY = 1
+_MIN_FUZZY_SCORE_DESC = 2
 
 # Strong signal words that indicate an IT services / consulting / SI engagement —
 # used as a smarter fallback than the generic catch-all bucket when nothing else matches.
 _CONSULTING_SIGNAL_WORDS = (
     "migrat", "consult", "implement", "integrat", "moderni", "transform",
     "deploy", "rollout", "onboard", "advisory",
+)
+
+# Curated, deterministic phrase → Level 3 mappings for the deal types this tool
+# actually encounters most (cloud, data/analytics, AI, ERP, security, outsourcing).
+# Checked BEFORE noisy token-overlap fuzzy matching because a specific product/
+# platform name (e.g. "BigQuery", "Compute Engine") is a far more reliable signal
+# than generic word overlap against a 108-entry taxonomy.
+_STRONG_SIGNALS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("bigquery", "looker", "tableau", "power bi", "qlik", "data warehouse",
+      "data analytics platform", "business intelligence", "data analysis"),
+     "Business Intelligence and Analytics Tools"),
+    (("speech-to-text", "speech api", "text-to-speech", "vision api",
+      "natural language api", "generative ai", "large language model", " llm "),
+     "Industry Specific Applications"),
+    (("compute engine", "amazon ec2", " ec2 ", "virtual machine", "vm instance",
+      "infrastructure-as-a-service", " iaas"),
+     "Infrastructure-as-a-Service (IaaS)"),
+    (("app engine", "cloud run", "elastic beanstalk", "platform-as-a-service", " paas"),
+     "Platform-as-a-Service (PaaS)"),
+    (("software-as-a-service", " saas "),
+     "Software-as-a-Service (SaaS)"),
+    (("s/4hana", "sap erp", "oracle erp", "erp implementation"),
+     "ERP Financials"),
+    (("workday", "successfactors", "human capital management", " hcm "),
+     "ERP Human Capital Management"),
+    (("salesforce", "crm platform", "customer relationship management platform"),
+     "Sales Automation"),
+    (("robotic process automation", " rpa ", "uipath", "automation anywhere"),
+     "Robotic Process Automation (RPA)"),
+    (("managed security service", "mssp", "siem", "threat detection", "soc as a service"),
+     "Managed Security Services"),
+    (("data center outsourcing", "colocation"),
+     "Data Center Outsourcing"),
+    (("help desk", "service desk", "itsm"),
+     "Service Desk"),
+    (("digital transformation programme", "digital transformation program"),
+     "Digital Transformation"),
+    (("data migration", "cloud migration", "migrating its data", "migrated its",
+      "system integration", "systems integrator", "implementation partner"),
+     "System Integration"),
 )
 
 
@@ -200,21 +243,35 @@ def _fuzzy_score(a_tokens: set[str], b_tokens: set[str]) -> int:
     return len(meaningful) if meaningful else 0
 
 
+def _detect_strong_signal(description: str) -> str | None:
+    """Deterministic phrase match against curated, high-confidence signals. Returns
+    the first matching canonical Level 3 name, or None if nothing matches."""
+    if not description:
+        return None
+    d = f" {description.lower()} "
+    for phrases, canonical in _STRONG_SIGNALS:
+        if any(p in d for p in phrases):
+            return canonical
+    return None
+
+
 def classify_tech(level3_raw: str, description: str = "") -> tuple[str, str, str]:
     """Return (level1, level2, canonical_level3) — mandatory, non-empty triple.
 
-    Matching order:
-      1. Exact / substring match on the model's own tech_level3 choice
-      2. Token-overlap fuzzy match on tech_level3 (handles paraphrasing) — generic
-         single-word overlaps (e.g. "data", "service") are excluded from scoring
-      3. Token-overlap fuzzy match on the deal DESCRIPTION text — same generic-word
-         guard, so a long description doesn't spuriously win on common words
-      4. Consulting/SI signal fallback — if the description clearly describes an
-         implementation/migration engagement, default to "System Integration"
-         rather than an unrelated category
-      5. Guaranteed fallback bucket — never leaves Level 1/2/3 blank.
+    Matching order (most to least reliable):
+      1. Curated strong-signal phrase match on the DESCRIPTION (e.g. "BigQuery" ->
+         Business Intelligence and Analytics Tools) — deterministic and high-confidence
+      2. Exact / substring match on the model's own tech_level3 choice — but only
+         trusted if it isn't contradicted by a strong signal (see override below)
+      3. Token-overlap fuzzy match on tech_level3 (handles paraphrasing)
+      4. Token-overlap fuzzy match on the deal DESCRIPTION text — requires a HIGHER
+         overlap bar than step 3 since free text has far more incidental word overlap
+      5. Consulting/SI signal fallback — implementation/migration language defaults
+         to "System Integration" rather than an unrelated category
+      6. Guaranteed fallback bucket — never leaves Level 1/2/3 blank.
     """
     key = (level3_raw or "").strip().lower()
+    strong_signal = _detect_strong_signal(description)
 
     canonical = _TAXONOMY_LOWER.get(key) if key else None
 
@@ -225,6 +282,19 @@ def classify_tech(level3_raw: str, description: str = "") -> tuple[str, str, str
                 canonical = lv
                 break
 
+    # Sanity-check: the model can pick a literal taxonomy name that's actually
+    # unrelated to the deal (e.g. "Customer Premise Equipment" for a cloud/data
+    # deal just because "customer" appears in the description). If a strong,
+    # specific signal from the description disagrees with an implausible
+    # Hardware/Communications pick, prefer the strong signal.
+    if canonical:
+        l1_check, _ = TECH_TAXONOMY[canonical]
+        if l1_check in ("Communications", "Hardware") and canonical != strong_signal:
+            if strong_signal:
+                canonical = strong_signal
+            elif description and any(sig in description.lower() for sig in _CONSULTING_SIGNAL_WORDS):
+                canonical = "System Integration"
+
     if not canonical and key:
         # Token-overlap fuzzy match on the model's tech_level3 choice
         key_tokens = _tokenize(key)
@@ -234,24 +304,15 @@ def classify_tech(level3_raw: str, description: str = "") -> tuple[str, str, str
                 score = _fuzzy_score(key_tokens, _tokenize(lk))
                 if score > best_score:
                     best_score, best_lv = score, lv
-            if best_score >= _MIN_FUZZY_SCORE:
+            if best_score >= _MIN_FUZZY_SCORE_KEY:
                 canonical = best_lv
 
-    # Sanity-check override: the model can pick a literal taxonomy name (winning the
-    # exact-match check above) that's actually unrelated to the deal — e.g. choosing
-    # "Fixed Data" for a cloud/consulting migration just because "data" appears in
-    # the description. If the deal clearly reads as an IT services/SI engagement but
-    # landed in an implausible category (Communications/Hardware — never the right
-    # answer for a case-study/migration deal), reroute to System Integration.
-    if canonical and description:
-        l1_check, _ = TECH_TAXONOMY[canonical]
-        if l1_check in ("Communications", "Hardware"):
-            desc_lower = description.lower()
-            if any(sig in desc_lower for sig in _CONSULTING_SIGNAL_WORDS):
-                canonical = "System Integration"
+    if not canonical and strong_signal:
+        canonical = strong_signal
 
     if not canonical and description:
-        # Fall back to mapping the deal DESCRIPTION itself against the taxonomy
+        # Fall back to mapping the deal DESCRIPTION itself against the taxonomy —
+        # stricter threshold since this is the noisiest signal
         desc_tokens = _tokenize(description)
         if desc_tokens:
             best_score, best_lv = 0, None
@@ -259,7 +320,7 @@ def classify_tech(level3_raw: str, description: str = "") -> tuple[str, str, str
                 score = _fuzzy_score(desc_tokens, _tokenize(lk))
                 if score > best_score:
                     best_score, best_lv = score, lv
-            if best_score >= _MIN_FUZZY_SCORE:
+            if best_score >= _MIN_FUZZY_SCORE_DESC:
                 canonical = best_lv
 
     if not canonical and description:
