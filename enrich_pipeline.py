@@ -513,7 +513,16 @@ def _build_prompts(
     sector_vendors, sector_searches = _detect_sector_extra(company_name)
 
     # ── Prompt 1: broad sweep + acquisitions/JVs/disinvestments + top vendors ─
-    p1_searches = f"""  - "{company_name}" IT outsourcing contract deal signed
+    # LinkedIn/SI-partner searches are listed FIRST — these surface deals that never get
+    # a press release (implementation partner case studies, employee announcement posts)
+    # and are otherwise the most likely to be skipped if buried at the end of a long list.
+    p1_searches = f"""  - site:linkedin.com/posts "{company_name}" partnered cloud migration OR data modernization
+  - site:linkedin.com "{company_name}" case study cloud migration OR data platform
+  - site:linkedin.com "{company_name}" "proud to" OR "excited to announce" implementation
+  - site:linkedin.com "{company_name}" successfully migrated OR transformed onto
+  - "{company_name}" implementation partner case study cloud OR data OR AI
+  - "{company_name}" Google Cloud OR AWS OR Azure migration "implementation partner"
+  - "{company_name}" IT outsourcing contract deal signed
   - "{company_name}" technology acquisition acqui-hire
   - "{company_name}" joint venture technology partner
   - "{company_name}" corporate venture fund investment tech startup
@@ -531,11 +540,10 @@ def _build_prompts(
   - "{company_name}" bought acquired tech firm stake joint venture
   - site:businesswire.com OR site:prnewswire.com "{company_name}" acquires
   - site:businesswire.com OR site:prnewswire.com "{company_name}" technology deal
-  - site:linkedin.com/posts "{company_name}" partnered cloud migration OR data modernization
-  - site:linkedin.com "{company_name}" case study cloud migration OR data platform
-  - site:linkedin.com "{company_name}" "proud to" OR "excited to announce" implementation
-  - site:linkedin.com "{company_name}" successfully migrated OR transformed onto
-  - "{company_name}" implementation partner case study cloud OR data OR AI"""
+
+IMPORTANT: Run ALL of the searches above — do not stop early just because you found a few
+deals. The LinkedIn and implementation-partner searches at the top often surface deals that
+have NO press release anywhere else, so skipping them means missing real deals."""
 
     p1_vendors = (
         "Accenture, Infosys, TCS, Wipro, HCLTech, Cognizant, Capgemini, DXC Technology, "
