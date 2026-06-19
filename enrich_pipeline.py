@@ -239,6 +239,23 @@ _VALUE_BENCHMARKS: list[tuple[tuple[str, ...], str]] = [
 _DEFAULT_ESTIMATE = "$10M"
 
 
+def _match_grounding_source(vendor: str, description: str,
+                             grounding_sources: list[tuple[str, str]]) -> str:
+    """Pick the grounding-verified URL whose title best overlaps the deal's vendor/
+    description. Always returns a real, working URL if grounding triggered (falls
+    back to the first chunk when no title overlap), or '' if Google Search grounding
+    returned nothing at all — so the frontend never shows a confidently broken link."""
+    if not grounding_sources:
+        return ""
+    target_tokens = _tokenize(f"{vendor} {description}")
+    best_score, best_uri = -1, grounding_sources[0][0]
+    for uri, title in grounding_sources:
+        score = len(target_tokens & _tokenize(title))
+        if score > best_score:
+            best_score, best_uri = score, uri
+    return best_uri
+
+
 def estimate_deal_value(row: dict) -> tuple[str, str]:
     """Return (deal_value, deal_estimated) — guarantees deal_value is never blank.
     Only used when the model didn't provide a value; uses Level 2 category as the
@@ -632,7 +649,54 @@ have NO press release anywhere else, so skipping them means missing real deals."
                            year_searches, p2_vendors, extra,
                            fields_desc, fields_json_keys, sector_block)
 
-    return [prompt1, prompt2]
+    # ── Prompt 3: dedicated implementation-partner / case-study sweep ─────────
+    # Isolated from the other ~20 search topics in Prompt 1 so the model's search
+    # budget and attention go entirely toward LinkedIn case studies and SI/
+    # implementation-partner announcements — these never get a press release and
+    # were getting skipped when buried among unrelated queries.
+    prompt3 = f"""You are an enterprise IT deal research analyst with live Google Search.
+
+COMPANY: {company_name} | Website: {domain}{linkedin_block}
+
+TASK: Find IT implementation-partner and systems-integrator deals for {company_name} that
+were announced ONLY via LinkedIn posts, case studies, or partner blog posts — NOT via a
+formal press release. These are commonly the technology/cloud/data implementation partner
+(e.g. an NTT DATA subsidiary, a regional SI, a boutique consultancy) who executed a project
+on behalf of a bigger-name platform vendor (Google Cloud, AWS, Azure, Salesforce, SAP, etc).
+
+Run ALL of these searches before answering:
+  - site:linkedin.com/posts "{company_name}" migrated OR migration OR modernization
+  - site:linkedin.com "{company_name}" "case study"
+  - site:linkedin.com "{company_name}" "proud to announce" OR "excited to share" OR "thrilled to partner"
+  - "{company_name}" implementation partner cloud OR data OR AI case study
+  - "{company_name}" "in partnership with" technology data cloud
+  - "{company_name}" systems integrator OR SI partner project
+  - "{company_name}" Google Cloud partner case study
+  - "{company_name}" AWS partner case study
+  - "{company_name}" Microsoft Azure partner case study
+  - "{company_name}" NTT DATA OR Wipro OR Infosys OR TCS OR Capgemini OR Accenture case study
+
+For each deal found, return one JSON object:
+[
+  {{
+{fields_desc}
+  }}
+]
+
+FIELD RULES:
+- vendor: the IMPLEMENTATION/SI PARTNER who executed the work (e.g. "Niveus Solutions"),
+  NOT the underlying platform (Google Cloud, AWS, etc.) — the platform belongs in description
+- tech_level3: COMPULSORY — pick the best match from this taxonomy:
+{TECH_L3_LIST}
+- deal_value: numeric $ only ("$XM"/"$XB") — estimate from benchmarks if not stated
+- description: one sentence on what was migrated/modernized and onto which platform
+- source: leave as empty string — the real source link is attached automatically from
+  search grounding, do not fabricate a URL
+
+Return ONLY the raw JSON array. If you find nothing after running all searches, return [].
+No prose. No markdown fences."""
+
+    return [prompt1, prompt2, prompt3]
 
 
 def _gemini_extract_deals_sync(
@@ -723,6 +787,24 @@ def _gemini_extract_deals_sync(
             logger.warning(f"Empty response for {company_name}. finish_reason={finish_reason}")
             return []
 
+        # ── Extract grounding metadata — REAL, working URLs from Google Search ──
+        # The model frequently invents/misremembers "source" URLs in its JSON output,
+        # which is the cause of 404s. Grounding chunks are Google's own verified
+        # redirect links to the pages it actually searched, so we use these instead
+        # of trusting whatever URL string the model typed into the JSON.
+        grounding_sources: list[tuple[str, str]] = []  # (uri, title)
+        try:
+            for candidate in (response.candidates or []):
+                gm = getattr(candidate, "grounding_metadata", None)
+                if not gm:
+                    continue
+                for chunk in (getattr(gm, "grounding_chunks", None) or []):
+                    web = getattr(chunk, "web", None)
+                    if web and getattr(web, "uri", None):
+                        grounding_sources.append((web.uri, getattr(web, "title", "") or ""))
+        except Exception as g_err:
+            logger.warning(f"Grounding metadata extraction failed for {company_name}: {g_err}")
+
     except Exception as e:
         logger.error(f"Gemini API error for {company_name}: {e}", exc_info=True)
         return []
@@ -799,6 +881,11 @@ def _gemini_extract_deals_sync(
             dv, est = estimate_deal_value(row)
             row["deal_value"] = dv
             row["deal_estimated"] = est
+            # Replace the model's invented source URL with a Google-Search-verified
+            # grounding link (real, working URL) — prevents 404s entirely
+            row["source"] = _match_grounding_source(
+                row.get("vendor", ""), row.get("description", ""), grounding_sources
+            )
             out.append(row)
 
         logger.info(f"Parsed {len(out)} deals for {company_name}")
@@ -860,7 +947,8 @@ async def enrich_company(
     CALL_TIMEOUT = 150            # 2.5 min per call
 
     for call_idx, prompt in enumerate(prompts, 1):
-        label = "broad IT & cloud deals" if call_idx == 1 else "year-by-year + vendor sweep"
+        label = {1: "broad IT & cloud deals", 2: "year-by-year + vendor sweep",
+                  3: "LinkedIn / implementation-partner sweep"}.get(call_idx, "additional sweep")
         yield {"type": "heartbeat",
                "message": f"🔍 [{call_idx}/{len(prompts)}] Searching {company_name}: {label}…"}
         await asyncio.sleep(0)
