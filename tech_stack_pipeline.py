@@ -272,7 +272,12 @@ Field rules:
 - tech_install: numeric estimate of licensed users/seats based on company headcount and deployment scope (e.g. "500–2,000", "10,000–50,000", "100,000+") — or "-"
 - renewal_date: estimated contract renewal quarter (e.g. "Q2 2027") — infer from: contract age (typical 3-5yr enterprise), press release dates, or R1/R3 search results — or "-"
 - confidence_score: "87%" etc — 95-99% for DNS/pixel/public API key; 85-94% for vendor case study/press release; 75-84% for job posting; 60-74% for industry inference
-- deal_value: TCV of this technology contract. NUMERIC $ ONLY — "$XM" or "$XB" (e.g. "$5M", "$120M"). Use public figure if stated, else estimate from benchmarks for enterprise SaaS/platform deals. NO other text.
+- deal_value: TCV of this technology contract. NUMERIC $ ONLY — "$XM" or "$XB". Use public figure
+  if stated; otherwise estimate based on tech_install size and {company_name}'s likely company
+  size/IT budget — do NOT default to a generic enterprise benchmark for a mid-size or smaller
+  company. As a guide: <500 seats/light deployment → $0.1M–$1M; 500–5,000 seats or mid-scope
+  platform → $1M–$5M; 5,000–50,000 seats or company-wide platform → $5M–$25M; 50,000+ seats or
+  Fortune 500-scale rollout → $25M+. NO other text.
 - deal_acv: Annual contract value. NUMERIC $ ONLY (e.g. "$2M/yr → "$2M"). Empty string if single TCV or not derivable.
 - deal_estimated: "Y" if deal_value was estimated from benchmarks. Empty string "" if from a confirmed public source.
 - source_info: "Job posting", "Vendor case study", "Press release", "Annual report", "Privacy policy", "LinkedIn jobs", "BuiltWith", "G2 review", etc.

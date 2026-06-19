@@ -256,13 +256,60 @@ def _match_grounding_source(vendor: str, description: str,
     return best_uri
 
 
+def _detect_scale_signal(description: str) -> int:
+    """Scan the deal description for concrete technical-scale numbers (data volume,
+    systems/tables/databases migrated) and return a size tier 1-4, or 0 if no signal
+    found. Calibrated so a typical SI case-study migration (e.g. 60-70TB, 5,000+
+    tables, 20+ databases) lands in tier 2 ($1.5M-$4.5M) — matching real-world
+    market pricing for that scale rather than a flat enterprise-category default."""
+    if not description:
+        return 0
+    d = description.lower()
+
+    data_tb = None
+    pb_match = re.search(r'(\d+(?:\.\d+)?)\s*\+?\s*(?:pb|petabytes?)', d)
+    tb_match = re.search(r'(\d+(?:\.\d+)?)\s*\+?\s*(?:tb|terabytes?)', d)
+    if pb_match:
+        data_tb = float(pb_match.group(1)) * 1000
+    elif tb_match:
+        data_tb = float(tb_match.group(1))
+
+    count_match = re.search(
+        r'(\d{1,3}(?:,\d{3})*)\s*\+?\s*(?:legacy\s+)?(?:tables?|databases?|applications?|systems?|servers?)', d
+    )
+    system_count = int(count_match.group(1).replace(",", "")) if count_match else None
+
+    score = 0
+    if data_tb is not None:
+        if data_tb >= 1000: score = max(score, 4)
+        elif data_tb >= 100: score = max(score, 3)
+        elif data_tb >= 10: score = max(score, 2)
+        else: score = max(score, 1)
+    if system_count is not None:
+        if system_count > 20000: score = max(score, 4)
+        elif system_count > 5000: score = max(score, 3)
+        elif system_count >= 50: score = max(score, 2)
+        else: score = max(score, 1)
+    return score
+
+
+_SCALE_TIER_VALUES = {1: "$1M", 2: "$3M", 3: "$10M", 4: "$40M"}
+
+
 def estimate_deal_value(row: dict) -> tuple[str, str]:
     """Return (deal_value, deal_estimated) — guarantees deal_value is never blank.
-    Only used when the model didn't provide a value; uses Level 2 category as the
-    benchmark anchor and marks the row as estimated."""
+    Only used when the model didn't provide a value. Prefers concrete technical-scale
+    signals in the description (data volume, systems migrated) over a flat Level 2
+    category benchmark, since category alone over-estimates mid-market SI/migration
+    deals (e.g. a 'Cloud migration' case study is not automatically a $60M+ deal)."""
     existing = (row.get("deal_value") or "").strip()
     if existing and existing != "-":
         return existing, row.get("deal_estimated", "")
+
+    tier = _detect_scale_signal(row.get("description", ""))
+    if tier:
+        return _SCALE_TIER_VALUES[tier], "Y"
+
     l2 = row.get("tech_level2", "")
     for cats, value in _VALUE_BENCHMARKS:
         if l2 in cats:
@@ -430,14 +477,34 @@ FIELD RULES:
   If the deal doesn't cleanly fit one category, pick the closest one — do not return an empty string.
 - tech_level2: leave empty string — automatically mapped from tech_level3
 - tech_level1: leave empty string — automatically mapped from tech_level3 (which in turn maps to tech_level2)
-- deal_value: TCV (total contract value). NUMERIC $ ONLY — "$XM" or "$XB" (e.g. "$50M", "$2.5B"). ALWAYS provide a value: use public figure if stated, else ESTIMATE from benchmarks:
-  * Large IT outsourcing (5+ yr, major vendor): $100M–$2B → e.g. "$500M"
-  * Mid-size ERP/platform implementation: $10M–$100M → e.g. "$40M"
-  * SaaS subscription (enterprise): $1M–$20M/yr → e.g. "$5M"
-  * Cloud migration programme: $20M–$200M → e.g. "$80M"
-  * Managed services (3–5 yr): $30M–$300M → e.g. "$120M"
-  * Cybersecurity contract: $5M–$50M → e.g. "$20M"
-  NO other text — output exactly like "$50M" or "$2.5B"
+- deal_value: TCV (total contract value). NUMERIC $ ONLY — "$XM" or "$XB". ALWAYS provide a
+  value: use the public figure if explicitly stated; otherwise ESTIMATE using the steps below.
+  Do NOT default to a generic category midpoint — the estimate must reflect this SPECIFIC
+  deal's scale and this SPECIFIC company's size.
+
+  STEP 1 — Company scale: using your knowledge of {company_name}'s approximate revenue,
+  employee count, and industry, estimate its overall annual IT budget. Total annual IT spend
+  is typically 1–4% of revenue. A single project's TCV should rarely exceed roughly 10–20% of
+  that annual IT budget unless it is a flagship, multi-year, company-wide outsourcing deal.
+  A mid-size company or startup/scale-up does NOT have enterprise/Fortune-500-scale budgets —
+  do not price its projects as if it did.
+
+  STEP 2 — Technical scope: read any concrete numbers in the source material (data volume in
+  TB/PB, number of databases/tables/applications/servers migrated or modernized, engineering
+  team size, contract duration). These — not the deal category label alone — determine the
+  size tier. Modern migration tooling means cost scales sub-linearly with data volume; a large
+  TB figure alone does NOT imply an enterprise-scale price tag:
+  * Narrow-scope project (<10 systems/tables, <10TB data, short timeline, single team): $0.3M–$1.5M
+  * Small-to-mid modernization (10–5,000 systems/tables OR 10–100TB data, one quarter-ish): $1.5M–$4.5M
+  * Mid-size platform overhaul (5,000–20,000 systems/tables OR 100TB–1PB, 6–18 months, dedicated team): $5M–$15M
+  * Large enterprise-wide transformation (20,000+ systems, 1PB+, multi-year, large team): $20M–$80M
+  * Mega/multi-year outsourcing or managed-services overhaul for a Fortune 500 / global bank: $100M–$2B
+
+  STEP 3 — Sanity check: cross-reference Step 1 and Step 2. The final number must be
+  proportionate to BOTH the company's plausible IT budget AND the technical scope described —
+  if either signal points to a smaller company or a narrower project, use the lower tier.
+
+  Output exactly like "$50M" or "$2.5B" — NO other text.
 - deal_acv: ACV (annual contract value). NUMERIC $ ONLY (e.g. "$10M"). Empty string if it is a one-off TCV with no annual breakdown or if not derivable.
 - deal_estimated: "Y" if deal_value was estimated from benchmarks (not a stated public figure). Empty string "" if value came from a confirmed public source.
 - start_date: contract start or go-live date if mentioned
@@ -712,7 +779,17 @@ FIELD RULES:
   NOT the underlying platform (Google Cloud, AWS, etc.) — the platform belongs in description
 - tech_level3: COMPULSORY — pick the best match from this taxonomy:
 {TECH_L3_LIST}
-- deal_value: numeric $ only ("$XM"/"$XB") — estimate from benchmarks if not stated
+- deal_value: numeric $ only ("$XM"/"$XB") — estimate from the deal's ACTUAL technical scale,
+  not a generic category default. Base it on concrete numbers mentioned (data volume in TB/PB,
+  count of databases/tables/applications migrated, team size, duration) AND on {company_name}'s
+  likely company size/IT budget (a mid-size or smaller company does not have enterprise-scale
+  IT budgets). Implementation-partner projects like data/cloud migrations are typically:
+  * <10TB data or <10 systems: $0.3M–$1.5M
+  * 10–100TB data or 10–5,000 systems/tables: $1.5M–$4.5M  (most LinkedIn case-study migrations fall here)
+  * 100TB–1PB or 5,000–20,000 systems: $5M–$15M
+  * 1PB+ or 20,000+ systems, multi-year enterprise programme: $20M–$80M
+  Do not jump to enterprise-scale pricing just because the deal mentions "cloud migration" —
+  most SI/implementation-partner case studies are mid-market engagements, not billion-dollar deals.
 - description: one sentence on what was migrated/modernized and onto which platform
 - source: leave as empty string — the real source link is attached automatically from
   search grounding, do not fabricate a URL
