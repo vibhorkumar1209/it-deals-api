@@ -376,12 +376,21 @@ DEAL CATEGORIES TO CAPTURE (find ALL of these):
 2. Cloud & Digital Transformation — cloud migration, SaaS rollouts, digital programmes
 3. ERP / CRM / HCM / SCM — enterprise application implementations and upgrades
 4. IT Acquisitions — tech company acquisitions, acqui-hires, asset purchases with IT angle
-5. Strategic Joint Ventures & Corporate Venture — JVs with tech firms, CVC investments in tech cos
+   (the acquirer must actually integrate/operate the technology — not a passive stake)
+5. Strategic Joint Ventures & Technology Partnerships — JVs with tech firms to jointly build
+   or operate a technology platform (NOT capital/equity investments — see exclusion below)
 6. Enterprise Operations Partnerships — long-term IT ops partnerships, co-innovation agreements
 7. Technology Disinvestments — IT asset sales, carve-outs, spin-offs, divestitures of tech units
 8. Cybersecurity & Compliance — security platform contracts, SOC outsourcing, compliance tools
 9. Analytics, AI & Data — AI/ML platform deals, data lake, BI, advanced analytics contracts
 {sector_block}
+
+EXCLUDE — do NOT return these as deals, even if found during search:
+- Funding rounds, equity investments, venture capital / corporate venture capital (CVC)
+  investments, seed/Series A-Z rounds, or any deal whose primary nature is providing
+  capital rather than implementing/operating a technology system
+- IPOs, SPAC mergers, or pure financial transactions with no IT/technology delivery component
+- Minority equity stakes taken purely as a financial investment (not an operating partnership)
 
 SEARCHES TO RUN:
 {search_focus}
@@ -516,7 +525,7 @@ _SECTOR_KEYWORDS = {
             "core banking platform deal",
             "digital banking transformation",
             "payment technology partnership",
-            "fintech investment acquisition",
+            "fintech acquisition technology integration",
         ],
     },
     "telecom": {
@@ -593,7 +602,6 @@ def _build_prompts(
   - "{company_name}" IT outsourcing contract deal signed
   - "{company_name}" technology acquisition acqui-hire
   - "{company_name}" joint venture technology partner
-  - "{company_name}" corporate venture fund investment tech startup
   - "{company_name}" IT disinvestment carve-out spin-off asset sale
   - "{company_name}" digital transformation program cloud migration
   - "{company_name}" managed services ERP SAP Oracle implementation
