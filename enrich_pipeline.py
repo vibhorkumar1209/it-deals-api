@@ -326,10 +326,17 @@ EXTRACTION RULES:
 - Read full articles, not just headlines
 - One JSON object per distinct deal — never merge two deals
 - Capture deals across ALL years available, not just recent ones
-- Include press releases, news, vendor announcements, IR filings, annual reports
+- Include press releases, news, vendor announcements, IR filings, annual reports,
+  AND LinkedIn posts/case studies from the implementation partner, the platform vendor,
+  or their employees ("proud to announce", "excited to share this case study", etc.) —
+  these are a primary source for SI/implementation-partner deals that never get a press release
 - PAY SPECIAL ATTENTION to: post spin-off / demerger IT separation programmes,
   nine-figure or billion-dollar IT outsourcing restructurings, IT carve-out programmes
   that replace systems from a former parent company, large infrastructure consolidation deals
+- When a deal involves both an SI/implementation partner (e.g. Niveus Solutions, Accenture,
+  TCS) AND an underlying platform (e.g. Google Cloud, AWS, Azure), create one row for the
+  SI/implementation partner as "vendor" — the platform name belongs in the description, not
+  as a substitute for the partner who actually executed the work
 
 Return ONLY a valid JSON array:
 [
@@ -523,7 +530,12 @@ def _build_prompts(
   - "{company_name}" acquisition technology software hardware
   - "{company_name}" bought acquired tech firm stake joint venture
   - site:businesswire.com OR site:prnewswire.com "{company_name}" acquires
-  - site:businesswire.com OR site:prnewswire.com "{company_name}" technology deal"""
+  - site:businesswire.com OR site:prnewswire.com "{company_name}" technology deal
+  - site:linkedin.com/posts "{company_name}" partnered cloud migration OR data modernization
+  - site:linkedin.com "{company_name}" case study cloud migration OR data platform
+  - site:linkedin.com "{company_name}" "proud to" OR "excited to announce" implementation
+  - site:linkedin.com "{company_name}" successfully migrated OR transformed onto
+  - "{company_name}" implementation partner case study cloud OR data OR AI"""
 
     p1_vendors = (
         "Accenture, Infosys, TCS, Wipro, HCLTech, Cognizant, Capgemini, DXC Technology, "
