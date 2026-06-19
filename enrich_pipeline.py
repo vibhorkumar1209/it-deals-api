@@ -469,7 +469,11 @@ Return ONLY a valid JSON array:
 ]
 
 FIELD RULES:
-- vendor: exact name (e.g. "Infosys", "SAP S/4HANA", "Microsoft Azure", "Trimble")
+- vendor: exact name (e.g. "Infosys", "SAP S/4HANA", "Microsoft Azure", "Trimble"). If the
+  vendor executing this deal is a subsidiary/brand of a larger parent company (e.g. Niveus
+  Solutions is part of NTT DATA), name the subsidiary first and put the parent in brackets:
+  "Niveus Solutions (NTT DATA)". Only add the bracket when a real parent-subsidiary
+  relationship is involved in THIS deal — do not add it for standalone/independent vendors.
 - tech_level3: COMPULSORY — never leave blank. Base your choice on what the "description"
   field actually says this deal is about, then pick the single BEST matching Level 3 value
   from this exact taxonomy list (use the exact name as written, do not paraphrase):
@@ -775,8 +779,11 @@ For each deal found, return one JSON object:
 ]
 
 FIELD RULES:
-- vendor: the IMPLEMENTATION/SI PARTNER who executed the work (e.g. "Niveus Solutions"),
-  NOT the underlying platform (Google Cloud, AWS, etc.) — the platform belongs in description
+- vendor: the IMPLEMENTATION/SI PARTNER who executed the work, NOT the underlying platform
+  (Google Cloud, AWS, etc.) — the platform belongs in description. If that partner is a
+  subsidiary/brand of a larger parent company, name the subsidiary first with the parent in
+  brackets: "Niveus Solutions (NTT DATA)". Only add the bracket when a real parent-subsidiary
+  relationship is involved in THIS deal.
 - tech_level3: COMPULSORY — pick the best match from this taxonomy:
 {TECH_L3_LIST}
 - deal_value: numeric $ only ("$XM"/"$XB") — estimate from the deal's ACTUAL technical scale,
@@ -1179,7 +1186,10 @@ For each IT partner relationship found, return one JSON object with ALL fields p
 ]
 
 FIELD RULES:
-- vendor: exact company name, not a product name
+- vendor: exact company name, not a product name. If the partner is a subsidiary/brand of a
+  larger parent company, name the subsidiary first with the parent in brackets:
+  "Niveus Solutions (NTT DATA)". Only add the bracket when a real parent-subsidiary
+  relationship is involved in THIS deal.
 - deal_type: must be one of the options listed above
 - date_signed: always populate if findable — search "[company] [partner] partnership announced"
 - deal_focus: specific technologies e.g. "AI, Cloud" or "CRM, Analytics" — not generic terms
