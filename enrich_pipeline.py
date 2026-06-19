@@ -645,11 +645,27 @@ have NO press release anywhere else, so skipping them means missing real deals."
     if sector_searches:
         extra_parts.append(f"Sector-specific searches:\n{sector_searches}")
     if focus_tech or focus_vendor:
-        lines = ["User-specified focus searches:"]
-        for t in focus_tech:
-            lines.append(f'  - "{company_name}" {t} deal contract')
+        lines = ["User-specified focus searches — treat these as a STARTING POINT, not an exhaustive list:"]
         for v in focus_vendor:
             lines.append(f'  - "{company_name}" {v} deal partnership acquisition')
+            lines.append(f'  - "{company_name}" {v} subsidiary OR brand deal contract')
+        if focus_vendor:
+            lines.append(
+                "  For EACH focus vendor above, using your own knowledge identify: (a) its known "
+                "subsidiaries/brands, and (b) its direct competitors and THEIR subsidiaries/brands. "
+                "Then also search for deals between " + company_name + " and every one of those "
+                "entities — not only the literally-named vendor. Include but do not limit yourself "
+                "to obvious subsidiaries/competitors."
+            )
+        for t in focus_tech:
+            lines.append(f'  - "{company_name}" {t} deal contract')
+        if focus_tech:
+            lines.append(
+                "  For EACH focus technology above, using your own knowledge identify adjacent/"
+                "related technology terms and the named vendors who operate in that technology "
+                "space, then also search for deals between " + company_name + " and those — "
+                "include but do not limit yourself to the literal keyword given."
+            )
         extra_parts.append("\n".join(lines))
     extra = "\n\n".join(extra_parts)
 

@@ -175,9 +175,20 @@ def _build_tech_stack_prompt(
         cats_to_search = focus_categories or []
         scope_block_parts = []
         if focus_categories:
-            scope_block_parts.append("Focus categories:\n" + "\n".join(f"  - {c}" for c in focus_categories))
+            scope_block_parts.append(
+                "Focus categories (treat as a STARTING POINT, not exhaustive — also search "
+                "adjacent/related technology categories and the vendors who operate in that "
+                "space, not only the literal category name):\n"
+                + "\n".join(f"  - {c}" for c in focus_categories)
+            )
         if focus_vendors:
-            scope_block_parts.append("Focus vendors (also find direct competitors in the same category):\n" + "\n".join(f"  - {v}" for v in focus_vendors))
+            scope_block_parts.append(
+                "Focus vendors (treat as a STARTING POINT, not exhaustive — for EACH vendor below, "
+                "using your own knowledge also identify and search for: (a) its subsidiaries/brands, "
+                "(b) its direct competitors in the same category, and (c) those competitors' "
+                "subsidiaries/brands. Include but do not limit yourself to obvious names):\n"
+                + "\n".join(f"  - {v}" for v in focus_vendors)
+            )
         scope_block = "MODE: LASER-FOCUSED\n" + "\n".join(scope_block_parts)
         focus_label = ", ".join(focus_categories[:3] or focus_vendors[:3]) or "specified categories"
 
@@ -192,6 +203,8 @@ def _build_tech_stack_prompt(
     for v in (focus_vendors or [])[:6]:
         vendor_searches.append(f'V1. "{company_name}" "{v}" deployed OR implemented OR using OR "go-live" OR case study')
         vendor_searches.append(f'V2. "{company_name}" "{v}" OR competitor alternative — what is in use in the same category?')
+        vendor_searches.append(f'V3. "{company_name}" "{v}" subsidiary OR brand deployed OR implemented OR using')
+        vendor_searches.append(f'V4. "{company_name}" — identify direct competitors of "{v}" and their subsidiaries/brands, then check if any are deployed or implemented')
 
     # Implementation partner searches
     si_firms = "Accenture OR TCS OR Infosys OR Wipro OR Cognizant OR Deloitte OR IBM OR Capgemini OR HCL OR PwC OR EY OR KPMG OR BCG OR Slalom OR Atos OR CGI OR DXC"
