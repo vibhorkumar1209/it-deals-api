@@ -87,15 +87,22 @@ def _parse_json_from_text(text: str) -> dict | list | None:
 
 # ── Competitor Discovery ──────────────────────────────────────────────────────
 
-def _discovery_prompt(target_company: str, target_domain: str) -> str:
+def _discovery_prompt(target_company: str, target_domain: str, industry_context: str = "", technology_context: str = "") -> str:
     domain_hint = f"(domain: {target_domain})" if target_domain else ""
-    return f"""You are a competitive intelligence analyst. Identify the 8-10 most direct competitors of {target_company} {domain_hint}.
+    focus_lines = []
+    if industry_context:
+        focus_lines.append(f"Focus specifically on competitors active in: {industry_context}")
+    if technology_context:
+        focus_lines.append(f"Focus on competitors with significant presence in: {technology_context}")
+    focus_block = ("\n" + "\n".join(focus_lines)) if focus_lines else ""
+    return f"""You are a competitive intelligence analyst. Identify the 8-10 most direct competitors of {target_company} {domain_hint}.{focus_block}
 
 Search for:
 1. Companies with overlapping product/service offerings to {target_company}
-2. Companies competing in the same market segments
+2. Companies competing in the same market segments{" and " + industry_context if industry_context else ""}
 3. Recent analyst reports positioning competitors against {target_company}
 4. Industry benchmarking lists including {target_company}
+{"5. Companies competing specifically in " + technology_context + " market" if technology_context else ""}
 
 Return ONLY a JSON array (no markdown, no explanation):
 [
@@ -110,9 +117,9 @@ Return ONLY a JSON array (no markdown, no explanation):
 Include 8-10 competitors. Order by relevance (most direct competitors first)."""
 
 
-async def discover_competitors(target_company: str, target_domain: str = "") -> list[dict]:
+async def discover_competitors(target_company: str, target_domain: str = "", industry_context: str = "", technology_context: str = "") -> list[dict]:
     """Return list of {{name, domain, descriptor}} dicts."""
-    prompt = _discovery_prompt(target_company, target_domain)
+    prompt = _discovery_prompt(target_company, target_domain, industry_context, technology_context)
     text = await asyncio.wait_for(
         asyncio.to_thread(_gemini_call_sync, prompt, True, 4096),
         timeout=CALL_TIMEOUT,
@@ -203,9 +210,23 @@ Use "—" for unknown fields."""
 
 
 def _financial_prompt(company: str) -> str:
-    return f"""Research the financial performance of {company}.
+    return f"""Research the financial performance of {company}. Search broadly using multiple queries.
 
-Search for: "{company}" revenue 2024 2025 annual, "{company}" financial results earnings, "{company}" revenue by segment geography, "{company}" ARR growth, "{company}" funding valuation.
+Search for ALL of the following:
+- "{company}" annual revenue 2024 fiscal year results
+- "{company}" revenue growth quarterly earnings report
+- "{company}" total revenue billion million 2024 2025
+- "{company}" financial results investor relations
+- "{company}" annual report revenue by segment
+- "{company}" revenue by geography region breakdown
+- "{company}" gross margin operating margin EBITDA
+- "{company}" ARR recurring revenue growth rate
+- "{company}" funding raised valuation IPO
+
+For public companies like Oracle, SAP, Microsoft: use their latest fiscal year filings (10-K, earnings releases, press releases) which are public record.
+For private companies: use Crunchbase, press releases, news articles, analyst estimates.
+
+Be thorough — do not return "—" for major public companies where financials are publicly available.
 
 Return ONLY valid JSON (no markdown):
 {{
@@ -216,11 +237,13 @@ Return ONLY valid JSON (no markdown):
   "revenue_by_segment": {{}},
   "gross_margin": "",
   "ebitda_margin": "",
+  "net_income": "",
   "funding_raised": "",
   "valuation": "",
+  "market_cap": "",
   "profitable": ""
 }}
-Use "—" for unknown fields."""
+Use "—" ONLY if genuinely unavailable after searching all sources above."""
 
 
 def _gtm_prompt(company: str) -> str:
@@ -359,6 +382,8 @@ def _synthesis_prompt(
     competitors: list[str],
     benchmark_focus: str,
     all_results: list[dict],
+    industry_context: str = "",
+    technology_context: str = "",
 ) -> str:
     summary_lines = []
     for r in all_results:
@@ -371,9 +396,16 @@ def _synthesis_prompt(
     summary = "\n".join(summary_lines[:80])
     competitors_str = ", ".join(competitors) if competitors else "no direct competitors"
 
+    context_lines = []
+    if industry_context:
+        context_lines.append(f"Industry context: {industry_context}")
+    if technology_context:
+        context_lines.append(f"Technology focus: {technology_context}")
+    context_block = ("\n" + "\n".join(context_lines) + "\n") if context_lines else ""
+
     return f"""You are a senior competitive strategy analyst. Based on the following competitive intelligence data, write a strategic analysis comparing {target} against its competitors ({competitors_str}).
 
-Benchmark focus: {benchmark_focus}
+Benchmark focus: {benchmark_focus}{context_block}
 
 Intelligence gathered:
 {summary}
@@ -396,8 +428,10 @@ async def _run_synthesis(
     competitors: list[str],
     benchmark_focus: str,
     all_results: list[dict],
+    industry_context: str = "",
+    technology_context: str = "",
 ) -> str:
-    prompt = _synthesis_prompt(target, competitors, benchmark_focus, all_results)
+    prompt = _synthesis_prompt(target, competitors, benchmark_focus, all_results, industry_context, technology_context)
     try:
         text = await asyncio.wait_for(
             asyncio.to_thread(_gemini_call_sync, prompt, False, 4096),
@@ -417,6 +451,8 @@ async def run_competitive_analysis(
     competitors: list[dict],
     enabled_modules: list[str],
     benchmark_focus: str,
+    industry_context: str = "",
+    technology_context: str = "",
 ) -> AsyncGenerator[dict, None]:
     """Yield SSE-ready dicts for each module result, then synthesis."""
 
@@ -496,7 +532,7 @@ async def run_competitive_analysis(
     if all_results:
         yield {"type": "synthesis_start"}
         competitor_names = [c["name"] for c in competitors]
-        synthesis_text = await _run_synthesis(target_company, competitor_names, benchmark_focus, all_results)
+        synthesis_text = await _run_synthesis(target_company, competitor_names, benchmark_focus, all_results, industry_context, technology_context)
         yield {"type": "synthesis", "text": synthesis_text}
 
     yield {"type": "complete", "total_companies": len(all_results)}

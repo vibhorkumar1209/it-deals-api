@@ -975,6 +975,8 @@ async def signal_intel(req: SignalIntelRequest):
 class CompetitiveDiscoverRequest(BaseModel):
     target_company: str = Field(..., min_length=1)
     target_domain: str = Field(default="")
+    industry_context: str = Field(default="")
+    technology_context: str = Field(default="")
 
 
 class CompetitorInput(BaseModel):
@@ -987,7 +989,9 @@ class CompetitiveAnalyzeRequest(BaseModel):
     target_domain: str = Field(default="")
     competitors: list[CompetitorInput] = Field(default_factory=list, max_length=5)
     enabled_modules: list[str] = Field(default_factory=list)
-    benchmark_focus: str = Field(default="Overall Competitiveness")
+    benchmark_focus: list[str] = Field(default_factory=lambda: ["Overall Competitiveness"])
+    industry_context: str = Field(default="")
+    technology_context: str = Field(default="")
 
 
 @app.post("/api/competitive/discover")
@@ -999,7 +1003,7 @@ async def competitive_discover(req: CompetitiveDiscoverRequest):
     from competitive_pipeline import discover_competitors
     try:
         competitors = await asyncio.wait_for(
-            discover_competitors(req.target_company, req.target_domain),
+            discover_competitors(req.target_company, req.target_domain, req.industry_context, req.technology_context),
             timeout=120,
         )
         return {"competitors": competitors}
@@ -1029,13 +1033,17 @@ async def competitive_analyze(req: CompetitiveAnalyzeRequest):
 
         competitors = [{"name": c.name, "domain": c.domain} for c in req.competitors]
 
+        benchmark_focus_str = ", ".join(req.benchmark_focus) if isinstance(req.benchmark_focus, list) else req.benchmark_focus
+
         try:
             async for event in run_competitive_analysis(
                 target_company=req.target_company,
                 target_domain=req.target_domain,
                 competitors=competitors,
                 enabled_modules=enabled,
-                benchmark_focus=req.benchmark_focus,
+                benchmark_focus=benchmark_focus_str,
+                industry_context=req.industry_context,
+                technology_context=req.technology_context,
             ):
                 yield _sse(event)
         except Exception as e:
