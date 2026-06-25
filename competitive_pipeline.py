@@ -89,20 +89,59 @@ def _parse_json_from_text(text: str) -> dict | list | None:
 
 def _discovery_prompt(target_company: str, target_domain: str, industry_context: str = "", technology_context: str = "") -> str:
     domain_hint = f"(domain: {target_domain})" if target_domain else ""
-    focus_lines = []
-    if industry_context:
-        focus_lines.append(f"Focus specifically on competitors active in: {industry_context}")
-    if technology_context:
-        focus_lines.append(f"Focus on competitors with significant presence in: {technology_context}")
-    focus_block = ("\n" + "\n".join(focus_lines)) if focus_lines else ""
-    return f"""You are a competitive intelligence analyst. Identify the 8-10 most direct competitors of {target_company} {domain_hint}.{focus_block}
+    has_focus = bool(industry_context or technology_context)
+
+    if has_focus:
+        focus_parts = []
+        if industry_context:
+            focus_parts.append(f"industry: {industry_context}")
+        if technology_context:
+            focus_parts.append(f"technology domain: {technology_context}")
+        focus_desc = " AND ".join(focus_parts)
+
+        search_lines = []
+        if industry_context:
+            search_lines.append(f'- "{industry_context}" market leaders competitors landscape')
+            search_lines.append(f'- "{target_company}" {industry_context} competitors rivals')
+            search_lines.append(f'- top companies in "{industry_context}" analyst report Gartner Forrester')
+        if technology_context:
+            search_lines.append(f'- "{technology_context}" vendors market leaders 2024 2025')
+            search_lines.append(f'- "{target_company}" {technology_context} competitive alternatives')
+            search_lines.append(f'- best "{technology_context}" companies Gartner Magic Quadrant')
+        search_lines.append(f'- "{target_company}" {domain_hint} competitors benchmarking')
+        searches = "\n".join(search_lines)
+
+        return f"""You are a competitive intelligence analyst. Your task is to identify the 8-10 most relevant competitors of {target_company} {domain_hint} SPECIFICALLY in the following focused scope:
+
+Scope: {focus_desc}
+
+IMPORTANT: Only return competitors that are genuinely active in this specific scope. Do NOT return generic/overall competitors of {target_company} if they are not relevant to {focus_desc}. Every competitor returned must operate in this space.
 
 Search for:
-1. Companies with overlapping product/service offerings to {target_company}
-2. Companies competing in the same market segments{" and " + industry_context if industry_context else ""}
-3. Recent analyst reports positioning competitors against {target_company}
-4. Industry benchmarking lists including {target_company}
-{"5. Companies competing specifically in " + technology_context + " market" if technology_context else ""}
+{searches}
+
+For each competitor, verify they are active in {focus_desc} — include only those with real products, services, or market presence in this area.
+
+Return ONLY a JSON array (no markdown, no explanation):
+[
+  {{
+    "name": "Company Full Name",
+    "domain": "company.com",
+    "descriptor": "One sentence describing specifically how they compete with {target_company} in {focus_desc}"
+  }},
+  ...
+]
+
+Include 8-10 competitors. Order by relevance in {focus_desc} (most direct first)."""
+
+    # No focus context — general discovery
+    return f"""You are a competitive intelligence analyst. Identify the 8-10 most direct overall competitors of {target_company} {domain_hint}.
+
+Search for:
+- "{target_company}" competitors rivals alternatives
+- Companies with overlapping product/service offerings to {target_company}
+- Recent analyst reports positioning competitors against {target_company}
+- Industry benchmarking lists including {target_company}
 
 Return ONLY a JSON array (no markdown, no explanation):
 [
