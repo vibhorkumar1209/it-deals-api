@@ -94,45 +94,52 @@ def _discovery_prompt(target_company: str, target_domain: str, industry_context:
     if has_focus:
         focus_parts = []
         if industry_context:
-            focus_parts.append(f"industry: {industry_context}")
+            focus_parts.append(industry_context)
         if technology_context:
-            focus_parts.append(f"technology domain: {technology_context}")
-        focus_desc = " AND ".join(focus_parts)
+            focus_parts.append(technology_context)
+        focus_desc = " / ".join(focus_parts)
 
+        # Build industry-first search queries — market space is the primary axis
         search_lines = []
-        if industry_context:
-            search_lines.append(f'- "{industry_context}" market leaders competitors landscape')
-            search_lines.append(f'- "{target_company}" {industry_context} competitors rivals')
-            search_lines.append(f'- top companies in "{industry_context}" analyst report Gartner Forrester')
-        if technology_context:
-            search_lines.append(f'- "{technology_context}" vendors market leaders 2024 2025')
-            search_lines.append(f'- "{target_company}" {technology_context} competitive alternatives')
-            search_lines.append(f'- best "{technology_context}" companies Gartner Magic Quadrant')
-        search_lines.append(f'- "{target_company}" {domain_hint} competitors benchmarking')
-        searches = "\n".join(search_lines)
+        if industry_context and technology_context:
+            search_lines.append(f'top companies in {industry_context} {technology_context} market 2024 2025')
+            search_lines.append(f'leading vendors {technology_context} for {industry_context}')
+            search_lines.append(f'Gartner Forrester {industry_context} {technology_context} competitive landscape')
+        elif industry_context:
+            search_lines.append(f'top companies in {industry_context} market 2024 2025')
+            search_lines.append(f'leading players {industry_context} industry competitive landscape')
+            search_lines.append(f'Gartner Forrester {industry_context} market leaders report')
+        elif technology_context:
+            search_lines.append(f'top {technology_context} vendors companies 2024 2025')
+            search_lines.append(f'leading {technology_context} providers competitive landscape')
+            search_lines.append(f'Gartner Magic Quadrant {technology_context} market leaders')
+        searches = "\n".join(f"- {l}" for l in search_lines)
 
-        return f"""You are a competitive intelligence analyst. Your task is to identify the 8-10 most relevant competitors of {target_company} {domain_hint} SPECIFICALLY in the following focused scope:
+        return f"""You are a competitive intelligence analyst.
 
-Scope: {focus_desc}
-
-IMPORTANT: Only return competitors that are genuinely active in this specific scope. Do NOT return generic/overall competitors of {target_company} if they are not relevant to {focus_desc}. Every competitor returned must operate in this space.
+Step 1 — Identify the leading companies in this market space:
+{focus_desc}
 
 Search for:
 {searches}
 
-For each competitor, verify they are active in {focus_desc} — include only those with real products, services, or market presence in this area.
+Build a list of 8-10 companies that are genuine market participants in {focus_desc}. These are companies with real products, revenues, or customers in this space — not companies tangentially related to it.
+
+Step 2 — For each company you found, note how they overlap or compete with {target_company} {domain_hint} in {focus_desc}.
+
+The target company {target_company} may or may not be a major player in {focus_desc}. Your list must reflect the actual competitive landscape of {focus_desc}, NOT the general list of {target_company}'s overall competitors.
 
 Return ONLY a JSON array (no markdown, no explanation):
 [
   {{
     "name": "Company Full Name",
     "domain": "company.com",
-    "descriptor": "One sentence describing specifically how they compete with {target_company} in {focus_desc}"
+    "descriptor": "One sentence: what they do in {focus_desc} and how they relate to {target_company}"
   }},
   ...
 ]
 
-Include 8-10 competitors. Order by relevance in {focus_desc} (most direct first)."""
+Include 8-10 companies. Order by market prominence in {focus_desc} (largest/most established first)."""
 
     # No focus context — general discovery
     return f"""You are a competitive intelligence analyst. Identify the 8-10 most direct overall competitors of {target_company} {domain_hint}.
