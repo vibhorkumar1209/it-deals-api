@@ -165,11 +165,11 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
 
 import datetime as _dt
 
-def _date_window() -> str:
-    """Return a human-readable cutoff string, e.g. 'June 2024 – June 2025'."""
+def _date_window(lookback_days: int = 365) -> str:
+    """Return a human-readable date range string, e.g. 'June 2024 – June 2025'."""
     today = _dt.date.today()
-    cutoff = today.replace(year=today.year - 1)
-    fmt = "%B %Y"
+    cutoff = today - _dt.timedelta(days=lookback_days)
+    fmt = "%d %B %Y"
     return f"{cutoff.strftime(fmt)} – {today.strftime(fmt)}"
 
 def _source_instructions(domain: str) -> str:
@@ -183,8 +183,8 @@ def _source_instructions(domain: str) -> str:
   • Industry trade press and analyst reports"""
 
 
-def _exec_leadership_prompt(company: str, domain: str, key_triggers: str, target_tech: str) -> str:
-    window = _date_window()
+def _exec_leadership_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365) -> str:
+    window = _date_window(lookback_days)
     extra = ""
     if key_triggers:
         extra += f"\nFocus especially on triggers related to: {key_triggers}"
@@ -216,8 +216,8 @@ Omit any signal whose date falls outside {window}. Return [] if nothing found wi
 Return ONLY the JSON array, no commentary."""
 
 
-def _corporate_expansion_prompt(company: str, domain: str, key_triggers: str, target_tech: str) -> str:
-    window = _date_window()
+def _corporate_expansion_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365) -> str:
+    window = _date_window(lookback_days)
     extra = ""
     if key_triggers:
         extra += f"\nFocus especially on triggers related to: {key_triggers}"
@@ -248,8 +248,8 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
 
-def _financial_corporate_prompt(company: str, domain: str, key_triggers: str, target_tech: str) -> str:
-    window = _date_window()
+def _financial_corporate_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365) -> str:
+    window = _date_window(lookback_days)
     extra = ""
     if key_triggers:
         extra += f"\nFocus especially on triggers related to: {key_triggers}"
@@ -280,8 +280,8 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
 
-def _tech_legal_prompt(company: str, domain: str, key_triggers: str, target_tech: str) -> str:
-    window = _date_window()
+def _tech_legal_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365) -> str:
+    window = _date_window(lookback_days)
     extra = ""
     if key_triggers:
         extra += f"\nFocus especially on triggers related to: {key_triggers}"
@@ -389,6 +389,7 @@ def _run_category_sync(
     category: str,
     key_triggers: str,
     target_tech: str,
+    lookback_days: int = 365,
 ) -> list:
     prompts = {
         "executive_leadership": _exec_leadership_prompt,
@@ -397,7 +398,7 @@ def _run_category_sync(
         "tech_legal":           _tech_legal_prompt,
     }
     prompt_fn = prompts[category]
-    prompt = prompt_fn(company, domain, key_triggers, target_tech)
+    prompt = prompt_fn(company, domain, key_triggers, target_tech, lookback_days)
     label = f"{company[:20]}|{category}"
     rows = _gemini_call_sync(prompt, use_search=True, label=label, max_output_tokens=8192)
 
@@ -473,6 +474,7 @@ async def run_signal_intelligence(
     user_domain: str = "",
     key_triggers: str = "",
     target_tech: str = "",
+    lookback_days: int = 365,
     max_concurrent: int = 4,
 ) -> AsyncGenerator[dict, None]:
     """
@@ -502,7 +504,7 @@ async def run_signal_intelligence(
 
             # Run 4 categories in parallel via thread pool
             futures = [
-                asyncio.to_thread(_run_category_sync, name, domain, cat, key_triggers, target_tech)
+                asyncio.to_thread(_run_category_sync, name, domain, cat, key_triggers, target_tech, lookback_days)
                 for cat in SIGNAL_CATEGORIES
             ]
             cat_results = await asyncio.gather(*futures, return_exceptions=True)

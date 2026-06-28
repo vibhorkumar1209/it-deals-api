@@ -934,6 +934,7 @@ class SignalIntelRequest(BaseModel):
     user_domain: str = Field(default="")
     key_triggers: str = Field(default="")
     target_tech: str = Field(default="")
+    lookback_days: int = Field(default=365, ge=7, le=365)
 
 
 @app.post("/api/signal-intel")
@@ -957,6 +958,7 @@ async def signal_intel(req: SignalIntelRequest):
                 user_domain=req.user_domain,
                 key_triggers=req.key_triggers,
                 target_tech=req.target_tech,
+                lookback_days=req.lookback_days,
             ):
                 yield _sse(event)
         except Exception as e:
