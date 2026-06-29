@@ -1081,6 +1081,15 @@ class IndustryDealsSearchRequest(BaseModel):
     focus_tech: str = Field(default="")
 
 
+@app.get("/api/debug-industry-companies")
+async def debug_industry_companies(industry: str = "Banking", geography: str = "France"):
+    from industry_deals_pipeline import _company_list_prompt, _gemini_sync, _parse_json
+    prompt = _company_list_prompt(industry, geography)
+    text = await asyncio.to_thread(_gemini_sync, prompt)
+    parsed = _parse_json(text)
+    return {"text_len": len(text), "text_preview": text[:800], "parsed_type": str(type(parsed)), "parsed_len": len(parsed) if isinstance(parsed, list) else None, "parsed_preview": parsed[:2] if isinstance(parsed, list) else parsed}
+
+
 @app.post("/api/industry-companies")
 async def industry_companies(req: IndustryCompaniesRequest):
     if not os.getenv("GOOGLE_AI_API_KEY"):
