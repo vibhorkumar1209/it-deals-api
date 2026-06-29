@@ -335,19 +335,132 @@ def classify_tech(level3_raw: str, description: str = "") -> tuple[str, str, str
     return (l1, l2, canonical)
 
 
-# Benchmark TCV ranges by Level 2 category — used only when the model leaves
-# deal_value blank, so every deal always has a value (marked as estimated).
-_VALUE_BENCHMARKS: list[tuple[tuple[str, ...], str]] = [
-    (("Application-Led Outsourcing", "Infrastructure-Led Outsourcing",
-      "Business Process Outsourcing"), "$150M"),
-    (("Cloud Services",), "$60M"),
-    (("Consulting & System Integration",), "$40M"),
-    (("End User Services", "Network Services"), "$25M"),
-    (("Enterprise Applications", "Application Development & Deployment"), "$30M"),
-    (("Software Infrastructure",), "$15M"),
-    (("Digital Enterprise", "Internet of Things (IoT)"), "$20M"),
-]
-_DEFAULT_ESTIMATE = "$10M"
+# ── Deal-value estimation model ───────────────────────────────────────────────
+# Three independent signals are combined: deal type, company size, technical
+# scale tier. Each axis narrows the plausible $ range so estimates vary
+# meaningfully across deals rather than collapsing to a flat category midpoint.
+
+# 1. Deal-type patterns (checked in priority order: outsourcing > saas >
+#    consulting > implementation).  "implementation" is the catch-all default.
+_DEAL_TYPE_RE: dict[str, list[re.Pattern]] = {
+    "outsourcing": [re.compile(p, re.I) for p in [
+        r"outsourc", r"managed.?service", r"\bbpo\b", r"\bilo\b", r"\bito\b",
+        r"facilities.management", r"run.the.bank", r"end.to.end.operations",
+        r"strategic.partnership.*service", r"multi.year.*service",
+    ]],
+    "saas": [re.compile(p, re.I) for p in [
+        r"\bsaas\b", r"software.as.a.service", r"\bsubscription\b",
+        r"annual.license", r"per.seat", r"per.user", r"cloud.license",
+        r"perpetual.license",
+    ]],
+    "consulting": [re.compile(p, re.I) for p in [
+        r"\bconsult", r"\badvisory\b", r"strategy.engagement",
+        r"\bassessment\b", r"\baudit\b", r"\broadmap\b", r"\bfeasibility\b",
+    ]],
+    "implementation": [re.compile(p, re.I) for p in [
+        r"implement", r"migrat", r"deploy", r"rollout", r"\bintegrat",
+        r"go.live", r"digital.transform", r"upgrade", r"replac", r"moderniz",
+        r"overhaul", r"development",
+    ]],
+}
+
+# 2. Company-size detection from deal description text.
+#    enterprise > large > small; "mid" is the default when nothing matches.
+_CO_SIZE_RE: dict[str, list[re.Pattern]] = {
+    "enterprise": [re.compile(p, re.I) for p in [
+        r"fortune.?(?:500|\d+)", r"s&p\s*500",
+        r"\$[\d,]+\s*b(?:illion)?\s*(?:in\s*)?(?:revenue|turnover|assets)",
+        r"(?:revenue|turnover).{0,30}\$[\d,]+\s*b",
+        r"\d{3},\d{3}[\s+]*employee",             # 100,000+ employees
+        r"global\s+(?:bank|insurer|conglomerate|manufacturer|retailer|group)",
+        r"multinational", r"listed.on.(?:nyse|nasdaq|lse|bse|nse)",
+        r"tier.?1\s+bank", r"central\s+bank",
+    ]],
+    "large": [re.compile(p, re.I) for p in [
+        r"\$[\d,.]+\s*(?:m|mn|million)[\s,]+(?:in\s*)?(?:revenue|turnover)",
+        r"(?:revenue|turnover).{0,30}\$[\d,.]+\s*(?:m|mn|million)",
+        r"\d{1,2},\d{3}[\s+]*employee",            # 1,000–19,999 employees
+        r"national\s+(?:bank|insurer|company|airline)",
+        r"state.owned", r"public\s+sector\s+(?:bank|company|enterprise)",
+        r"leading\s+(?:bank|company|provider|insurer|telecom)",
+        r"(?:regional|domestic)\s+(?:bank|lender)",
+    ]],
+    "small": [re.compile(p, re.I) for p in [
+        r"\bstartup\b", r"\bstart.up\b", r"\bscale.up\b",
+        r"early.stage", r"\bsmb\b", r"\bsme\b",
+        r"seed.funded", r"series\s+[a-c]\s+funded",
+    ]],
+}
+
+# 3. TCV ranges (low_M, high_M) indexed by (deal_type, company_size).
+#    SaaS ranges are annual (ACV); the function multiplies by contract years.
+#    Outsourcing ranges assume a ~5-year base; shorter/longer contracts scale.
+_VALUE_MODEL: dict[tuple[str, str], tuple[float, float]] = {
+    # Outsourcing / managed services
+    ("outsourcing", "enterprise"): (150.0, 2000.0),
+    ("outsourcing", "large"):       (40.0,  400.0),
+    ("outsourcing", "mid"):         (10.0,  100.0),
+    ("outsourcing", "small"):        (3.0,   25.0),
+    # SaaS / subscription (ACV — multiplied by years below)
+    ("saas",        "enterprise"):  (10.0,  200.0),
+    ("saas",        "large"):        (3.0,   50.0),
+    ("saas",        "mid"):          (0.5,   15.0),
+    ("saas",        "small"):        (0.1,    3.0),
+    # Implementation / migration / SI
+    ("implementation", "enterprise"): (15.0, 200.0),
+    ("implementation", "large"):       (5.0,  60.0),
+    ("implementation", "mid"):         (1.5,  20.0),
+    ("implementation", "small"):       (0.3,   5.0),
+    # Consulting / advisory
+    ("consulting",  "enterprise"):    (2.0,  25.0),
+    ("consulting",  "large"):         (0.8,  12.0),
+    ("consulting",  "mid"):           (0.2,   5.0),
+    ("consulting",  "small"):         (0.1,   2.0),
+}
+_DEFAULT_MODEL_RANGE = (2.0, 30.0)   # mid + unknown type
+
+# Scale-signal tier → percentile within (low, high)
+_TIER_PCT = {0: 0.30, 1: 0.45, 2: 0.60, 3: 0.75, 4: 0.90}
+
+
+def _detect_deal_type(description: str, tech_level2: str) -> str:
+    """Classify deal as outsourcing | saas | consulting | implementation."""
+    text = f"{description} {tech_level2}"
+    for dtype in ("outsourcing", "saas", "consulting", "implementation"):
+        for pat in _DEAL_TYPE_RE[dtype]:
+            if pat.search(text):
+                return dtype
+    l2 = tech_level2.lower()
+    if any(x in l2 for x in ("outsourc", "bpo", "managed")):
+        return "outsourcing"
+    if any(x in l2 for x in ("saas", "software infra", "license")):
+        return "saas"
+    if "consult" in l2:
+        return "consulting"
+    return "implementation"
+
+
+def _detect_company_size(description: str) -> str:
+    """Return enterprise | large | mid | small based on description signals."""
+    for size in ("enterprise", "large", "small"):
+        for pat in _CO_SIZE_RE[size]:
+            if pat.search(description):
+                return size
+    return "mid"
+
+
+def _fmt_m(amount_m: float) -> str:
+    """Format a $-million amount into a compact string like '$45M' or '$1.2B'."""
+    if amount_m >= 1000:
+        b = amount_m / 1000
+        return f"${b:.1f}B" if b % 1 else f"${b:.0f}B"
+    if amount_m >= 100:
+        return f"${round(amount_m / 10) * 10:.0f}M"
+    if amount_m >= 10:
+        return f"${round(amount_m / 5) * 5:.0f}M"
+    if amount_m >= 1:
+        return f"${round(amount_m):.0f}M"
+    return f"${round(amount_m * 1000):.0f}K"
 
 
 def _match_grounding_source(vendor: str, description: str,
@@ -404,28 +517,48 @@ def _detect_scale_signal(description: str) -> int:
     return score
 
 
-_SCALE_TIER_VALUES = {1: "$1M", 2: "$3M", 3: "$10M", 4: "$40M"}
 
 
 def estimate_deal_value(row: dict) -> tuple[str, str]:
-    """Return (deal_value, deal_estimated) — guarantees deal_value is never blank.
-    Only used when the model didn't provide a value. Prefers concrete technical-scale
-    signals in the description (data volume, systems migrated) over a flat Level 2
-    category benchmark, since category alone over-estimates mid-market SI/migration
-    deals (e.g. a 'Cloud migration' case study is not automatically a $60M+ deal)."""
+    """Return (deal_value, deal_estimated).
+
+    Three-axis model: deal_type × company_size × scale_tier.
+    Only called when the LLM didn't return a confirmed value.
+    """
     existing = (row.get("deal_value") or "").strip()
-    if existing and existing != "-":
+    if existing and existing not in ("-", "—"):
         return existing, row.get("deal_estimated", "")
 
-    tier = _detect_scale_signal(row.get("description", ""))
-    if tier:
-        return _SCALE_TIER_VALUES[tier], "Y"
+    description = row.get("description", "")
+    tech_l2     = row.get("tech_level2", "")
 
-    l2 = row.get("tech_level2", "")
-    for cats, value in _VALUE_BENCHMARKS:
-        if l2 in cats:
-            return value, "Y"
-    return _DEFAULT_ESTIMATE, "Y"
+    deal_type  = _detect_deal_type(description, tech_l2)
+    co_size    = _detect_company_size(description)
+    scale_tier = _detect_scale_signal(description)   # 0–4
+
+    low, high = _VALUE_MODEL.get((deal_type, co_size), _DEFAULT_MODEL_RANGE)
+    amount_m  = low + _TIER_PCT[scale_tier] * (high - low)
+
+    # SaaS: amount_m is ACV — multiply by contract years for TCV
+    if deal_type == "saas":
+        try:
+            months = int(row.get("duration_months") or 0)
+        except (ValueError, TypeError):
+            months = 0
+        years   = months / 12 if months > 0 else 3.0   # default 3-yr SaaS
+        amount_m = amount_m * years
+
+    # Outsourcing: base range assumes ~5 years; scale for actual duration
+    if deal_type == "outsourcing":
+        try:
+            months = int(row.get("duration_months") or 0)
+        except (ValueError, TypeError):
+            months = 0
+        if months > 0:
+            years    = months / 12
+            amount_m = amount_m * (years / 5.0) ** 0.85  # sub-linear scaling
+
+    return _fmt_m(amount_m), "Y"
 
 # Fixed output schema — matches the IT Deal Details preset in the frontend
 SCHEMA_FIELDS = [
