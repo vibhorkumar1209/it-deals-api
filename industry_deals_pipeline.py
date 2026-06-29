@@ -72,6 +72,8 @@ Rules:
 - revenue_estimate: "$XB" or "$XM" — use public data where available
 - Sort by revenue / size descending
 - Include up to 50 companies
+- Do NOT include [cite: ...] or any citation/footnote markers anywhere
+- description must be plain text only — no brackets, no citations, no special characters
 - Output ONLY the JSON array, nothing else"""
 
 
@@ -159,49 +161,78 @@ def _gemini_sync(prompt: str) -> str:
 
 # ── JSON parsing ──────────────────────────────────────────────────────────────
 
+def _find_matching_bracket(text: str, start: int) -> int:
+    """Return index of the closing bracket/brace that matches text[start]. -1 if not found."""
+    open_c  = text[start]
+    close_c = "]" if open_c == "[" else "}"
+    depth = 0
+    in_str = False
+    esc    = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if esc:
+            esc = False; continue
+        if c == "\\" and in_str:
+            esc = True; continue
+        if c == '"':
+            in_str = not in_str; continue
+        if in_str:
+            continue
+        if c == open_c:
+            depth += 1
+        elif c == close_c:
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _sanitize(text: str) -> str:
+    """Strip control characters that make json.loads raise InvalidControlCharacter."""
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+
+
 def _parse_json(text: str) -> list | dict | None:
     """Extract and parse the first JSON array or object from arbitrary text."""
     if not text:
         return None
 
-    # 1. Direct parse (no wrapping)
-    try:
-        return json.loads(text.strip())
-    except json.JSONDecodeError:
-        pass
+    text = _sanitize(text)
 
-    # 2. Extract first [...] by bracket position (handles markdown fences, prose preamble, etc.)
+    # 1. Find first '[' and walk to its TRUE matching ']' (ignores '[cite: ...]' etc.)
     start = text.find("[")
-    end   = text.rfind("]")
-    if start != -1 and end > start:
-        fragment = text[start: end + 1]
-        try:
-            return json.loads(fragment)
-        except json.JSONDecodeError:
-            # Truncated — cut to last complete object
-            lb = fragment.rfind("}")
-            if lb != -1:
-                fixed = fragment[:lb + 1].rstrip().rstrip(",") + "\n]"
-                try:
-                    return json.loads(fixed)
-                except json.JSONDecodeError:
-                    pass
+    if start != -1:
+        end = _find_matching_bracket(text, start)
+        if end != -1:
+            fragment = text[start: end + 1]
+            try:
+                return json.loads(fragment)
+            except json.JSONDecodeError:
+                # Truncated — cut to last complete object
+                lb = fragment.rfind("}")
+                if lb != -1:
+                    fixed = fragment[:lb + 1].rstrip().rstrip(",") + "\n]"
+                    try:
+                        return json.loads(fixed)
+                    except json.JSONDecodeError:
+                        pass
 
-    # 3. Extract first {...} (handles single-object or wrapped responses)
+    # 2. Try first {...} (dict-wrapped responses like {"companies": [...]})
     start = text.find("{")
-    end   = text.rfind("}")
-    if start != -1 and end > start:
-        fragment = text[start: end + 1]
-        try:
-            result = json.loads(fragment)
-            for key in ("companies", "results", "data", "list", "items"):
-                if isinstance(result.get(key), list):
-                    return result[key]
-            return result
-        except json.JSONDecodeError:
-            pass
+    if start != -1:
+        end = _find_matching_bracket(text, start)
+        if end != -1:
+            fragment = text[start: end + 1]
+            try:
+                result = json.loads(fragment)
+                for key in ("companies", "results", "data", "list", "items"):
+                    if isinstance(result.get(key), list):
+                        return result[key]
+                return result
+            except json.JSONDecodeError:
+                pass
 
-    logger.error(f"_parse_json: could not extract JSON from text (len={len(text)}): {text[:200]!r}")
+    logger.error(f"_parse_json: could not extract JSON (len={len(text)}): {text[:200]!r}")
     return None
 
 
