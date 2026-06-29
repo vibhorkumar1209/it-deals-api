@@ -178,13 +178,27 @@ async def discover_competitors(target_company: str, target_domain: str = "", ind
 
 # ── Module Prompts ────────────────────────────────────────────────────────────
 
-def _metrics_prompt(company: str) -> str:
-    return f"""Research the overall company metrics for {company}. Search broadly.
+def _ctx(industry: str, tech: str) -> tuple[str, str]:
+    """Return (scope_line, scope_suffix) for injecting context into prompts."""
+    parts = []
+    if industry:
+        parts.append(f"industry: {industry}")
+    if tech:
+        parts.append(f"technology: {tech}")
+    if not parts:
+        return "", ""
+    scope = " / ".join(parts)
+    return f"\nFOCUS SCOPE: {scope}. Prioritise data specific to this scope above general data.\n", f" in {scope}"
 
+
+def _metrics_prompt(company: str, industry: str = "", tech: str = "") -> str:
+    scope_line, scope_suffix = _ctx(industry, tech)
+    mkt_share_search = f'- "{company}" market share {industry} {tech}'.strip() if (industry or tech) else f'- "{company}" market share market position industry'
+    return f"""Research the overall company metrics for {company}. Search broadly.{scope_line}
 Search for:
 - "{company}" annual revenue 2024 2025 fiscal year results
 - "{company}" total revenue billion million earnings
-- "{company}" market share market position industry
+{mkt_share_search}
 - "{company}" revenue growth YoY quarterly
 - "{company}" gross margin EBITDA operating margin
 - "{company}" market cap valuation funding
@@ -199,7 +213,7 @@ Return ONLY valid JSON (no markdown):
   "annual_revenue": "",
   "revenue_growth_yoy": "",
   "market_cap_or_valuation": "",
-  "market_share": "",
+  "market_share{scope_suffix}": "",
   "market_share_source": "",
   "gross_margin": "",
   "ebitda_margin": "",
@@ -214,67 +228,83 @@ Return ONLY valid JSON (no markdown):
 Use "—" only if genuinely unavailable."""
 
 
-def _portfolio_prompt(company: str) -> str:
-    return f"""Research the service, product, and platform portfolio of {company}.
-
+def _portfolio_prompt(company: str, industry: str = "", tech: str = "") -> str:
+    scope_line, scope_suffix = _ctx(industry, tech)
+    ind_search = f'- "{company}" {industry} solutions offerings capabilities' if industry else ""
+    tech_search = f'- "{company}" {tech} platform product features capabilities' if tech else ""
+    return f"""Research the service, product, and platform portfolio of {company}.{scope_line}
 Search for:
 - "{company}" products services solutions portfolio 2024 2025
 - "{company}" platform capabilities AI integration features
-- "{company}" key offerings industry solutions
+{ind_search}
+{tech_search}
 - "{company}" product roadmap new launches
 - "{company}" AI features generative AI integration
+
+{"Focus especially on offerings relevant to " + (industry or tech) + "." if (industry or tech) else ""}
 
 Return ONLY valid JSON (no markdown):
 {{
   "primary_offerings": [],
   "key_products_platforms": [],
   "ai_integration_highlights": [],
-  "industry_aligned_solutions": [],
+  "industry_aligned_solutions{scope_suffix}": [],
   "portfolio_strengths": [],
   "recent_launches_2024_2025": [],
-  "portfolio_gaps": []
+  "portfolio_gaps{scope_suffix}": []
 }}
 Use "—" for unknown fields."""
 
 
-def _overlap_prompt(company: str) -> str:
-    return f"""Research the core competitive positioning and overlap areas of {company} vs its rivals.
-
+def _overlap_prompt(company: str, industry: str = "", tech: str = "") -> str:
+    scope_line, scope_suffix = _ctx(industry, tech)
+    ind_search = f'- "{company}" competitive position {industry} market' if industry else ""
+    tech_search = f'- "{company}" {tech} competitive differentiation win rate' if tech else ""
+    return f"""Research the core competitive positioning and overlap areas of {company} vs its rivals.{scope_line}
 Search for:
 - "{company}" competitive advantage differentiation
 - "{company}" vs competitors comparison strengths weaknesses
+{ind_search}
+{tech_search}
 - "{company}" win rate competitive displacement 2024 2025
 - "{company}" analyst competitive assessment
 
+{"Focus on competitive positioning specifically within " + (industry or tech) + "." if (industry or tech) else ""}
+
 Return ONLY valid JSON (no markdown):
 {{
-  "primary_competitive_strengths": [],
-  "primary_competitive_weaknesses": [],
-  "key_differentiators": [],
-  "where_they_win": [],
-  "where_they_lose": [],
+  "primary_competitive_strengths{scope_suffix}": [],
+  "primary_competitive_weaknesses{scope_suffix}": [],
+  "key_differentiators{scope_suffix}": [],
+  "where_they_win{scope_suffix}": [],
+  "where_they_lose{scope_suffix}": [],
   "competitive_moat": "",
   "pricing_positioning": ""
 }}
 Use "—" for unknown fields."""
 
 
-def _customer_prompt(company: str) -> str:
-    return f"""Research the customer base of {company} — focus on industry verticals and notable clients.
-
+def _customer_prompt(company: str, industry: str = "", tech: str = "") -> str:
+    scope_line, scope_suffix = _ctx(industry, tech)
+    ind_search = f'- "{company}" {industry} clients customers case studies' if industry else ""
+    tech_search = f'- "{company}" {tech} customers users implementations' if tech else ""
+    return f"""Research the customer base of {company}.{scope_line}
 Search for:
 - "{company}" customers clients case studies 2024 2025
 - "{company}" enterprise clients notable logos industry
+{ind_search}
+{tech_search}
 - "{company}" customer wins new accounts
 - "{company}" NPS retention rate customer satisfaction
-- "{company}" industries served verticals
+
+{"Return customers and wins specifically in " + (industry or tech) + " where possible." if (industry or tech) else ""}
 
 Return ONLY valid JSON (no markdown):
 {{
   "total_customers": "",
-  "key_industry_verticals": [],
-  "notable_enterprise_clients": [],
-  "recent_customer_wins_2024_2025": [],
+  "key_industry_verticals{scope_suffix}": [],
+  "notable_enterprise_clients{scope_suffix}": [],
+  "recent_customer_wins_2024_2025{scope_suffix}": [],
   "customer_retention_rate": "",
   "nps_score": "",
   "net_revenue_retention": "",
@@ -283,39 +313,43 @@ Return ONLY valid JSON (no markdown):
 Use "—" for unknown fields."""
 
 
-def _brand_prompt(company: str) -> str:
-    return f"""Research the brand presence and analyst recognition of {company} — both overall and industry/product-specific.
-
+def _brand_prompt(company: str, industry: str = "", tech: str = "") -> str:
+    scope_line, scope_suffix = _ctx(industry, tech)
+    ind_search = f'- "{company}" {industry} Gartner Forrester analyst recognition' if industry else ""
+    tech_search = f'- "{company}" {tech} Magic Quadrant Wave analyst report' if tech else ""
+    return f"""Research the brand presence and analyst recognition of {company} — both overall and specific to the focus scope.{scope_line}
 Search for:
 - "{company}" Gartner Magic Quadrant 2024 2025
 - "{company}" Forrester Wave leader 2024 2025
 - "{company}" ISG Provider Lens Everest Group PEAK Matrix
-- "{company}" awards recognition industry analyst
+{ind_search}
+{tech_search}
+- "{company}" awards recognition analyst
 - "{company}" LinkedIn followers brand awareness
-- "{company}" thought leadership content marketing
 
 Return ONLY valid JSON (no markdown):
 {{
   "gartner_positions": [],
   "forrester_positions": [],
   "isg_everest_positions": [],
-  "other_analyst_mentions": [],
+  "analyst_mentions{scope_suffix}": [],
   "awards_2024_2025": [],
   "linkedin_followers": "",
   "brand_perception_overall": "",
-  "brand_perception_by_segment": {{}}
+  "brand_perception{scope_suffix}": ""
 }}
 Use "—" for unknown fields."""
 
 
-def _talent_prompt(company: str) -> str:
-    return f"""Research the talent profile, headcount, and key leaders of {company}.
-
+def _talent_prompt(company: str, industry: str = "", tech: str = "") -> str:
+    scope_line, scope_suffix = _ctx(industry, tech)
+    rel_dept = f"{industry} or {tech}" if (industry and tech) else (industry or tech or "engineering, sales, delivery")
+    return f"""Research the talent profile, headcount, and key leaders of {company}.{scope_line}
 Search for:
 - "{company}" total employees headcount 2024 2025
 - "{company}" key executives CEO CTO CPO leadership team
 - "{company}" hiring growth layoffs workforce
-- "{company}" relevant department size engineering sales
+- "{company}" {rel_dept} department team size headcount
 - "{company}" Glassdoor rating culture
 
 Return ONLY valid JSON (no markdown):
@@ -323,8 +357,8 @@ Return ONLY valid JSON (no markdown):
   "total_headcount": "",
   "headcount_yoy_change": "",
   "key_leaders": [],
-  "relevant_dept_size": "",
-  "hiring_focus_areas": [],
+  "relevant_dept_size{scope_suffix}": "",
+  "hiring_focus_areas{scope_suffix}": [],
   "recent_key_hires_departures": [],
   "glassdoor_rating": "",
   "attrition_signal": ""
@@ -332,57 +366,75 @@ Return ONLY valid JSON (no markdown):
 Use "—" for unknown fields."""
 
 
-def _deals_prompt(company: str) -> str:
-    return f"""Research joint ventures, M&A activity, and strategic partnerships of {company} — only relevant ones.
-
+def _deals_prompt(company: str, industry: str = "", tech: str = "") -> str:
+    scope_line, scope_suffix = _ctx(industry, tech)
+    ind_search = f'- "{company}" {industry} partnership deal alliance' if industry else ""
+    tech_search = f'- "{company}" {tech} partnership acquisition deal' if tech else ""
+    return f"""Research JV, M&A, and strategic partnerships of {company} — only relevant ones.{scope_line}
 Search for:
 - "{company}" acquisition merger 2023 2024 2025
 - "{company}" joint venture strategic partnership alliance
+{ind_search}
+{tech_search}
 - "{company}" partnership agreement announced
 - "{company}" invested in acquired divested
 
+{"Return only deals relevant to " + (industry or tech) + " where possible." if (industry or tech) else ""}
+Include only deals from 2022 onwards.
+
 Return ONLY valid JSON (no markdown):
 {{
-  "recent_acquisitions": [],
-  "recent_jv_partnerships": [],
-  "key_alliances": [],
+  "recent_acquisitions{scope_suffix}": [],
+  "recent_jv_partnerships{scope_suffix}": [],
+  "key_alliances{scope_suffix}": [],
   "divestitures": [],
   "investment_activity": [],
   "strategic_rationale_summary": ""
 }}
-Include only deals from 2022 onwards. Use "—" for unknown fields."""
+Use "—" for unknown fields."""
 
 
-def _stack_prompt(company: str) -> str:
-    return f"""Research the tech stack and technology partnerships of {company} — especially relevant products, platforms, or solutions they use or partner with to deliver offerings.
-
+def _stack_prompt(company: str, industry: str = "", tech: str = "") -> str:
+    scope_line, scope_suffix = _ctx(industry, tech)
+    tech_search = f'- "{company}" {tech} platform integration deployment' if tech else ""
+    ind_search = f'- "{company}" technology stack {industry} solutions delivery' if industry else ""
+    return f"""Research the tech stack and technology partnerships of {company}.{scope_line}
 Search for:
 - "{company}" cloud provider AWS Azure GCP technology
 - "{company}" AI platform partner technology stack
 - "{company}" CRM ERP software platform used
+{tech_search}
+{ind_search}
 - "{company}" technology partnership solution integration
-- "{company}" built on powered by platform
+
+{"Focus on technologies and platforms relevant to " + (industry or tech) + "." if (industry or tech) else ""}
 
 Return ONLY valid JSON (no markdown):
 {{
   "cloud_infrastructure": [],
   "ai_ml_platforms": [],
-  "key_software_platforms": [],
-  "technology_partnerships": [],
+  "key_software_platforms{scope_suffix}": [],
+  "technology_partnerships{scope_suffix}": [],
   "homegrown_platforms": [],
   "data_and_analytics_stack": []
 }}
 Use "—" for unknown fields."""
 
 
-def _news_prompt(company: str) -> str:
-    return f"""Find the most recent and significant news about {company} from the last 12 months.
-
+def _news_prompt(company: str, industry: str = "", tech: str = "") -> str:
+    scope_line, scope_suffix = _ctx(industry, tech)
+    ind_search = f'- "{company}" {industry} news deal announcement 2024 2025' if industry else ""
+    tech_search = f'- "{company}" {tech} news launch partnership 2024 2025' if tech else ""
+    return f"""Find the most recent and significant news about {company} from the last 12 months.{scope_line}
 Search for:
 - "{company}" news 2024 2025 latest announcements
 - "{company}" press release announcement recent
+{ind_search}
+{tech_search}
 - "{company}" major deal contract win 2024 2025
 - "{company}" strategy change pivot leadership
+
+{"Prioritise news relevant to " + (industry or tech) + " but include other major news too." if (industry or tech) else ""}
 
 Return ONLY valid JSON (no markdown) — an array of up to 8 items, newest first:
 [
@@ -391,7 +443,7 @@ Return ONLY valid JSON (no markdown) — an array of up to 8 items, newest first
     "date": "",
     "category": "Deal | Partnership | Leadership | Financial | Product | Strategy | Other",
     "summary": "",
-    "significance": ""
+    "significance{scope_suffix}": ""
   }}
 ]
 Only include genuinely newsworthy items from 2024–2025. Return [] if nothing significant found."""
@@ -428,7 +480,13 @@ def _score_confidence(data: dict | list | None) -> str:
 
 # ── Module Runner ─────────────────────────────────────────────────────────────
 
-async def _run_module(company: str, module_id: str, sem: asyncio.Semaphore) -> dict:
+async def _run_module(
+    company: str,
+    module_id: str,
+    sem: asyncio.Semaphore,
+    industry: str = "",
+    tech: str = "",
+) -> dict:
     prompt_fn = _MODULE_PROMPTS.get(module_id)
     if not prompt_fn:
         return {"module": module_id, "data": {}, "confidence": "grey"}
@@ -436,7 +494,7 @@ async def _run_module(company: str, module_id: str, sem: asyncio.Semaphore) -> d
     async with sem:
         try:
             text = await asyncio.wait_for(
-                asyncio.to_thread(_gemini_call_sync, prompt_fn(company), True, 8192),
+                asyncio.to_thread(_gemini_call_sync, prompt_fn(company, industry, tech), True, 8192),
                 timeout=CALL_TIMEOUT,
             )
             data = _parse_json_from_text(text) or {}
@@ -552,7 +610,7 @@ async def run_competitive_analysis(
         nonlocal done_calls
         company_name = company_info["name"]
         async with company_sem:
-            tasks = [_run_module(company_name, mod, module_sem) for mod in enabled_modules]
+            tasks = [_run_module(company_name, mod, module_sem, industry_context, technology_context) for mod in enabled_modules]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
         modules_out = []
