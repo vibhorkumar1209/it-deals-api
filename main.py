@@ -1083,11 +1083,26 @@ class IndustryDealsSearchRequest(BaseModel):
 
 @app.get("/api/debug-industry-companies")
 async def debug_industry_companies(industry: str = "Banking", geography: str = "France"):
+    import json as _json
     from industry_deals_pipeline import _company_list_prompt, _gemini_sync, _parse_json
     prompt = _company_list_prompt(industry, geography)
     text = await asyncio.to_thread(_gemini_sync, prompt)
+    start = text.find("[")
+    end   = text.rfind("]")
+    fragment = text[start:end+1] if (start != -1 and end > start) else ""
+    try:
+        direct = _json.loads(fragment)
+        direct_ok = True; direct_err = None
+    except Exception as e:
+        direct = None; direct_ok = False; direct_err = str(e)
     parsed = _parse_json(text)
-    return {"text_len": len(text), "text_preview": text[:800], "parsed_type": str(type(parsed)), "parsed_len": len(parsed) if isinstance(parsed, list) else None, "parsed_preview": parsed[:2] if isinstance(parsed, list) else parsed}
+    return {
+        "text_len": len(text), "text_tail": text[-100:],
+        "bracket_start": start, "bracket_end": end,
+        "fragment_len": len(fragment), "fragment_tail": fragment[-80:] if fragment else "",
+        "direct_parse_ok": direct_ok, "direct_parse_err": direct_err,
+        "parsed_type": str(type(parsed)), "parsed_len": len(parsed) if isinstance(parsed, list) else None,
+    }
 
 
 @app.post("/api/industry-companies")
