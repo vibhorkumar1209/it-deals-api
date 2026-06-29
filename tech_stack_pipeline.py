@@ -47,60 +47,63 @@ FIELD_KEYS = [f["key"] for f in TECH_STACK_FIELDS]
 
 # Canonical tech_stack_category values → must match exactly in output
 TECH_STACK_CATEGORIES = {
-    "Core Enterprise Operations": [
-        "ERP & Finance",           # NetSuite, SAP, QuickBooks, Oracle Financials
-        "HR & Payroll",            # Rippling, Gusto, Workday, Deel, ADP
-        "Internal Communications", # Slack, Teams, Google Workspace, Zoom
-        "Project & Knowledge Management",  # Jira, Notion, Asana, Monday, Confluence
-        "Contract Lifecycle Management",   # Ironclad, DocuSign CLM, Icertis
-        "Procurement & Source-to-Pay",     # Coupa, Ariba, Ivalua, Jaggaer
-        "ITSM & Service Desk",             # ServiceNow, BMC Remedy, Jira Service Mgmt
+    "Core Technology Stack": [
+        "Programming Languages & Frameworks",  # Java, Python, Node.js, .NET, Go, React, Spring
+        "Data Management & Streaming",         # Kafka, Spark, Flink, Redis, Cassandra, RabbitMQ
+        "Cloud & Infrastructure",              # AWS, Azure, GCP, multi-cloud, on-prem hybrid
+        "DevOps & CI/CD",                      # Jenkins, GitHub Actions, ArgoCD, CircleCI, GitLab CI
+        "Container & Orchestration",           # Kubernetes, Docker, OpenShift, ECS
+        "Version Control",                     # GitHub, GitLab, Bitbucket, Azure DevOps
+        "API Management",                      # MuleSoft, Apigee, Kong, AWS API Gateway
+        "iPaaS & Integration",                 # Zapier, Make, Workato, Boomi, MuleSoft
+    ],
+    "Enterprise & Financial Systems": [
+        "ERP & Finance",                       # SAP, Oracle Financials, NetSuite, Workday Finance
+        "Financial & Enterprise Systems",      # Bloomberg, Refinitiv, Finastra, Temenos, Murex, FIS
+        "Payment Infrastructure",              # Stripe, Adyen, Worldpay, SWIFT, Visa DPS, Mastercard
+        "Risk & Compliance Platforms",         # Wolters Kluwer, Moody's Analytics, SAS Risk, Axiom SL
+        "HR & Payroll",                        # Workday HCM, SAP SuccessFactors, ADP, Rippling
+        "Procurement & Source-to-Pay",         # Coupa, Ariba, Ivalua, Jaggaer
+        "Contract Lifecycle Management",       # Ironclad, DocuSign CLM, Icertis
+        "ITSM & Service Desk",                 # ServiceNow, BMC Remedy, Jira Service Mgmt
     ],
     "Customer-Facing & Revenue": [
-        "CRM & Account Management",  # Salesforce, HubSpot, Microsoft Dynamics
-        "Customer Support & Helpdesk", # Zendesk, Intercom, Gorgias, Freshdesk
-        "Marketing Automation",      # Klaviyo, Braze, Marketo, Mailchimp, Pardot
-        "Sales Intelligence",        # ZoomInfo, Apollo, Outreach, Salesloft, Gong
-        "Billing & Subscription",    # Stripe, Chargebee, Zuora, Recurly
-        "E-Commerce Platform",       # Shopify, Magento, commercetools, SAP Commerce
-        "CPQ & Configure-Price-Quote", # Salesforce CPQ, DealHub, Conga
+        "CRM & Account Management",            # Salesforce, HubSpot, Microsoft Dynamics
+        "Customer Support & Helpdesk",         # Zendesk, Intercom, Freshdesk
+        "Marketing Automation",                # Klaviyo, Braze, Marketo, Pardot
+        "Sales Intelligence",                  # ZoomInfo, Apollo, Outreach, Salesloft, Gong
+        "Billing & Subscription",              # Stripe, Chargebee, Zuora, Recurly
+        "E-Commerce Platform",                 # Shopify, Magento, commercetools, SAP Commerce
+        "CPQ & Configure-Price-Quote",         # Salesforce CPQ, DealHub, Conga
     ],
     "Infrastructure & Cloud": [
-        "Cloud Hosting",    # AWS, Azure, GCP, Vercel, Render
-        "CDN & DNS",        # Cloudflare, Akamai, Fastly, AWS CloudFront
-        "Databases",        # PostgreSQL, MongoDB, MySQL, Supabase, Oracle DB, Redis
-        "Identity & IAM",   # Okta, Auth0, Clerk, Microsoft Entra ID, SailPoint
-        "Collaboration & Productivity", # Microsoft 365, Google Workspace, Slack
-        "Device Management / MDM",      # Jamf, Intune, VMware Workspace ONE
-        "Network & VPN",               # Cisco, Zscaler, Palo Alto Prisma
-    ],
-    "Development & Engineering": [
-        "Version Control",      # GitHub, GitLab, Bitbucket, Azure DevOps
-        "CI/CD Automation",     # Jenkins, GitHub Actions, CircleCI, ArgoCD
-        "APM & Monitoring",     # Datadog, New Relic, Sentry, Dynatrace, Elastic
-        "API Management",       # MuleSoft, Apigee, Kong, AWS API Gateway
-        "Container & Orchestration",  # Kubernetes, Docker, OpenShift
-        "iPaaS & Integration",  # Zapier, Make, Workato, Boomi, MuleSoft
-        "Low-Code / No-Code",   # OutSystems, Mendix, Power Apps, Appian
+        "Cloud Hosting",                       # AWS, Azure, GCP, Vercel, Render
+        "CDN & DNS",                           # Cloudflare, Akamai, Fastly
+        "Databases",                           # PostgreSQL, MongoDB, MySQL, Oracle DB, Redis
+        "Identity & IAM",                      # Okta, Auth0, Microsoft Entra ID, SailPoint
+        "Collaboration & Productivity",        # Microsoft 365, Google Workspace, Slack
+        "Device Management / MDM",             # Jamf, Intune, VMware Workspace ONE
+        "Network & VPN",                       # Cisco, Zscaler, Palo Alto Prisma
     ],
     "Data Analytics & AI": [
-        "Data Warehousing",       # Snowflake, BigQuery, Databricks, Redshift
-        "Data Integration & ETL", # Fivetran, Airbyte, Airflow, dbt, Informatica
-        "Business Intelligence",  # Tableau, Power BI, Looker, Qlik, MicroStrategy
-        "Product Analytics",      # Google Analytics, Mixpanel, Amplitude, Heap
-        "AI/ML Infrastructure",   # OpenAI API, LangChain, Pinecone, Vertex AI, SageMaker
-        "Data Catalogue & Governance", # Collibra, Alation, Atlan
+        "Data Warehousing",                    # Snowflake, BigQuery, Databricks, Redshift
+        "Data Integration & ETL",              # Fivetran, Airbyte, Airflow, dbt, Informatica
+        "Business Intelligence",               # Tableau, Power BI, Looker, Qlik
+        "Product Analytics",                   # Google Analytics, Mixpanel, Amplitude
+        "AI/ML Infrastructure",                # OpenAI API, LangChain, Pinecone, Vertex AI
+        "Data Catalogue & Governance",         # Collibra, Alation, Atlan
     ],
     "Security & Compliance": [
-        "Cybersecurity / EDR",    # CrowdStrike, SentinelOne, Microsoft Defender
-        "SIEM & Threat Detection", # Splunk, Microsoft Sentinel, IBM QRadar
-        "Vulnerability Management", # Tenable, Qualys, Rapid7
-        "GRC & Compliance",       # ServiceNow GRC, MetricStream, Vanta, Drata
-        "DLP & Data Security",    # Symantec DLP, Forcepoint, Nightfall
-        "Zero Trust / ZTNA",      # Zscaler, Cloudflare Access, Palo Alto Prisma
+        "Cybersecurity / EDR",                 # CrowdStrike, SentinelOne, Microsoft Defender
+        "SIEM & Threat Detection",             # Splunk, Microsoft Sentinel, IBM QRadar
+        "Vulnerability Management",            # Tenable, Qualys, Rapid7
+        "GRC & Compliance",                    # ServiceNow GRC, MetricStream, Vanta, Drata
+        "DLP & Data Security",                 # Symantec DLP, Forcepoint, Nightfall
+        "Zero Trust / ZTNA",                   # Zscaler, Cloudflare Access, Palo Alto Prisma
+        "APM & Monitoring",                    # Datadog, New Relic, Sentry, Dynatrace
     ],
     "Unclassified": [
-        "Unclassified Tools",     # Any clear software not fitting above
+        "Unclassified Tools",
     ],
 }
 
@@ -136,31 +139,34 @@ def _build_tech_stack_prompt(
     # Wide-mode: 3 calls cover different category slices
     WIDE_SLICES = {
         1: {
-            "label": "Business Operations & Enterprise Planning, HR & Talent",
+            "label": "Core Technology Stack — Programming, Data, Cloud & DevOps",
             "categories": [
-                "ERP & Core Financials", "CRM & Account Management", "Billing & Subscription",
-                "HR & Payroll", "Applicant Tracking / ATS", "Total Rewards & Benefits",
-                "Contract Lifecycle Management", "Procurement & Source-to-Pay",
+                "Programming Languages & Frameworks", "Data Management & Streaming",
+                "Cloud & Infrastructure", "DevOps & CI/CD",
+                "Container & Orchestration", "Version Control",
+                "API Management", "iPaaS & Integration",
             ],
         },
         2: {
-            "label": "Engineering, Cloud Infrastructure, Security & Observability",
+            "label": "Enterprise & Financial Systems, Security & Infrastructure",
             "categories": [
-                "Cloud Hosting", "Databases", "DevOps, CI/CD & Orchestration",
-                "Container & Orchestration", "Identity & IAM", "Cybersecurity / EDR",
-                "SIEM & Threat Detection", "GRC & Compliance", "APM & Monitoring",
-                "Version Control", "API Management", "Network & VPN", "Device Management / MDM",
+                "ERP & Finance", "Financial & Enterprise Systems",
+                "Payment Infrastructure", "Risk & Compliance Platforms",
+                "HR & Payroll", "Identity & IAM",
+                "Cybersecurity / EDR", "SIEM & Threat Detection",
+                "GRC & Compliance", "APM & Monitoring",
+                "Databases", "Cloud Hosting", "Network & VPN",
             ],
         },
         3: {
-            "label": "AI/Data, Sales, Marketing, Support & Workplace Productivity",
+            "label": "AI/Data, CRM, Sales, Marketing, Support & Productivity",
             "categories": [
                 "Data Warehousing", "Data Integration & ETL", "Business Intelligence",
-                "Product Analytics", "AI/ML Infrastructure",
-                "Marketing Automation", "Sales Intelligence",
-                "Customer Support & Helpdesk", "E-Commerce Platform",
+                "AI/ML Infrastructure", "Product Analytics",
+                "CRM & Account Management", "Marketing Automation",
+                "Sales Intelligence", "Customer Support & Helpdesk",
                 "ITSM & Service Desk", "Project & Knowledge Management",
-                "Collaboration & Productivity", "iPaaS & Integration",
+                "Collaboration & Productivity", "Billing & Subscription",
             ],
         },
     }
@@ -477,6 +483,7 @@ async def find_tech_stack(
     """
     fc = focus_categories or []
     fv = focus_vendors or []
+    has_focus = bool(fc or fv)
 
     # Derive a shorter "brand name" by stripping common subsidiary suffixes
     _STRIP = re.compile(
@@ -486,33 +493,79 @@ async def find_tech_stack(
         re.IGNORECASE,
     )
     brand_name = _STRIP.sub("", company_name).strip()
-    search_name = company_name  # used in queries — may be widened to brand_name on fallback
 
-    mode = "wide-spectrum" if not fc and not fv else "laser-focused"
-    num_calls = 3
-    yield {"type": "heartbeat", "message": f"🔍 Tech stack scan for {company_name} ({mode} mode)…"}
+    # Always run a 3-call wide general scan regardless of focus
+    # If focus is provided, run 2 additional focused calls on top
+    CALL_TIMEOUT = 240
+
+    # Phase 1: wide general scan (always, no focus filters)
+    WIDE_LABELS = {
+        1: "core tech stack — languages, data, cloud & DevOps",
+        2: "enterprise & financial systems, security & infrastructure",
+        3: "AI/data, CRM, sales, marketing & productivity",
+    }
+    total_phases = 2 if has_focus else 1
+    phase1_calls = 3
+
+    mode_desc = "wide general + focused" if has_focus else "wide general"
+    yield {"type": "heartbeat", "message": f"🔍 Tech stack scan for {company_name} ({mode_desc})…"}
     await asyncio.sleep(0)
 
     seen_keys: set[str] = set()
     total = 0
-    CALL_TIMEOUT = 240  # Render Pro: each call now runs 30+ searches, needs full time budget
 
-    CALL_LABELS = {
-        1: "enterprise apps & digital footprint",
-        2: "cloud, security & DevOps",
-        3: "customer-facing, analytics & sector tools",
-    }
+    async def _run_call(prompt_company: str, prompt_domain: str, call_fc: list, call_fv: list,
+                        call_num: int, phase_label: str) -> int:
+        """Run one Gemini call, yield events, return count of new tools added."""
+        nonlocal total
+        yield_count = 0
+        prompt = _build_tech_stack_prompt(prompt_company, prompt_domain, linkedin_url, call_fc, call_fv, call_num)
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(None, _gemini_tech_stack_sync, prompt, prompt_company)
 
-    for call_num in range(1, num_calls + 1):
-        label = CALL_LABELS[call_num]
-        yield {"type": "heartbeat", "message": f"🌐 [{call_num}/{num_calls}] Scanning {company_name}: {label}…"}
+        elapsed = 0
+        call_tools: list[dict] = []
+        while elapsed < CALL_TIMEOUT:
+            await asyncio.sleep(10)
+            elapsed += 10
+            if future.done():
+                try:
+                    call_tools = future.result() or []
+                except Exception as e:
+                    logger.error(f"Tech stack call error for {prompt_company}: {e}", exc_info=True)
+                    return 0
+                break
+            # no per-tick heartbeat — outer loop emits progress
+        else:
+            future.cancel()
+
+        for tool in call_tools:
+            dedup_key = f"{tool.get('vendor','').lower()}|{tool.get('tech_level3','').lower()}"
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
+            row = {"company_name": company_name, "domain": domain, "_status": "ok"}
+            row.update(tool)
+            yield {"type": "row_done", "row": row}
+            await asyncio.sleep(0.04)
+            yield_count += 1
+            total += 1
+        return yield_count
+
+    # ── Phase 1: wide scan (no focus) ────────────────────────────────────────────
+    yield {"type": "heartbeat", "message": f"🌐 Phase 1/{'2' if has_focus else '1'}: General wide-spectrum scan…"}
+    await asyncio.sleep(0)
+
+    for call_num in range(1, phase1_calls + 1):
+        label = WIDE_LABELS[call_num]
+        yield {"type": "heartbeat", "message": f"  [{call_num}/{phase1_calls}] {label}…"}
         await asyncio.sleep(0)
 
-        prompt = _build_tech_stack_prompt(company_name, domain, linkedin_url, fc, fv, call_num)
+        # Wide scan: pass empty focus lists so prompt uses wide-spectrum slices
+        prompt = _build_tech_stack_prompt(company_name, domain, linkedin_url, [], [], call_num)
         loop = asyncio.get_event_loop()
         future = loop.run_in_executor(None, _gemini_tech_stack_sync, prompt, company_name)
 
-        # Poll without asyncio.shield — shield causes hangs on timeout in Python 3.11+
         elapsed = 0
         call_tools: list[dict] = []
         while elapsed < CALL_TIMEOUT:
@@ -525,15 +578,15 @@ async def find_tech_stack(
                     logger.error(f"Tech stack call {call_num} error for {company_name}: {e}", exc_info=True)
                     yield {"type": "heartbeat", "message": f"⚠️ Call {call_num} error: {e}"}
                 break
-            yield {"type": "heartbeat", "message": f"🌐 [{call_num}/{num_calls}] Scanning… ({elapsed}s)"}
+            yield {"type": "heartbeat", "message": f"  [{call_num}/{phase1_calls}] Scanning… ({elapsed}s)"}
             await asyncio.sleep(0)
         else:
             future.cancel()
-            yield {"type": "heartbeat", "message": f"⏱ Call {call_num} timed out after {CALL_TIMEOUT}s — partial results below"}
+            yield {"type": "heartbeat", "message": f"⏱ Call {call_num} timed out — partial results below"}
 
         new_tools = 0
         for tool in call_tools:
-            dedup_key = f"{tool.get('vendor','').lower()}|{tool.get('tech_stack_category','').lower()}"
+            dedup_key = f"{tool.get('vendor','').lower()}|{tool.get('tech_level3','').lower()}"
             if dedup_key in seen_keys:
                 continue
             seen_keys.add(dedup_key)
@@ -544,8 +597,56 @@ async def find_tech_stack(
             new_tools += 1
             total += 1
 
-        yield {"type": "heartbeat", "message": f"✅ Call {call_num} done: +{new_tools} tools (total {total})"}
+        yield {"type": "heartbeat", "message": f"  ✓ Call {call_num} done: +{new_tools} tools (running total: {total})"}
         await asyncio.sleep(0)
+
+    # ── Phase 2: focused scan (only if focus_categories or focus_vendors given) ──
+    if has_focus:
+        focus_summary = ", ".join((fc + fv)[:4])
+        yield {"type": "heartbeat", "message": f"🎯 Phase 2/2: Focused scan — {focus_summary}…"}
+        await asyncio.sleep(0)
+
+        for call_num in range(1, 3):  # 2 focused calls
+            yield {"type": "heartbeat", "message": f"  [F{call_num}/2] Focused scan: {focus_summary}…"}
+            await asyncio.sleep(0)
+
+            prompt = _build_tech_stack_prompt(company_name, domain, linkedin_url, fc, fv, call_num)
+            loop = asyncio.get_event_loop()
+            future = loop.run_in_executor(None, _gemini_tech_stack_sync, prompt, company_name)
+
+            elapsed = 0
+            call_tools = []
+            while elapsed < CALL_TIMEOUT:
+                await asyncio.sleep(10)
+                elapsed += 10
+                if future.done():
+                    try:
+                        call_tools = future.result() or []
+                    except Exception as e:
+                        logger.error(f"Focused call {call_num} error for {company_name}: {e}", exc_info=True)
+                        yield {"type": "heartbeat", "message": f"⚠️ Focused call {call_num} error: {e}"}
+                    break
+                yield {"type": "heartbeat", "message": f"  [F{call_num}/2] Scanning… ({elapsed}s)"}
+                await asyncio.sleep(0)
+            else:
+                future.cancel()
+                yield {"type": "heartbeat", "message": f"⏱ Focused call {call_num} timed out — partial results"}
+
+            new_tools = 0
+            for tool in call_tools:
+                dedup_key = f"{tool.get('vendor','').lower()}|{tool.get('tech_level3','').lower()}"
+                if dedup_key in seen_keys:
+                    continue
+                seen_keys.add(dedup_key)
+                row = {"company_name": company_name, "domain": domain, "_status": "ok"}
+                row.update(tool)
+                yield {"type": "row_done", "row": row}
+                await asyncio.sleep(0.04)
+                new_tools += 1
+                total += 1
+
+            yield {"type": "heartbeat", "message": f"  ✓ Focused call {call_num} done: +{new_tools} new tools (total: {total})"}
+            await asyncio.sleep(0)
 
     # ── Fallback: retry with brand name if subsidiary name returned nothing ──────
     if total == 0 and brand_name.lower() != company_name.lower():
@@ -553,7 +654,7 @@ async def find_tech_stack(
                "message": f"🔄 No results for '{company_name}' — retrying as '{brand_name}'…"}
         await asyncio.sleep(0)
 
-        fallback_prompt = _build_tech_stack_prompt(brand_name, domain, linkedin_url, fc, fv, 1)
+        fallback_prompt = _build_tech_stack_prompt(brand_name, domain, linkedin_url, [], [], 1)
         loop = asyncio.get_event_loop()
         future = loop.run_in_executor(None, _gemini_tech_stack_sync, fallback_prompt, brand_name)
 
@@ -574,7 +675,7 @@ async def find_tech_stack(
             future.cancel()
 
         for tool in fallback_tools:
-            dedup_key = f"{tool.get('vendor','').lower()}|{tool.get('tech_stack_category','').lower()}"
+            dedup_key = f"{tool.get('vendor','').lower()}|{tool.get('tech_level3','').lower()}"
             if dedup_key in seen_keys:
                 continue
             seen_keys.add(dedup_key)
