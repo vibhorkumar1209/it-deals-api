@@ -934,7 +934,7 @@ class SignalIntelRequest(BaseModel):
     user_domain: str = Field(default="")
     key_triggers: str = Field(default="")
     target_tech: str = Field(default="")
-    lookback_days: int = Field(default=365, ge=7, le=365)
+    lookback_days: int = Field(default=365, ge=7, le=1095)
 
 
 @app.post("/api/signal-intel")
@@ -1029,9 +1029,9 @@ async def competitive_analyze(req: CompetitiveAnalyzeRequest):
 
         # Default to all modules if none specified
         enabled = [m for m in req.enabled_modules if m in MODULES] or list(MODULES.keys())
-        # core is always first
-        if "core" in enabled:
-            enabled = ["core"] + [m for m in enabled if m != "core"]
+        # metrics is always first
+        if "metrics" in enabled:
+            enabled = ["metrics"] + [m for m in enabled if m != "metrics"]
 
         competitors = [{"name": c.name, "domain": c.domain} for c in req.competitors]
 

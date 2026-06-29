@@ -19,15 +19,15 @@ TOTAL_BUDGET = 480          # seconds for full analysis
 # ── Module definitions ────────────────────────────────────────────────────────
 
 MODULES = {
-    "core":      "Company Overview",
-    "portfolio": "Service & Product Portfolio",
-    "technology":"Technology & Innovation",
-    "customer":  "Customer Base & Retention",
-    "financial": "Financial Performance",
-    "gtm":       "Go-to-Market Strategy",
-    "talent":    "Talent & Culture",
-    "brand":     "Brand & Analyst Presence",
-    "stack":     "Tech Stack & Alliances",
+    "metrics":      "Overall Company Metrics",
+    "portfolio":    "Service / Product / Platform Portfolio",
+    "overlap":      "Core Competitive Overlap",
+    "customer":     "Customer Base",
+    "brand":        "Brand & Analyst Mentions",
+    "talent":       "Talent & Headcount",
+    "deals":        "JV / M&A / Partnerships",
+    "stack":        "Tech Stack",
+    "news":         "Recent Key News",
 }
 
 # ── Gemini helpers ────────────────────────────────────────────────────────────
@@ -178,203 +178,235 @@ async def discover_competitors(target_company: str, target_domain: str = "", ind
 
 # ── Module Prompts ────────────────────────────────────────────────────────────
 
-def _core_prompt(company: str) -> str:
-    return f"""Research the company overview for {company}.
+def _metrics_prompt(company: str) -> str:
+    return f"""Research the overall company metrics for {company}. Search broadly.
 
-Search for: "{company}" company overview, "{company}" annual report, "{company}" headquarters employees revenue, "{company}" business model.
+Search for:
+- "{company}" annual revenue 2024 2025 fiscal year results
+- "{company}" total revenue billion million earnings
+- "{company}" market share market position industry
+- "{company}" revenue growth YoY quarterly
+- "{company}" gross margin EBITDA operating margin
+- "{company}" market cap valuation funding
+- "{company}" number of customers total employees
+- "{company}" revenue by segment geography
+
+For public companies use 10-K, earnings releases. For private use Crunchbase, press, analyst estimates.
+Do NOT return "—" for major public companies — their financials are public record.
 
 Return ONLY valid JSON (no markdown):
 {{
-  "legal_name": "",
-  "hq_location": "",
-  "founded": "",
-  "total_employees": "",
   "annual_revenue": "",
   "revenue_growth_yoy": "",
+  "market_cap_or_valuation": "",
+  "market_share": "",
+  "market_share_source": "",
   "gross_margin": "",
-  "operating_margin": "",
-  "geographic_presence": [],
-  "business_model": "",
+  "ebitda_margin": "",
+  "net_income": "",
+  "total_customers": "",
+  "total_employees": "",
+  "revenue_by_segment": {{}},
+  "revenue_by_geo": {{}},
   "public_or_private": "",
-  "description": ""
+  "profitable": ""
 }}
-Use "—" for unknown fields. Be specific with numbers where available."""
+Use "—" only if genuinely unavailable."""
 
 
 def _portfolio_prompt(company: str) -> str:
-    return f"""Research the service and product portfolio of {company}.
+    return f"""Research the service, product, and platform portfolio of {company}.
 
-Search for: "{company}" products services portfolio, "{company}" offerings capabilities, "{company}" solutions, "{company}" product roadmap.
+Search for:
+- "{company}" products services solutions portfolio 2024 2025
+- "{company}" platform capabilities AI integration features
+- "{company}" key offerings industry solutions
+- "{company}" product roadmap new launches
+- "{company}" AI features generative AI integration
 
 Return ONLY valid JSON (no markdown):
 {{
   "primary_offerings": [],
-  "key_products": [],
-  "industry_verticals": [],
-  "portfolio_type": "",
-  "portfolio_breadth": "",
-  "recent_launches": [],
-  "discontinued_products": []
+  "key_products_platforms": [],
+  "ai_integration_highlights": [],
+  "industry_aligned_solutions": [],
+  "portfolio_strengths": [],
+  "recent_launches_2024_2025": [],
+  "portfolio_gaps": []
 }}
 Use "—" for unknown fields."""
 
 
-def _technology_prompt(company: str) -> str:
-    return f"""Research the technology and innovation profile of {company}.
+def _overlap_prompt(company: str) -> str:
+    return f"""Research the core competitive positioning and overlap areas of {company} vs its rivals.
 
-Search for: "{company}" AI machine learning, "{company}" R&D investment, "{company}" patents technology, "{company}" digital transformation capabilities, "{company}" technology partnerships.
+Search for:
+- "{company}" competitive advantage differentiation
+- "{company}" vs competitors comparison strengths weaknesses
+- "{company}" win rate competitive displacement 2024 2025
+- "{company}" analyst competitive assessment
 
 Return ONLY valid JSON (no markdown):
 {{
-  "ai_ml_capabilities": [],
-  "rd_investment": "",
-  "patent_count": "",
-  "tech_partnerships": [],
-  "cloud_strategy": "",
-  "innovation_highlights": [],
-  "tech_differentiators": []
+  "primary_competitive_strengths": [],
+  "primary_competitive_weaknesses": [],
+  "key_differentiators": [],
+  "where_they_win": [],
+  "where_they_lose": [],
+  "competitive_moat": "",
+  "pricing_positioning": ""
 }}
 Use "—" for unknown fields."""
 
 
 def _customer_prompt(company: str) -> str:
-    return f"""Research the customer base and retention metrics of {company}.
+    return f"""Research the customer base of {company} — focus on industry verticals and notable clients.
 
-Search for: "{company}" customers clients, "{company}" customer count enterprise, "{company}" notable clients logos, "{company}" NPS retention rate, "{company}" case studies wins.
+Search for:
+- "{company}" customers clients case studies 2024 2025
+- "{company}" enterprise clients notable logos industry
+- "{company}" customer wins new accounts
+- "{company}" NPS retention rate customer satisfaction
+- "{company}" industries served verticals
 
 Return ONLY valid JSON (no markdown):
 {{
-  "customer_count": "",
-  "enterprise_clients": [],
-  "key_industries_served": [],
+  "total_customers": "",
+  "key_industry_verticals": [],
+  "notable_enterprise_clients": [],
+  "recent_customer_wins_2024_2025": [],
   "customer_retention_rate": "",
   "nps_score": "",
-  "notable_wins_2024_2025": [],
-  "net_revenue_retention": ""
-}}
-Use "—" for unknown fields."""
-
-
-def _financial_prompt(company: str) -> str:
-    return f"""Research the financial performance of {company}. Search broadly using multiple queries.
-
-Search for ALL of the following:
-- "{company}" annual revenue 2024 fiscal year results
-- "{company}" revenue growth quarterly earnings report
-- "{company}" total revenue billion million 2024 2025
-- "{company}" financial results investor relations
-- "{company}" annual report revenue by segment
-- "{company}" revenue by geography region breakdown
-- "{company}" gross margin operating margin EBITDA
-- "{company}" ARR recurring revenue growth rate
-- "{company}" funding raised valuation IPO
-
-For public companies like Oracle, SAP, Microsoft: use their latest fiscal year filings (10-K, earnings releases, press releases) which are public record.
-For private companies: use Crunchbase, press releases, news articles, analyst estimates.
-
-Be thorough — do not return "—" for major public companies where financials are publicly available.
-
-Return ONLY valid JSON (no markdown):
-{{
-  "annual_revenue": "",
-  "revenue_growth_yoy": "",
-  "arr_if_saas": "",
-  "revenue_by_geo": {{}},
-  "revenue_by_segment": {{}},
-  "gross_margin": "",
-  "ebitda_margin": "",
-  "net_income": "",
-  "funding_raised": "",
-  "valuation": "",
-  "market_cap": "",
-  "profitable": ""
-}}
-Use "—" ONLY if genuinely unavailable after searching all sources above."""
-
-
-def _gtm_prompt(company: str) -> str:
-    return f"""Research the go-to-market strategy of {company}.
-
-Search for: "{company}" sales strategy, "{company}" partner ecosystem, "{company}" channel partners resellers, "{company}" marketing campaigns, "{company}" analyst relations.
-
-Return ONLY valid JSON (no markdown):
-{{
-  "primary_sales_motion": "",
-  "channel_partners": [],
-  "key_alliances": [],
-  "target_buyer_persona": "",
-  "marketing_highlights": [],
-  "recent_campaigns": [],
-  "analyst_strategy": ""
-}}
-Use "—" for unknown fields."""
-
-
-def _talent_prompt(company: str) -> str:
-    return f"""Research the talent profile and culture of {company}.
-
-Search for: "{company}" employees headcount growth, "{company}" Glassdoor reviews rating, "{company}" executive leadership changes, "{company}" hiring areas layoffs, "{company}" culture values.
-
-Return ONLY valid JSON (no markdown):
-{{
-  "total_headcount": "",
-  "headcount_yoy_change": "",
-  "glassdoor_rating": "",
-  "glassdoor_review_sentiment": "",
-  "key_exec_changes_2024_2025": [],
-  "hiring_focus_areas": [],
-  "attrition_signal": ""
+  "net_revenue_retention": "",
+  "customer_concentration_risk": ""
 }}
 Use "—" for unknown fields."""
 
 
 def _brand_prompt(company: str) -> str:
-    return f"""Research the brand and analyst positioning of {company}.
+    return f"""Research the brand presence and analyst recognition of {company} — both overall and industry/product-specific.
 
-Search for: "{company}" Gartner Magic Quadrant, "{company}" Forrester Wave, "{company}" ISG Provider Lens, "{company}" Everest Group PEAK Matrix, "{company}" awards recognition 2024 2025, "{company}" LinkedIn followers.
+Search for:
+- "{company}" Gartner Magic Quadrant 2024 2025
+- "{company}" Forrester Wave leader 2024 2025
+- "{company}" ISG Provider Lens Everest Group PEAK Matrix
+- "{company}" awards recognition industry analyst
+- "{company}" LinkedIn followers brand awareness
+- "{company}" thought leadership content marketing
 
 Return ONLY valid JSON (no markdown):
 {{
-  "gartner_position": "",
-  "forrester_position": "",
-  "isg_position": "",
-  "everest_position": "",
+  "gartner_positions": [],
+  "forrester_positions": [],
+  "isg_everest_positions": [],
+  "other_analyst_mentions": [],
   "awards_2024_2025": [],
-  "thought_leadership_score": "",
   "linkedin_followers": "",
-  "brand_perception": ""
+  "brand_perception_overall": "",
+  "brand_perception_by_segment": {{}}
 }}
 Use "—" for unknown fields."""
+
+
+def _talent_prompt(company: str) -> str:
+    return f"""Research the talent profile, headcount, and key leaders of {company}.
+
+Search for:
+- "{company}" total employees headcount 2024 2025
+- "{company}" key executives CEO CTO CPO leadership team
+- "{company}" hiring growth layoffs workforce
+- "{company}" relevant department size engineering sales
+- "{company}" Glassdoor rating culture
+
+Return ONLY valid JSON (no markdown):
+{{
+  "total_headcount": "",
+  "headcount_yoy_change": "",
+  "key_leaders": [],
+  "relevant_dept_size": "",
+  "hiring_focus_areas": [],
+  "recent_key_hires_departures": [],
+  "glassdoor_rating": "",
+  "attrition_signal": ""
+}}
+Use "—" for unknown fields."""
+
+
+def _deals_prompt(company: str) -> str:
+    return f"""Research joint ventures, M&A activity, and strategic partnerships of {company} — only relevant ones.
+
+Search for:
+- "{company}" acquisition merger 2023 2024 2025
+- "{company}" joint venture strategic partnership alliance
+- "{company}" partnership agreement announced
+- "{company}" invested in acquired divested
+
+Return ONLY valid JSON (no markdown):
+{{
+  "recent_acquisitions": [],
+  "recent_jv_partnerships": [],
+  "key_alliances": [],
+  "divestitures": [],
+  "investment_activity": [],
+  "strategic_rationale_summary": ""
+}}
+Include only deals from 2022 onwards. Use "—" for unknown fields."""
 
 
 def _stack_prompt(company: str) -> str:
-    return f"""Research the internal tech stack and strategic alliances of {company}.
+    return f"""Research the tech stack and technology partnerships of {company} — especially relevant products, platforms, or solutions they use or partner with to deliver offerings.
 
-Search for: "{company}" cloud provider AWS Azure GCP, "{company}" CRM Salesforce HubSpot, "{company}" ERP SAP Oracle, "{company}" AI tools platform, "{company}" technology partners alliances.
+Search for:
+- "{company}" cloud provider AWS Azure GCP technology
+- "{company}" AI platform partner technology stack
+- "{company}" CRM ERP software platform used
+- "{company}" technology partnership solution integration
+- "{company}" built on powered by platform
 
 Return ONLY valid JSON (no markdown):
 {{
-  "cloud_providers": [],
-  "crm_platform": "",
-  "erp_platform": "",
-  "ai_tools_used": [],
-  "key_tech_alliances": [],
-  "development_stack": [],
-  "data_platforms": []
+  "cloud_infrastructure": [],
+  "ai_ml_platforms": [],
+  "key_software_platforms": [],
+  "technology_partnerships": [],
+  "homegrown_platforms": [],
+  "data_and_analytics_stack": []
 }}
 Use "—" for unknown fields."""
 
 
+def _news_prompt(company: str) -> str:
+    return f"""Find the most recent and significant news about {company} from the last 12 months.
+
+Search for:
+- "{company}" news 2024 2025 latest announcements
+- "{company}" press release announcement recent
+- "{company}" major deal contract win 2024 2025
+- "{company}" strategy change pivot leadership
+
+Return ONLY valid JSON (no markdown) — an array of up to 8 items, newest first:
+[
+  {{
+    "headline": "",
+    "date": "",
+    "category": "Deal | Partnership | Leadership | Financial | Product | Strategy | Other",
+    "summary": "",
+    "significance": ""
+  }}
+]
+Only include genuinely newsworthy items from 2024–2025. Return [] if nothing significant found."""
+
+
 _MODULE_PROMPTS = {
-    "core":      _core_prompt,
+    "metrics":   _metrics_prompt,
     "portfolio": _portfolio_prompt,
-    "technology":_technology_prompt,
+    "overlap":   _overlap_prompt,
     "customer":  _customer_prompt,
-    "financial": _financial_prompt,
-    "gtm":       _gtm_prompt,
-    "talent":    _talent_prompt,
     "brand":     _brand_prompt,
+    "talent":    _talent_prompt,
+    "deals":     _deals_prompt,
     "stack":     _stack_prompt,
+    "news":      _news_prompt,
 }
 
 
