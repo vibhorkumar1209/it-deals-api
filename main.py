@@ -1085,10 +1085,19 @@ class IndustryDealsSearchRequest(BaseModel):
 async def industry_companies(req: IndustryCompaniesRequest):
     if not os.getenv("GOOGLE_AI_API_KEY"):
         raise HTTPException(status_code=500, detail="GOOGLE_AI_API_KEY not set on server.")
-    companies = await asyncio.to_thread(
-        generate_company_list,
-        req.industry, req.geography, req.company_name, req.domain, req.focus_tech,
-    )
+    try:
+        companies = await asyncio.wait_for(
+            asyncio.to_thread(
+                generate_company_list,
+                req.industry, req.geography, req.company_name, req.domain, req.focus_tech,
+            ),
+            timeout=120,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Company list generation timed out — try again.")
+    except Exception as e:
+        logger.error(f"industry_companies error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
     return {"companies": companies}
 
 

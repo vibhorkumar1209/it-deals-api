@@ -55,24 +55,24 @@ def _company_list_prompt(
 
     return f"""You are a market research analyst. Generate a list of the top 50 companies{geo_str} in the {industry} industry.{opt_block}
 
-Run these searches:
-- "top {industry} companies {geography} 2024 2025 ranking"
-- "largest {industry} enterprises {geography} revenue"
-- "leading {industry} players {geography} Forbes Fortune"
-- "{industry} industry major companies {geography} market share"
+Search for:
+- "top {industry} companies {geography} 2024 2025 ranking list"
+- "largest {industry} enterprises {geography} by revenue"
+- "leading {industry} players {geography}"
+- "major {industry} companies {geography} market leaders"
 
-For each company return EXACTLY this JSON object:
-{{
-  "company_name": "",
-  "domain": "",
-  "type": "Public | Private | Government",
-  "revenue_estimate": "$XB or $XM — e.g. '$5.2B'",
-  "headquarters": "City, Country",
-  "employees_estimate": "e.g. 170,000",
-  "description": "1-line description of what they do"
-}}
+Your response MUST be ONLY a valid JSON array — no prose, no headers, no markdown code fences.
+Start your response with [ and end with ].
 
-Return ONLY a raw JSON array of up to 50 companies, sorted by revenue/size descending. No markdown."""
+Each element must be exactly:
+{{"company_name": "BNP Paribas", "domain": "bnpparibas.com", "type": "Public", "revenue_estimate": "$50B", "headquarters": "Paris, France", "employees_estimate": "190,000", "description": "France's largest bank by assets"}}
+
+Rules:
+- type must be one of: Public, Private, Government
+- revenue_estimate: "$XB" or "$XM" — use public data where available
+- Sort by revenue / size descending
+- Include up to 50 companies
+- Output ONLY the JSON array, nothing else"""
 
 
 def _deals_prompt(
@@ -221,8 +221,19 @@ def generate_company_list(
 ) -> list[dict]:
     prompt = _company_list_prompt(industry, geography, company_name, domain, focus_tech)
     text = _gemini_sync(prompt)
+    logger.info(f"Company list raw text length: {len(text)}, first 300: {text[:300]!r}")
+
     parsed = _parse_json(text)
+
+    # Gemini sometimes wraps the list in {"companies": [...]}
+    if isinstance(parsed, dict):
+        for key in ("companies", "results", "data", "list"):
+            if isinstance(parsed.get(key), list):
+                parsed = parsed[key]
+                break
+
     if not isinstance(parsed, list):
+        logger.error(f"Company list parse failed — got {type(parsed)}, raw: {text[:500]!r}")
         return []
 
     out = []
@@ -230,16 +241,17 @@ def generate_company_list(
         if not isinstance(item, dict):
             continue
         co = {
-            "company_name": str(item.get("company_name", "")).strip(),
-            "domain":       str(item.get("domain", "")).strip(),
+            "company_name": str(item.get("company_name", "") or item.get("name", "")).strip(),
+            "domain":       str(item.get("domain", "") or item.get("website", "")).strip(),
             "type":         item.get("type", "Private"),
-            "revenue_estimate": item.get("revenue_estimate", "—"),
-            "headquarters": item.get("headquarters", ""),
-            "employees_estimate": item.get("employees_estimate", ""),
-            "description":  item.get("description", ""),
+            "revenue_estimate": item.get("revenue_estimate", "") or item.get("revenue", "—"),
+            "headquarters": item.get("headquarters", "") or item.get("hq", ""),
+            "employees_estimate": item.get("employees_estimate", "") or item.get("employees", ""),
+            "description":  item.get("description", "") or item.get("about", ""),
         }
         if co["company_name"]:
             out.append(co)
+    logger.info(f"Company list parsed {len(out)} companies for {industry}/{geography}")
     return out[:50]
 
 
