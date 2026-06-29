@@ -514,44 +514,6 @@ async def find_tech_stack(
     seen_keys: set[str] = set()
     total = 0
 
-    async def _run_call(prompt_company: str, prompt_domain: str, call_fc: list, call_fv: list,
-                        call_num: int, phase_label: str) -> int:
-        """Run one Gemini call, yield events, return count of new tools added."""
-        nonlocal total
-        yield_count = 0
-        prompt = _build_tech_stack_prompt(prompt_company, prompt_domain, linkedin_url, call_fc, call_fv, call_num)
-        loop = asyncio.get_event_loop()
-        future = loop.run_in_executor(None, _gemini_tech_stack_sync, prompt, prompt_company)
-
-        elapsed = 0
-        call_tools: list[dict] = []
-        while elapsed < CALL_TIMEOUT:
-            await asyncio.sleep(10)
-            elapsed += 10
-            if future.done():
-                try:
-                    call_tools = future.result() or []
-                except Exception as e:
-                    logger.error(f"Tech stack call error for {prompt_company}: {e}", exc_info=True)
-                    return 0
-                break
-            # no per-tick heartbeat — outer loop emits progress
-        else:
-            future.cancel()
-
-        for tool in call_tools:
-            dedup_key = f"{tool.get('vendor','').lower()}|{tool.get('tech_level3','').lower()}"
-            if dedup_key in seen_keys:
-                continue
-            seen_keys.add(dedup_key)
-            row = {"company_name": company_name, "domain": domain, "_status": "ok"}
-            row.update(tool)
-            yield {"type": "row_done", "row": row}
-            await asyncio.sleep(0.04)
-            yield_count += 1
-            total += 1
-        return yield_count
-
     # ── Phase 1: wide scan (no focus) ────────────────────────────────────────────
     yield {"type": "heartbeat", "message": f"🌐 Phase 1/{'2' if has_focus else '1'}: General wide-spectrum scan…"}
     await asyncio.sleep(0)
