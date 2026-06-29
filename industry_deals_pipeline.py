@@ -160,32 +160,48 @@ def _gemini_sync(prompt: str) -> str:
 # ── JSON parsing ──────────────────────────────────────────────────────────────
 
 def _parse_json(text: str) -> list | dict | None:
+    """Extract and parse the first JSON array or object from arbitrary text."""
     if not text:
         return None
+
+    # 1. Direct parse (no wrapping)
     try:
-        clean = re.sub(r"```(?:json)?\s*", "", text.strip())
-        clean = re.sub(r"```\s*$", "", clean, flags=re.MULTILINE).strip()
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Extract first [...] by bracket position (handles markdown fences, prose preamble, etc.)
+    start = text.find("[")
+    end   = text.rfind("]")
+    if start != -1 and end > start:
+        fragment = text[start: end + 1]
         try:
-            return json.loads(clean)
+            return json.loads(fragment)
+        except json.JSONDecodeError:
+            # Truncated — cut to last complete object
+            lb = fragment.rfind("}")
+            if lb != -1:
+                fixed = fragment[:lb + 1].rstrip().rstrip(",") + "\n]"
+                try:
+                    return json.loads(fixed)
+                except json.JSONDecodeError:
+                    pass
+
+    # 3. Extract first {...} (handles single-object or wrapped responses)
+    start = text.find("{")
+    end   = text.rfind("}")
+    if start != -1 and end > start:
+        fragment = text[start: end + 1]
+        try:
+            result = json.loads(fragment)
+            for key in ("companies", "results", "data", "list", "items"):
+                if isinstance(result.get(key), list):
+                    return result[key]
+            return result
         except json.JSONDecodeError:
             pass
-        m = re.search(r"\[.*\]", clean, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except Exception:
-                pass
-            # Attempt recovery from truncated JSON
-            fragment = m.group(0)
-            lb = fragment.rfind("}")
-            if lb >= 0:
-                fragment = fragment[:lb + 1].rstrip().rstrip(",") + "\n]"
-                try:
-                    return json.loads(fragment)
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.error(f"JSON parse error: {e}")
+
+    logger.error(f"_parse_json: could not extract JSON from text (len={len(text)}): {text[:200]!r}")
     return None
 
 
