@@ -1059,6 +1059,66 @@ async def competitive_analyze(req: CompetitiveAnalyzeRequest):
     )
 
 
+
+# ── Industry Deals ────────────────────────────────────────────────────────────
+
+from industry_deals_pipeline import generate_company_list, search_industry_deals
+
+
+class IndustryCompaniesRequest(BaseModel):
+    industry: str = Field(..., min_length=1)
+    geography: str = Field(default="")
+    company_name: str = Field(default="")
+    domain: str = Field(default="")
+    focus_tech: str = Field(default="")
+
+
+class IndustryDealsSearchRequest(BaseModel):
+    companies: list[dict] = Field(default_factory=list)
+    industry: str = Field(..., min_length=1)
+    geography: str = Field(default="")
+    renewal_timeframe: str = Field(default="1 year")
+    focus_tech: str = Field(default="")
+
+
+@app.post("/api/industry-companies")
+async def industry_companies(req: IndustryCompaniesRequest):
+    if not os.getenv("GOOGLE_AI_API_KEY"):
+        raise HTTPException(status_code=500, detail="GOOGLE_AI_API_KEY not set on server.")
+    companies = await asyncio.to_thread(
+        generate_company_list,
+        req.industry, req.geography, req.company_name, req.domain, req.focus_tech,
+    )
+    return {"companies": companies}
+
+
+@app.post("/api/industry-deals-search")
+async def industry_deals_search(req: IndustryDealsSearchRequest):
+    if not os.getenv("GOOGLE_AI_API_KEY"):
+        raise HTTPException(status_code=500, detail="GOOGLE_AI_API_KEY not set on server.")
+    if not req.companies:
+        raise HTTPException(status_code=400, detail="No companies provided.")
+
+    async def _generate():
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+        try:
+            async for event in search_industry_deals(
+                req.companies, req.industry, req.geography,
+                req.renewal_timeframe, req.focus_tech,
+            ):
+                yield _sse(event)
+        except Exception as e:
+            logger.error(f"Industry deals search error: {e}", exc_info=True)
+            yield _sse({"type": "error", "message": str(e)})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=4001, reload=True)
