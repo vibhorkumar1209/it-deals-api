@@ -402,16 +402,21 @@ def _run_category_sync(
     label = f"{company[:20]}|{category}"
     rows = _gemini_call_sync(prompt, use_search=True, label=label, max_output_tokens=8192)
 
-    # Tech keywords — if a non-tech signal mentions these, re-tag to Tech category
-    _TECH_KEYWORDS = (
-        "erp", "crm", "saas", "cloud", "platform", "software", "system", "technology",
-        "digital transformation", "ai ", " ai,", "machine learning", "automation",
-        "data warehouse", "cybersecurity", "it infrastructure", "legacy", "migration",
-        "vendor", "implementation", "rollout", "deployment", "upgrade", "tech stack",
-        "salesforce", "sap ", " sap,", "oracle", "microsoft", "workday", "servicenow",
-        "aws", "azure", "gcp", "kubernetes", "devops", "api", "integration", "iot",
-        "blockchain", "analytics", "bi ", " bi,", "database", "rpa", "fintech", "regtech",
-    )
+    # signal_type → category map. Each prompt asks the model for a signal_type
+    # from a fixed, category-specific enum (see prompt functions above) — that
+    # enum is the ground truth for classification, not incidental keywords in
+    # the title/summary. A "new_hire" signal stays Executive & Leadership even
+    # if its summary happens to mention "platform" or "CRM" in passing.
+    _SIGNAL_TYPE_TO_CATEGORY = {
+        "new_hire": "executive_leadership", "internal_promotion": "executive_leadership",
+        "champion_move": "executive_leadership", "mass_exodus": "executive_leadership",
+        "headcount_surge": "corporate_expansion", "job_postings": "corporate_expansion",
+        "office_opening": "corporate_expansion", "product_launch": "corporate_expansion",
+        "funding_round": "financial_corporate", "merger_acquisition": "financial_corporate",
+        "relocation": "financial_corporate", "earnings_shift": "financial_corporate",
+        "contract_renewal": "tech_legal", "regulatory_compliance": "tech_legal",
+        "system_outage": "tech_legal", "tech_refresh": "tech_legal",
+    }
 
     result = []
     for r in rows:
@@ -420,16 +425,11 @@ def _run_category_sync(
         r["company"] = company
         r["domain"] = domain
 
-        # Re-tag to Tech if signal text mentions tech keywords but came from another category
-        assigned_cat = category
-        if category != "tech_legal":
-            text_check = " ".join([
-                str(r.get("signal_title", "")),
-                str(r.get("summary", "")),
-                str(r.get("signal_type", "")),
-            ]).lower()
-            if any(kw in text_check for kw in _TECH_KEYWORDS):
-                assigned_cat = "tech_legal"
+        # Trust the category this prompt was run under, unless the model's own
+        # signal_type unambiguously belongs to a different category (rare —
+        # e.g. it free-associated a tech_refresh type into a non-tech prompt).
+        signal_type = str(r.get("signal_type", "")).strip().lower()
+        assigned_cat = _SIGNAL_TYPE_TO_CATEGORY.get(signal_type, category)
 
         r["category"] = CATEGORY_LABELS[assigned_cat]
         r["category_key"] = assigned_cat
