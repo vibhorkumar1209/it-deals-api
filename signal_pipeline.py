@@ -1,13 +1,14 @@
 """
 Signal Intelligence pipeline — Gemini 2.5 Flash + Google Search.
 
-For each target company, runs 4 parallel signal-category searches:
+For each target company, runs 5 parallel signal-category searches:
   1. Executive & Leadership Shifts
   2. Corporate Expansion & Growth
   3. Financial & Corporate Structure
   4. Tech Stack & Legal Triggers
+  5. RFP & Procurement Signals
 
-Optional: if user_company is provided, runs a 5th ranking pass per company
+Optional: if user_company is provided, runs a 6th ranking pass per company
           to score each signal by relevance to the seller.
 """
 
@@ -41,6 +42,7 @@ SIGNAL_CATEGORIES = [
     "corporate_expansion",
     "financial_corporate",
     "tech_legal",
+    "rfp_procurement",
 ]
 
 CATEGORY_LABELS = {
@@ -48,6 +50,37 @@ CATEGORY_LABELS = {
     "corporate_expansion":  "Corporate Expansion & Growth",
     "financial_corporate":  "Financial & Corporate Structure",
     "tech_legal":           "Tech Stack & Legal Triggers",
+    "rfp_procurement":      "RFP & Procurement Signals",
+}
+
+# ── Rule-based default importance (applied before LLM ranking) ────────────────
+# Ensures meaningful defaults even when no user_company context is provided.
+_SIGNAL_TYPE_DEFAULT_IMPORTANCE = {
+    # Critical — active buying intent / immediate opportunity
+    "rfp_issued":           "Critical",
+    "rfi_issued":           "Critical",
+    "tender_published":     "Critical",
+    "sole_source_award":    "Critical",
+    "procurement_open":     "Critical",
+    "system_outage":        "Critical",
+    "mass_exodus":          "Critical",
+    # High — strong buying signals
+    "new_hire":             "High",
+    "contract_renewal":     "High",
+    "merger_acquisition":   "High",
+    "funding_round":        "High",
+    "earnings_shift":       "High",
+    "tech_refresh":         "High",
+    "regulatory_compliance": "High",
+    "champion_move":        "High",
+    # Medium
+    "internal_promotion":   "Medium",
+    "headcount_surge":      "Medium",
+    "job_postings":         "Medium",
+    "product_launch":       "Medium",
+    # Low
+    "relocation":           "Low",
+    "office_opening":       "Low",
 }
 
 
@@ -210,7 +243,7 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - person_name: name of executive(s) involved (or "Multiple" for mass exodus)
 - previous_company: where they came from (or "Internal" for promotions)
 - date: exact date or month (e.g. "May 2025") — must be within {window}
-- source: MUST be a direct URL to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." — not just a publication name
+- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.
 
 Omit any signal whose date falls outside {window}. Return [] if nothing found within the window.
 Return ONLY the JSON array, no commentary."""
@@ -243,7 +276,7 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary including the sales implication
 - magnitude: quantitative detail where available (e.g. "+35% headcount", "15 new roles", "3 new cities")
 - date: month or quarter — must be within {window}
-- source: MUST be a direct URL to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." — not just a publication name
+- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
@@ -275,7 +308,7 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary including the sales implication
 - financial_detail: amount raised / deal value / revenue change (e.g. "$50M Series B", "Acquired Acme Corp for $200M")
 - date: announcement date — must be within {window}
-- source: MUST be a direct URL to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." — not just a publication name
+- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
@@ -295,7 +328,7 @@ Look for:
 1. CONTRACT RENEWALS — IT/software contracts approaching renewal within the next 12 months, where the original contract was signed ~2–3 years ago (i.e. announced within {window} or inferrable from deal dates in the window).
 2. REGULATORY COMPLIANCE — New legal deadlines or audit requirements facing the company, announced or effective within {window} (GDPR, EU AI Act, SOC2, ISO 27001, SEC rules, HIPAA, etc.)
 3. SYSTEM OUTAGE / PUBLIC FAILURE — Technical outage, data breach, or system failure that became public within {window}.
-4. TECH REFRESH SIGNALS — Legacy system end-of-life, vendor sunset, or public RFP/RFI issued within {window}.
+4. TECH REFRESH SIGNALS — Legacy system end-of-life or vendor sunset announced within {window}. Do NOT include RFPs/RFIs here — those belong in the RFP & Procurement category.
 {extra}
 
 {_source_instructions(domain)}
@@ -307,7 +340,41 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary including the sales implication
 - urgency: "Immediate" | "Within 6 months" | "Within 12 months" | "Watch"
 - date: date or deadline — must be within or triggered within {window}
-- source: MUST be a direct URL to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." — not just a publication name
+- source: MUST be a working direct URL (starting with https://) to the specific article, press release, LinkedIn post, SEC filing, or government procurement portal — e.g. "https://www.reuters.com/..." or "https://sam.gov/...". If you cannot find a direct URL, use the search result URL. Never return a bare publication name.
+
+Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
+
+
+def _rfp_procurement_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365) -> str:
+    window = _date_window(lookback_days)
+    extra = ""
+    if key_triggers:
+        extra += f"\nFocus especially on triggers related to: {key_triggers}"
+    if target_tech:
+        extra += f"\nHighlight signals relevant to this technology: {target_tech}"
+    return f"""You are a B2B sales intelligence researcher. Find RFP, RFI, and Procurement signals for {company} ({domain}).
+
+STRICT DATE FILTER: Only include events published or announced between {window}. Discard anything older.
+
+Look for:
+1. RFP ISSUED — Request for Proposal published by the company for IT, software, services, or infrastructure. Include scope, budget if available, deadline.
+2. RFI ISSUED — Request for Information issued to explore vendor options for a technology or service area.
+3. TENDER / PUBLIC BID — Government or corporate tender published on procurement portals (SAM.gov, TED.europa.eu, Jaggaer, Ariba, Bonfire, etc.)
+4. SOLE-SOURCE AWARD — Contract awarded without competitive bid (often signals incumbent renewal risk or budget unlock).
+5. PROCUREMENT OPEN — Budget approved or procurement process formally opened for a major technology purchase.
+{extra}
+
+{_source_instructions(domain)}
+Also search: SAM.gov, TED.europa.eu, BravoSolution, Jaggaer, Ariba, Bonfire, GovWin, Periscope, company's own procurement portal, government procurement databases.
+
+Return ONLY a JSON array. Each object must have exactly these fields:
+- signal_type: one of "rfp_issued" | "rfi_issued" | "tender_published" | "sole_source_award" | "procurement_open"
+- signal_title: short headline (≤15 words) — include the technology/service area
+- summary: 2–3 sentence summary including estimated contract value (if known), scope, and deadline
+- financial_detail: contract value or budget estimate if available (e.g. "$2.5M", "€500K", "Unknown")
+- urgency: "Immediate" | "Within 3 months" | "Within 6 months" | "Watch"
+- date: publication date of the RFP/RFI — must be within {window}
+- source: MUST be a working direct URL (starting with https://) to the RFP document, procurement portal listing, or news article about it — e.g. "https://sam.gov/opp/..." or "https://www.reuters.com/...". Never return a bare publication name.
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
@@ -332,6 +399,11 @@ You sell to companies like {company}. Rank the following buying signals by impor
 
 For each signal, assign:
 - importance: "Critical" | "High" | "Medium" | "Low"
+  RULES — do not default everything to Medium:
+  • Critical: Active RFP/RFI/tender issued, system outage/breach, mass executive exodus, contract renewal within 6 months
+  • High: New C-suite/VP hire, M&A activity, major funding round, earnings decline, tech refresh/sunset, regulatory deadline, champion move
+  • Medium: Internal promotion, headcount surge, new job postings, product launch
+  • Low: Office opening, relocation
 - importance_rationale: 1-2 sentences explaining WHY this signal matters specifically to {user_company}'s sales motion
 
 Signals to rank:
@@ -396,6 +468,7 @@ def _run_category_sync(
         "corporate_expansion":  _corporate_expansion_prompt,
         "financial_corporate":  _financial_corporate_prompt,
         "tech_legal":           _tech_legal_prompt,
+        "rfp_procurement":      _rfp_procurement_prompt,
     }
     prompt_fn = prompts[category]
     prompt = prompt_fn(company, domain, key_triggers, target_tech, lookback_days)
@@ -416,6 +489,9 @@ def _run_category_sync(
         "relocation": "financial_corporate", "earnings_shift": "financial_corporate",
         "contract_renewal": "tech_legal", "regulatory_compliance": "tech_legal",
         "system_outage": "tech_legal", "tech_refresh": "tech_legal",
+        "rfp_issued": "rfp_procurement", "rfi_issued": "rfp_procurement",
+        "tender_published": "rfp_procurement", "sole_source_award": "rfp_procurement",
+        "procurement_open": "rfp_procurement",
     }
 
     result = []
@@ -434,11 +510,19 @@ def _run_category_sync(
         r["category"] = CATEGORY_LABELS[assigned_cat]
         r["category_key"] = assigned_cat
 
-        # Default importance if not ranked yet
-        if "importance" not in r:
-            r["importance"] = "—"
+        # Apply rule-based default importance — ensures meaningful levels even
+        # without user_company context. The ranking LLM may override these.
+        if "importance" not in r or r.get("importance") in ("—", "", None):
+            r["importance"] = _SIGNAL_TYPE_DEFAULT_IMPORTANCE.get(signal_type, "Medium")
         if "importance_rationale" not in r:
             r["importance_rationale"] = ""
+
+        # Validate source field — must be a real URL, else clear it so the
+        # frontend renders it as plain text rather than a broken link.
+        src = r.get("source", "")
+        if src and not (src.startswith("http://") or src.startswith("https://")):
+            r["source"] = ""  # not a URL — drop it to avoid unclickable display
+
         result.append(r)
     return result
 
