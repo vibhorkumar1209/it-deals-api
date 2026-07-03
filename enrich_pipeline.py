@@ -654,22 +654,64 @@ INDUSTRY_CONTEXT = {
 }
 
 
+def _tcv_acv_rules(company_name: str) -> str:
+    return f"""- deal_value (TCV): NUMERIC $ ONLY — "$XM" or "$XB". Use the publicly stated figure if
+  available; otherwise ESTIMATE using ALL of the following signals in order:
+
+  SIGNAL 1 — Deal type baseline:
+  • Multi-year outsourcing / managed services (BPO/ITO/MSP): $50M–$2B depending on scope & company size
+  • SaaS subscription / perpetual license: estimate ACV first, then multiply by contract years for TCV
+  • SI / implementation / migration project: $1M–$200M based on technical scope below
+  • Consulting / advisory engagement: $0.2M–$25M
+  • If value is "undisclosed" or "undisclosed enterprise account": label as
+    "Estimated Enterprise Account", "Volume-Based Pricing", or "Managed Services Framework" AND still
+    provide a numeric estimate in the deal_value field.
+
+  SIGNAL 2 — Company scale (use your knowledge of {company_name}'s revenue & headcount):
+  • Annual IT spend ≈ 1–4% of revenue. A single project TCV rarely exceeds 10–20% of annual IT budget
+    unless it is a flagship multi-year mega-deal.
+  • Fortune 500 / global enterprise ($B revenue): enterprise-scale budgets apply.
+  • Mid-market ($100M–$1B revenue): scale estimates down by 3–10×.
+  • Startup / SMB (<$100M revenue): scale estimates down by 10–50×.
+
+  SIGNAL 3 — Technical scope (extract concrete numbers from source):
+  • <10 systems / <10TB / single team / <6 months → $0.3M–$1.5M
+  • 10–5,000 systems / 10–100TB / one quarter → $1.5M–$10M
+  • 5,000–20,000 systems / 100TB–1PB / 6–18 months / dedicated programme → $10M–$50M
+  • 20,000+ systems / 1PB+ / multi-year / large org-wide programme → $50M–$200M
+  • Full enterprise outsourcing (Fortune 500, 5–10 yr, global scope) → $200M–$2B
+
+  SIGNAL 4 — Duration multiplier (for outsourcing & SaaS):
+  • If duration_months is known: TCV = ACV × (duration_months / 12). Apply to both SaaS and
+    recurring managed-services deals. Use this to cross-check your estimate.
+
+  SIGNAL 5 — Sanity check: Final TCV must satisfy BOTH company scale and technical scope signals.
+  Whichever gives the lower value wins.
+
+  Output format: exactly "$50M" or "$2.5B" — NO other text.
+
+- deal_acv (ACV): NUMERIC $ ONLY. ALWAYS derive if possible:
+  • If TCV and duration are known: ACV = TCV / (duration_months / 12)
+  • If deal is a subscription/SaaS: ACV = annual license/subscription fee
+  • If deal is recurring managed services: ACV = annual run-rate
+  • If truly one-off with no annual recurring component (e.g. a one-time migration): empty string
+  Output format: "$10M" — NO other text. Empty string ONLY if genuinely non-recurring."""
+
+
 def _make_prompt(company_name: str, domain: str, linkedin_block: str,
                  search_focus: str, known_vendors: str,
                  extra_searches: str, fields_desc: str, fields_json_keys: dict,
                  sector_block: str = "") -> str:
-    return f"""You are an enterprise IT deal research analyst with live Google Search.
+    return f"""[Role]: You are an elite IT Market Intelligence Analyst and Deal Finder with live Google Search access.
 
 COMPANY: {company_name} | Website: {domain}{linkedin_block}
 
-TASK: Find IT, technology, and strategic tech deals for {company_name}.
-
 DEAL CATEGORIES TO CAPTURE (find ALL of these):
-1. IT Outsourcing & Managed Services — SI contracts, BPO, ITO, infrastructure managed services
+1. IT Outsourcing & Managed Services — SI contracts, BPO, ITO, MSP, infrastructure managed services
 2. Cloud & Digital Transformation — cloud migration, SaaS rollouts, digital programmes
 3. ERP / CRM / HCM / SCM — enterprise application implementations and upgrades
 4. IT Acquisitions — tech company acquisitions, acqui-hires, asset purchases with IT angle
-   (the acquirer must actually integrate/operate the technology — not a passive stake)
+   (acquirer must actually integrate/operate the technology — not a passive financial stake)
 5. Strategic Joint Ventures & Technology Partnerships — JVs with tech firms to jointly build
    or operate a technology platform (NOT capital/equity investments — see exclusion below)
 6. Enterprise Operations Partnerships — long-term IT ops partnerships, co-innovation agreements
@@ -678,12 +720,13 @@ DEAL CATEGORIES TO CAPTURE (find ALL of these):
 9. Analytics, AI & Data — AI/ML platform deals, data lake, BI, advanced analytics contracts
 {sector_block}
 
-EXCLUDE — do NOT return these as deals, even if found during search:
-- Funding rounds, equity investments, venture capital / corporate venture capital (CVC)
-  investments, seed/Series A-Z rounds, or any deal whose primary nature is providing
-  capital rather than implementing/operating a technology system
-- IPOs, SPAC mergers, or pure financial transactions with no IT/technology delivery component
-- Minority equity stakes taken purely as a financial investment (not an operating partnership)
+CAPTIVE / GCC AWARENESS: If {company_name} operates internal Captive/GCC centres or has been
+insourcing IT work that was previously outsourced, document it explicitly — internal GCC footprints
+are market-competing entities. Note any "lift and shift" from vendor to captive.
+
+EXCLUDE (do NOT return):
+- Funding rounds, equity investments, CVC, seed/Series A-Z, or purely financial transactions
+- IPOs, SPAC mergers, minority stakes without operational IT delivery component
 
 SEARCHES TO RUN:
 {search_focus}
@@ -692,20 +735,15 @@ Vendor/partner searches (pair each with company name):
 {extra_searches}
 
 EXTRACTION RULES:
-- Read full articles, not just headlines
-- One JSON object per distinct deal — never merge two deals
-- Capture deals across ALL years available, not just recent ones
+- Do NOT omit a deal because the value is "Undisclosed" — label its size as
+  "Estimated Enterprise Account", "Volume-Based Pricing", or "Managed Services Framework"
+  and still provide a numeric TCV estimate in deal_value.
+- Read full articles, not just headlines. One JSON object per distinct deal.
+- Capture deals across ALL years available (2010 onwards).
 - Include press releases, news, vendor announcements, IR filings, annual reports,
-  AND LinkedIn posts/case studies from the implementation partner, the platform vendor,
-  or their employees ("proud to announce", "excited to share this case study", etc.) —
-  these are a primary source for SI/implementation-partner deals that never get a press release
-- PAY SPECIAL ATTENTION to: post spin-off / demerger IT separation programmes,
-  nine-figure or billion-dollar IT outsourcing restructurings, IT carve-out programmes
-  that replace systems from a former parent company, large infrastructure consolidation deals
-- When a deal involves both an SI/implementation partner (e.g. Niveus Solutions, Accenture,
-  TCS) AND an underlying platform (e.g. Google Cloud, AWS, Azure), create one row for the
-  SI/implementation partner as "vendor" — the platform name belongs in the description, not
-  as a substitute for the partner who actually executed the work
+  AND LinkedIn posts/case studies from implementation partners ("proud to announce", etc.).
+- When a deal involves both an SI partner (Accenture, TCS…) AND an underlying platform
+  (Google Cloud, AWS…), the SI partner is "vendor" — platform goes in description.
 
 Return ONLY a valid JSON array:
 [
@@ -715,60 +753,22 @@ Return ONLY a valid JSON array:
 ]
 
 FIELD RULES:
-- vendor: exact name (e.g. "Infosys", "SAP S/4HANA", "Microsoft Azure", "Trimble"). If the
-  vendor executing this deal is a subsidiary/brand of a larger parent company (e.g. Niveus
-  Solutions is part of NTT DATA), name the subsidiary first and put the parent in brackets:
-  "Niveus Solutions (NTT DATA)". Only add the bracket when a real parent-subsidiary
-  relationship is involved in THIS deal — do not add it for standalone/independent vendors.
-- tech_level3: COMPULSORY — never leave blank. Base your choice on what the "description"
-  field actually says this deal is about, then pick the single BEST matching Level 3 value
-  from this exact taxonomy list (use the exact name as written, do not paraphrase):
+- vendor: exact name. If a subsidiary of a parent, write "Subsidiary (Parent)" e.g.
+  "Niveus Solutions (NTT DATA)". Do not add brackets for standalone vendors.
+- tech_level3: COMPULSORY — pick the BEST match from this taxonomy (exact name, no paraphrasing):
 {TECH_L3_LIST}
-  If the deal doesn't cleanly fit one category, pick the closest one — do not return an empty string.
-- tech_level2: leave empty string — automatically mapped from tech_level3
-- tech_level1: leave empty string — automatically mapped from tech_level3 (which in turn maps to tech_level2)
-- deal_value: TCV (total contract value). NUMERIC $ ONLY — "$XM" or "$XB". ALWAYS provide a
-  value: use the public figure if explicitly stated; otherwise ESTIMATE using the steps below.
-  Do NOT default to a generic category midpoint — the estimate must reflect this SPECIFIC
-  deal's scale and this SPECIFIC company's size.
-
-  STEP 1 — Company scale: using your knowledge of {company_name}'s approximate revenue,
-  employee count, and industry, estimate its overall annual IT budget. Total annual IT spend
-  is typically 1–4% of revenue. A single project's TCV should rarely exceed roughly 10–20% of
-  that annual IT budget unless it is a flagship, multi-year, company-wide outsourcing deal.
-  A mid-size company or startup/scale-up does NOT have enterprise/Fortune-500-scale budgets —
-  do not price its projects as if it did.
-
-  STEP 2 — Technical scope: read any concrete numbers in the source material (data volume in
-  TB/PB, number of databases/tables/applications/servers migrated or modernized, engineering
-  team size, contract duration). These — not the deal category label alone — determine the
-  size tier. Modern migration tooling means cost scales sub-linearly with data volume; a large
-  TB figure alone does NOT imply an enterprise-scale price tag:
-  * Narrow-scope project (<10 systems/tables, <10TB data, short timeline, single team): $0.3M–$1.5M
-  * Small-to-mid modernization (10–5,000 systems/tables OR 10–100TB data, one quarter-ish): $1.5M–$4.5M
-  * Mid-size platform overhaul (5,000–20,000 systems/tables OR 100TB–1PB, 6–18 months, dedicated team): $5M–$15M
-  * Large enterprise-wide transformation (20,000+ systems, 1PB+, multi-year, large team): $20M–$80M
-  * Mega/multi-year outsourcing or managed-services overhaul for a Fortune 500 / global bank: $100M–$2B
-
-  STEP 3 — Sanity check: cross-reference Step 1 and Step 2. The final number must be
-  proportionate to BOTH the company's plausible IT budget AND the technical scope described —
-  if either signal points to a smaller company or a narrower project, use the lower tier.
-
-  Output exactly like "$50M" or "$2.5B" — NO other text.
-- deal_acv: ACV (annual contract value). NUMERIC $ ONLY (e.g. "$10M"). Empty string if it is a one-off TCV with no annual breakdown or if not derivable.
-- deal_estimated: "Y" if deal_value was estimated from benchmarks (not a stated public figure). Empty string "" if value came from a confirmed public source.
-- start_date: contract start or go-live date if mentioned
-- end_date: contract expiry or renewal date if mentioned
-- duration_months: contract length in months — derive from start+end if not stated explicitly; typical outsourcing=60, SaaS=12 or 36
-- last_detected: date of the press release or news article (YYYY-MM-DD or YYYY-MM or YYYY)
+- tech_level2: leave empty string — auto-mapped from tech_level3
+- tech_level1: leave empty string — auto-mapped from tech_level3
+{_tcv_acv_rules(company_name)}
+- deal_estimated: "Y" if deal_value is estimated (not a stated public figure). "" if confirmed public.
+- start_date: contract start or go-live date (YYYY-MM-DD or YYYY-MM or YYYY)
+- end_date: contract expiry or renewal date if known
+- duration_months: contract length in months; derive from start+end if not stated; outsourcing≈60, SaaS≈36
+- last_detected: date of press release / article (YYYY-MM-DD or YYYY-MM or YYYY)
 - deal_focus: 1-3 tags from: AI | ML | Cloud | Big Data | Analytics | Cybersecurity | IoT |
-  Automation | ERP | Digital Transformation | Blockchain | Edge Computing | 5G | Robotics |
-  Autonomous | Payments | Open Banking | DevOps | Data Platform | Other
-- description: write UP TO 100-200 WORDS when the source material has enough detail — cover
-  what was agreed, the technical scope (systems/platforms involved, data volumes, team size,
-  duration), the business rationale, and why it matters. Use everything findable from the
-  source(s) rather than compressing to one line. Only write a short sentence if genuinely
-  little information is available — do not pad with filler or repeat the same fact twice.
+  Automation | ERP | Digital Transformation | Payments | Open Banking | DevOps | Data Platform | Other
+- description: UP TO 100-200 WORDS — scope, platforms, data volumes, team size, business rationale.
+  Short sentence only if source has genuinely little detail.
 - source: direct URL to press release, article, or filing
 
 Return ONLY the raw JSON array. No prose. No markdown fences.
@@ -965,29 +965,84 @@ have NO press release anywhere else, so skipping them means missing real deals."
     extra_parts = []
     if sector_searches:
         extra_parts.append(f"Sector-specific searches:\n{sector_searches}")
-    if focus_tech or focus_vendor:
-        lines = ["User-specified focus searches — treat these as a STARTING POINT, not an exhaustive list:"]
-        for v in focus_vendor:
-            lines.append(f'  - "{company_name}" {v} deal partnership acquisition')
-            lines.append(f'  - "{company_name}" {v} subsidiary OR brand deal contract')
-        if focus_vendor:
-            lines.append(
-                "  For EACH focus vendor above, using your own knowledge identify: (a) its known "
-                "subsidiaries/brands, and (b) its direct competitors and THEIR subsidiaries/brands. "
-                "Then also search for deals between " + company_name + " and every one of those "
-                "entities — not only the literally-named vendor. Include but do not limit yourself "
-                "to obvious subsidiaries/competitors."
-            )
+
+    # ── Conditional search logic based on user inputs ──────────────────────────
+    if focus_tech and focus_vendor:
+        # BOTH provided: tech-focused + competitive swarm on vendor
+        tech_map = {
+            "ai": "AI / GenAI → Automation, LLMs, Intelligent Process Automation",
+            "genai": "GenAI → LLMs, Copilot, Intelligent Automation",
+            "cloud": "Cloud → Migration, Modernization, Multi-Cloud, FinOps",
+            "cybersecurity": "Cybersecurity → MSSP, SOC-as-a-Service, Zero Trust, XDR",
+            "data": "Data → Data Lakehouse, Data Mesh, Analytics, BI",
+            "erp": "ERP → SAP S/4HANA, Oracle ERP Cloud, Microsoft D365",
+        }
+        lines = ["[CONDITIONAL MODE: TECH + VENDOR — focused search + competitive swarm]"]
         for t in focus_tech:
-            lines.append(f'  - "{company_name}" {t} deal contract')
-        if focus_tech:
-            lines.append(
-                "  For EACH focus technology above, using your own knowledge identify adjacent/"
-                "related technology terms and the named vendors who operate in that technology "
-                "space, then also search for deals between " + company_name + " and those — "
-                "include but do not limit yourself to the literal keyword given."
-            )
+            mapped = tech_map.get(t.lower(), t)
+            lines.append(f'  - "{company_name}" {t} contract OR pilot OR MSA OR implementation')
+            lines.append(f'  - "{company_name}" {mapped} deal OR agreement OR rollout')
+        lines.append("")
+        lines.append("[COMPETITIVE SWARM LOGIC for focus vendors]")
+        for v in focus_vendor:
+            lines.append(f"  STEP A — Isolate all active contracts, SOWs, and BUSAs held by {v} within {company_name}:")
+            lines.append(f'    - "{company_name}" "{v}" contract OR SOW OR agreement OR deal')
+            lines.append(f'    - "{company_name}" "{v}" managed services OR implementation OR outsourcing')
+            lines.append(f"  STEP B — Search competitor deals within {company_name} (auto-identify top 8-10 direct")
+            lines.append(f"    industry competitors of {v} — Tier-1 Indian IT peers, Global SIs, boutique tech firms):")
+            lines.append(f'    - "{company_name}" [competitor name] deal contract — for EACH top competitor')
+            lines.append(f"  STEP C — Map market share: label each row Entity Type = Target (if {v}),")
+            lines.append(f"    Competitor (if rival), or GCC (if internal captive)")
         extra_parts.append("\n".join(lines))
+
+    elif focus_vendor and not focus_tech:
+        # VENDOR ONLY: pure competitive swarm
+        lines = ["[CONDITIONAL MODE: VENDOR-ONLY — competitive swarm logic]"]
+        for v in focus_vendor:
+            lines.append(f"  STEP A — {v} active contracts within {company_name}:")
+            lines.append(f'    - "{company_name}" "{v}" contract OR SOW OR managed services OR outsourcing')
+            lines.append(f'    - "{company_name}" "{v}" implementation OR partnership OR deal 2019 2020 2021 2022 2023 2024 2025')
+            lines.append(f"  STEP B — Auto-identify top 8-10 direct competitors of {v} and search their")
+            lines.append(f"    deals with {company_name}:")
+            lines.append(f'    - "{company_name}" [top competitor of {v}] deal OR contract — for each competitor')
+            lines.append(f"  STEP C — Check for internal Captive/GCC insourcing displacing {v} or competitors.")
+        extra_parts.append("\n".join(lines))
+
+    elif focus_tech and not focus_vendor:
+        # TECH ONLY: focused on that tech/segment only
+        lines = ["[CONDITIONAL MODE: TECH-ONLY — focused on specified technology/segment]"]
+        tech_map = {
+            "ai": "AI / GenAI → Automation, LLMs, Intelligent Process Automation, Copilot",
+            "genai": "GenAI → LLMs, Copilot, Intelligent Automation",
+            "cloud": "Cloud → Migration, Modernization, Multi-Cloud, FinOps, Cloud-native",
+            "cybersecurity": "Cybersecurity → MSSP, SOC, Zero Trust, XDR, SIEM, EDR",
+            "data": "Data → Data Lake, Data Mesh, Lakehouse, Analytics, BI, Warehousing",
+            "erp": "ERP → SAP S/4HANA, Oracle ERP, Microsoft D365 Finance",
+        }
+        for t in focus_tech:
+            mapped = tech_map.get(t.lower(), t)
+            lines.append(f'  - "{company_name}" {t} contract OR pilot OR MSA 2019 2020 2021 2022 2023 2024 2025')
+            lines.append(f'  - "{company_name}" {mapped} deal OR implementation OR outsourcing')
+            lines.append(f'  - "{company_name}" {t} vendor partner announcement press release')
+        lines.append("  Focus EXCLUSIVELY on deals involving the specified technology above.")
+        lines.append("  Map enterprise equivalents: AI/GenAI → Automation & LLMs; Cloud → Migration &")
+        lines.append("  Modernization; Cybersecurity → MSSP & SOC. Ignore unrelated deal categories.")
+        extra_parts.append("\n".join(lines))
+
+    else:
+        # BOTH BLANK: Overall Corporate Ecosystem search
+        lines = [
+            "[CONDITIONAL MODE: OVERALL CORPORATE ECOSYSTEM — broad IT deal map]",
+            f"  Map the top active IT deals across {company_name}'s primary business units.",
+            f"  Highlight where they use third-party vendors vs internal Captive/GCC centres.",
+            f'  - "{company_name}" IT outsourcing vendor third-party 2020 2021 2022 2023 2024',
+            f'  - "{company_name}" captive GCC internal technology centre insourcing',
+            f'  - "{company_name}" managed services BPO ITO infrastructure 2020 2021 2022 2023 2024',
+            f'  - "{company_name}" digital transformation ERP CRM cloud AI deal 2020 2021 2022 2023 2024',
+            f'  - "{company_name}" technology partnership joint venture co-innovation',
+        ]
+        extra_parts.append("\n".join(lines))
+
     extra = "\n\n".join(extra_parts)
 
     prompt2 = _make_prompt(company_name, domain, linkedin_block,
@@ -1029,32 +1084,19 @@ For each deal found, return one JSON object:
 ]
 
 FIELD RULES:
-- vendor: the IMPLEMENTATION/SI PARTNER who executed the work, NOT the underlying platform
-  (Google Cloud, AWS, etc.) — the platform belongs in description. If that partner is a
-  subsidiary/brand of a larger parent company, name the subsidiary first with the parent in
-  brackets: "Niveus Solutions (NTT DATA)". Only add the bracket when a real parent-subsidiary
-  relationship is involved in THIS deal.
+- vendor: the SI/IMPLEMENTATION PARTNER who executed the work, NOT the platform
+  (Google Cloud, AWS, etc.) — put platform in description. Subsidiary: "Sub (Parent)".
 - tech_level3: COMPULSORY — pick the best match from this taxonomy:
 {TECH_L3_LIST}
-- deal_value: numeric $ only ("$XM"/"$XB") — estimate from the deal's ACTUAL technical scale,
-  not a generic category default. Base it on concrete numbers mentioned (data volume in TB/PB,
-  count of databases/tables/applications migrated, team size, duration) AND on {company_name}'s
-  likely company size/IT budget (a mid-size or smaller company does not have enterprise-scale
-  IT budgets). Implementation-partner projects like data/cloud migrations are typically:
-  * <10TB data or <10 systems: $0.3M–$1.5M
-  * 10–100TB data or 10–5,000 systems/tables: $1.5M–$4.5M  (most LinkedIn case-study migrations fall here)
-  * 100TB–1PB or 5,000–20,000 systems: $5M–$15M
-  * 1PB+ or 20,000+ systems, multi-year enterprise programme: $20M–$80M
-  Do not jump to enterprise-scale pricing just because the deal mentions "cloud migration" —
-  most SI/implementation-partner case studies are mid-market engagements, not billion-dollar deals.
-- description: write UP TO 100-200 WORDS when the source material supports it — what was
-  migrated/modernized, onto which platform, technical scope (data volume, systems/tables/
-  databases involved, team size, timeline), and business rationale. Only stay short if the
-  source genuinely has little detail.
+{_tcv_acv_rules(company_name)}
+- deal_estimated: "Y" if deal_value is estimated. "" if confirmed public figure.
+- description: UP TO 100-200 WORDS — what was migrated/modernized, onto which platform,
+  technical scope (data volume, systems/tables/databases, team size, timeline), and business
+  rationale. Short sentence only if source genuinely has little detail.
 - source: leave as empty string — the real source link is attached automatically from
-  search grounding, do not fabricate a URL
+  search grounding; do not fabricate a URL.
 
-Return ONLY the raw JSON array. If you find nothing after running all searches, return [].
+Return ONLY the raw JSON array. If nothing found after all searches, return [].
 No prose. No markdown fences."""
 
     return [prompt1, prompt2, prompt3]
