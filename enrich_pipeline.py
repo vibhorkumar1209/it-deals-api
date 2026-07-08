@@ -890,6 +890,201 @@ def _detect_sector_extra(company_name: str) -> tuple[str, str]:
     return "", ""
 
 
+# ── Tech/Segment → Operational Taxonomy Overdrive ─────────────────────────────
+# Maps a user's free-text tech/segment input to precise contract types and
+# search metrics instead of generic keyword search.
+_TECH_TAXONOMY: list[tuple[tuple[str, ...], dict]] = [
+    (("customer service", "contact center", "call center", "cx", "cx outsourcing",
+      "customer experience", "customer support"), {
+        "label": "Customer Service / Contact Center / CX Outsourcing",
+        "contracts": ["Omnichannel Contact Center as a Service (CCaaS)",
+                      "Tier-1/Tier-2 Inbound Support", "Multilingual Technical Troubleshooting",
+                      "Customer Retention & Churn Mitigation", "Social Media Triage & Content Moderation",
+                      "Inbound/Outbound Tele-Sales"],
+        "metrics": ["per-minute or per-interaction pricing", "agent headcount/seat volume",
+                    "First Contact Resolution (FCR) bonuses", "NPS-linked SLAs",
+                    "onshore vs. offshore seat blend"],
+    }),
+    (("bpo", "bps", "shared services", "horizontal bpo", "f&a", "finance and accounting",
+      "hro", "human resources outsourcing", "procurement bpo"), {
+        "label": "BPO / BPS / Horizontal Shared Services",
+        "contracts": ["Finance & Accounting (F&A) incl. AP/AR, Global Treasury Management, Invoice Consolidation",
+                      "Human Resources Outsourcing (HRO) incl. International Payroll, Benefits Management, Contract Staff Augmentation",
+                      "Procurement & Strategic Sourcing BPO"],
+        "metrics": ["transaction-volume pricing", "FTE rate models",
+                    "transformation-linked cost savings clauses"],
+    }),
+    (("mortgage", "kyc", "aml", "pharmacovigilance", "utility field service",
+      "medical billing", "claims adjudication", "travel reservations", "vertical bpo",
+      "industry-specific bpo"), {
+        "label": "Industry-Specific Vertical BPO",
+        "contracts": ["Mortgage Loan Processing & Underwriting", "KYC/AML Fraud Alert Triage",
+                      "Pharmacovigilance & Adverse Event Reporting", "Utility Field-Service Dispatch Routing",
+                      "Medical Billing/Claims Adjudication", "Flight/Travel Inventory Reservations"],
+        "metrics": ["per-loan/per-claim pricing", "cyclical volume scale-up/scale-down flexibility",
+                    "regulatory compliance failure penalties"],
+    }),
+    (("ai", "genai", "generative ai", "artificial intelligence", "automation", "llm",
+      "rag", "agentic", "rpa", "computer vision", "machine learning", "ml"), {
+        "label": "AI / Generative AI / Automation",
+        "contracts": ["LLM Fine-Tuning Labs", "RAG (Retrieval-Augmented Generation) Architecture",
+                      "AI-Native Core Engineering", "Agentic Workflow Orchestration",
+                      "Computer Vision Inspection", "RPA-to-Agentic migrations"],
+        "metrics": ["token-based pricing frameworks", "outcome-based automation SLAs",
+                    "compute-hosting co-location agreements", "MLOps pipeline maintenance"],
+    }),
+    (("cloud", "infrastructure", "modernization", "migration", "mainframe",
+      "kubernetes", "containerization", "data center", "finops", "edge compute"), {
+        "label": "Cloud / Infrastructure / Modernization",
+        "contracts": ["Multi-Cloud Migrations (AWS/Azure/GCP)", "Mainframe Decommissioning",
+                      "Application Containerization (Kubernetes/Docker)",
+                      "Hybrid Infrastructure Outsourcing", "FinOps Cost Optimization", "Edge Compute Nodes"],
+        "metrics": ["data center exit timelines", "cloud consumption commitments",
+                    "managed infrastructure service levels (99.99% uptime)",
+                    "refactoring vs. lift-and-shift scope"],
+    }),
+    (("cybersecurity", "security", "identity", "risk", "mssp", "soc", "zero trust",
+      "iam", "sase", "vulnerability"), {
+        "label": "Cybersecurity / Identity / Risk",
+        "contracts": ["Managed Security Service Providers (MSSP)", "SOC as a Service",
+                      "Zero-Trust Implementations", "IAM (Identity & Access Management)",
+                      "SASE Deployments", "Vulnerability Remediation pipelines"],
+        "metrics": ["incident response retainer structures", "continuous compliance monitoring",
+                    "sovereign data center localization mandates"],
+    }),
+    (("data", "analytics", "fabric", "data mesh", "data lake", "snowflake",
+      "databricks", "mdm", "master data", "cdp"), {
+        "label": "Data / Analytics / Fabric",
+        "contracts": ["Enterprise Data Mesh/Fabric deployment", "Snowflake/Databricks data lake migrations",
+                      "Real-time telemetry analytics", "Master Data Management (MDM) cleanups",
+                      "Customer Data Platform (CDP) integrations"],
+        "metrics": ["terabyte/petabyte ingest pricing", "pipeline architecture overhaul SOWs",
+                    "downstream data monetization ventures"],
+    }),
+    (("erp", "crm", "hcm", "business applications", "sap", "salesforce", "workday",
+      "servicenow"), {
+        "label": "Business Applications (ERP/CRM/HCM)",
+        "contracts": ["SAP S/4HANA migrations", "Salesforce Core/Industry Cloud updates",
+                      "Workday global rollouts", "ServiceNow workflow integrations",
+                      "legacy ERP customizations cleanup"],
+        "metrics": ["seat-licensing vs. implementation SOW values", "SI phase-gates",
+                    "multi-region rollout timelines"],
+    }),
+]
+
+
+def _match_tech_taxonomy(tech_input: str) -> dict | None:
+    t = tech_input.lower()
+    for triggers, tax in _TECH_TAXONOMY:
+        if any(kw in t for kw in triggers):
+            return tax
+    return None
+
+
+# ── 37-Industry Matrix → Macro-Sector fallback (both tech & vendor blank) ─────
+_INDUSTRY_MATRIX: list[tuple[tuple[str, ...], str, str]] = [
+    (("bank", "financial", "insurance", "asset management", "wealth", "lending",
+      "payments", "fintech", "capital markets"), "BFS",
+     "Core Banking Platforms, RegTech/AML Compliance BPO, Digital Banking Customer Care, Fraud/Cyber Risk Security"),
+    (("hospital", "health", "pharma", "biotech", "medical", "clinical", "life sciences"), "Healthcare",
+     "EMR/EHR Core Platforms, Revenue Cycle Management BPO, Patient Engagement Customer Care, Pharmacovigilance ER&D"),
+    (("telecom", "media", "broadcast", "entertainment", "streaming", "publishing"), "TMT",
+     "BSS/OSS Core Platforms, Network Engineering R&D, Subscriber Customer Care, Content Security & DRM"),
+    (("manufactur", "industrial", "automotive", "aerospace", "defense", "machinery"), "Manufacturing",
+     "MES/PLM Core Platforms, Product Engineering R&D, Supply Chain BPO, OT/ICS Security"),
+    (("retail", "e-commerce", "consumer goods", "apparel", "grocery"), "Retail",
+     "POS/OMS Core Platforms, Merchandising Engineering, Customer Care & Loyalty BPO, Payment Security"),
+    (("energy", "oil", "gas", "utility", "power", "renewable"), "Energy",
+     "SCADA/Grid Core Platforms, Field Engineering R&D, Field-Service Dispatch BPO, Critical Infrastructure Security"),
+    (("logistics", "shipping", "freight", "supply chain", "transportation", "airline", "rail"), "Logistics",
+     "TMS/WMS Core Platforms, Fleet Engineering R&D, Dispatch & Tracking BPO, Cargo Security"),
+    (("government", "public sector", "defense", "federal", "municipal", "gcc"), "Government",
+     "Citizen Services Core Platforms, Systems Engineering R&D, Citizen Support BPO, National Security/Compliance"),
+]
+
+
+def _match_industry_matrix(company_name: str) -> tuple[str, str] | None:
+    """Best-effort industry guess from company name keywords only (no external call —
+    the model itself will verify/correct using its own knowledge of the company)."""
+    name_lower = company_name.lower()
+    for triggers, macro_sector, contract_lines in _INDUSTRY_MATRIX:
+        if any(kw in name_lower for kw in triggers):
+            return macro_sector, contract_lines
+    return None
+
+
+def _conditional_search_block(company_name: str, focus_tech: list[str], focus_vendor: list[str]) -> str:
+    """Implements the 3-mode conditional search logic:
+    1. Tech/segment provided → Tech & Operational Taxonomy Overdrive
+    2. Vendor provided → Competitive Swarm Logic (Steps A/B/C)
+    3. Both blank → 37-Industry Matrix Fallback
+    Modes combine when both tech and vendor are provided.
+    """
+    lines: list[str] = []
+
+    if focus_tech:
+        lines.append("[MODE: TECH/SEGMENT — Operational Taxonomy Overdrive]")
+        lines.append("Do NOT search generic keywords. Use the precise operational/delivery layers below.")
+        for t in focus_tech:
+            tax = _match_tech_taxonomy(t)
+            if tax:
+                lines.append(f'\n  Input "{t}" → {tax["label"]}:')
+                lines.append(f"  Target Contracts: {', '.join(tax['contracts'])}")
+                lines.append(f"  Search Metrics: {', '.join(tax['metrics'])}")
+                for c in tax["contracts"][:4]:
+                    lines.append(f'    - "{company_name}" {c} contract OR deal OR agreement')
+            else:
+                lines.append(f'\n  Input "{t}" (no taxonomy match — search literally):')
+                lines.append(f'    - "{company_name}" {t} contract OR pilot OR MSA OR implementation')
+                lines.append(f'    - "{company_name}" {t} deal OR agreement OR rollout')
+
+    if focus_vendor:
+        lines.append("\n[MODE: VENDOR — Competitive Swarm Logic]")
+        for v in focus_vendor:
+            lines.append(f"  STEP A — Isolate all active contracts, SOWs, and Business Unit Specific")
+            lines.append(f"    Agreements (BUSAs) held by {v} within {company_name}:")
+            lines.append(f'    - "{company_name}" "{v}" contract OR SOW OR BUSA OR agreement OR deal')
+            lines.append(f'    - "{company_name}" "{v}" managed services OR implementation OR outsourcing')
+            lines.append(f"  STEP B — Automatically identify the top 5-10 direct industry competitors of {v}")
+            lines.append(f"    (Tier-1 Indian IT peers, Global System Integrators, or boutique tech firms):")
+            lines.append(f'    - "{company_name}" [competitor name] deal OR contract — for EACH top competitor')
+            lines.append(f"  STEP C — Extract all active deals held by those competitors within {company_name}")
+            lines.append(f"    to map market-share context. Also check for internal Captive/GCC insourcing")
+            lines.append(f"    displacing {v} or its competitors.")
+
+    if not focus_tech and not focus_vendor:
+        matrix = _match_industry_matrix(company_name)
+        lines.append("[MODE: 37-INDUSTRY MATRIX FALLBACK — both tech and vendor blank]")
+        lines.append(f"  STEP A — Identify which of the 37 standard industry verticals {company_name}")
+        lines.append(f"    belongs to (use your own knowledge of the company, do not guess blindly).")
+        if matrix:
+            macro_sector, contract_lines = matrix
+            lines.append(f"  STEP B — Best-guess Macro-Sector: {macro_sector}. Map to high-value contract")
+            lines.append(f"    lines: {contract_lines}. VERIFY this against your own knowledge of the company")
+            lines.append(f"    and correct if wrong — dynamically extract deals targeting the ACTUAL vertical's")
+            lines.append(f"    contract lines (ER&D, Core Platforms, Industry BPO, Customer Care, Security).")
+        else:
+            lines.append(f"  STEP B — Map {company_name}'s vertical to its Macro-Sector (BFS, Healthcare, TMT,")
+            lines.append(f"    Manufacturing, Retail, Energy, Logistics, or Government), then dynamically")
+            lines.append(f"    extract deals targeting that vertical's high-value contract lines: ER&D,")
+            lines.append(f"    Core Platforms, Industry BPO, Customer Care, Security.")
+        lines.append(f'    - "{company_name}" IT outsourcing vendor third-party 2020 2021 2022 2023 2024 2025')
+        lines.append(f'    - "{company_name}" captive GCC internal technology centre insourcing')
+        lines.append(f'    - "{company_name}" managed services BPO ITO infrastructure 2020 2021 2022 2023 2024')
+        lines.append(f'    - "{company_name}" digital transformation ERP CRM cloud AI deal 2020 2021 2022 2023 2024')
+        lines.append(f'    - "{company_name}" technology partnership joint venture co-innovation')
+
+    lines.append("\n[STRICT INTELLIGENCE RULES]")
+    lines.append('  - Do NOT omit a deal because the value is "Undisclosed". Label its size via an')
+    lines.append('    alternative metric: "Estimated Enterprise Account", "Volume-Based Pricing", or')
+    lines.append('    "Managed Services Framework" — and still provide a numeric TCV estimate.')
+    lines.append(f"  - Treat internal Captive/GCC footprints at {company_name} as market-competing")
+    lines.append(f"    entities. If {company_name} is pulling work away from third-party vendors to")
+    lines.append(f"    insource it, explicitly document it as a deal row (vendor = \"Internal Captive/GCC\").")
+
+    return "\n".join(lines)
+
+
 def _build_prompts(
     company_name: str,
     domain: str,
@@ -966,83 +1161,7 @@ have NO press release anywhere else, so skipping them means missing real deals."
     if sector_searches:
         extra_parts.append(f"Sector-specific searches:\n{sector_searches}")
 
-    # ── Conditional search logic based on user inputs ──────────────────────────
-    if focus_tech and focus_vendor:
-        # BOTH provided: tech-focused + competitive swarm on vendor
-        tech_map = {
-            "ai": "AI / GenAI → Automation, LLMs, Intelligent Process Automation",
-            "genai": "GenAI → LLMs, Copilot, Intelligent Automation",
-            "cloud": "Cloud → Migration, Modernization, Multi-Cloud, FinOps",
-            "cybersecurity": "Cybersecurity → MSSP, SOC-as-a-Service, Zero Trust, XDR",
-            "data": "Data → Data Lakehouse, Data Mesh, Analytics, BI",
-            "erp": "ERP → SAP S/4HANA, Oracle ERP Cloud, Microsoft D365",
-        }
-        lines = ["[CONDITIONAL MODE: TECH + VENDOR — focused search + competitive swarm]"]
-        for t in focus_tech:
-            mapped = tech_map.get(t.lower(), t)
-            lines.append(f'  - "{company_name}" {t} contract OR pilot OR MSA OR implementation')
-            lines.append(f'  - "{company_name}" {mapped} deal OR agreement OR rollout')
-        lines.append("")
-        lines.append("[COMPETITIVE SWARM LOGIC for focus vendors]")
-        for v in focus_vendor:
-            lines.append(f"  STEP A — Isolate all active contracts, SOWs, and BUSAs held by {v} within {company_name}:")
-            lines.append(f'    - "{company_name}" "{v}" contract OR SOW OR agreement OR deal')
-            lines.append(f'    - "{company_name}" "{v}" managed services OR implementation OR outsourcing')
-            lines.append(f"  STEP B — Search competitor deals within {company_name} (auto-identify top 8-10 direct")
-            lines.append(f"    industry competitors of {v} — Tier-1 Indian IT peers, Global SIs, boutique tech firms):")
-            lines.append(f'    - "{company_name}" [competitor name] deal contract — for EACH top competitor')
-            lines.append(f"  STEP C — Map market share: label each row Entity Type = Target (if {v}),")
-            lines.append(f"    Competitor (if rival), or GCC (if internal captive)")
-        extra_parts.append("\n".join(lines))
-
-    elif focus_vendor and not focus_tech:
-        # VENDOR ONLY: pure competitive swarm
-        lines = ["[CONDITIONAL MODE: VENDOR-ONLY — competitive swarm logic]"]
-        for v in focus_vendor:
-            lines.append(f"  STEP A — {v} active contracts within {company_name}:")
-            lines.append(f'    - "{company_name}" "{v}" contract OR SOW OR managed services OR outsourcing')
-            lines.append(f'    - "{company_name}" "{v}" implementation OR partnership OR deal 2019 2020 2021 2022 2023 2024 2025')
-            lines.append(f"  STEP B — Auto-identify top 8-10 direct competitors of {v} and search their")
-            lines.append(f"    deals with {company_name}:")
-            lines.append(f'    - "{company_name}" [top competitor of {v}] deal OR contract — for each competitor')
-            lines.append(f"  STEP C — Check for internal Captive/GCC insourcing displacing {v} or competitors.")
-        extra_parts.append("\n".join(lines))
-
-    elif focus_tech and not focus_vendor:
-        # TECH ONLY: focused on that tech/segment only
-        lines = ["[CONDITIONAL MODE: TECH-ONLY — focused on specified technology/segment]"]
-        tech_map = {
-            "ai": "AI / GenAI → Automation, LLMs, Intelligent Process Automation, Copilot",
-            "genai": "GenAI → LLMs, Copilot, Intelligent Automation",
-            "cloud": "Cloud → Migration, Modernization, Multi-Cloud, FinOps, Cloud-native",
-            "cybersecurity": "Cybersecurity → MSSP, SOC, Zero Trust, XDR, SIEM, EDR",
-            "data": "Data → Data Lake, Data Mesh, Lakehouse, Analytics, BI, Warehousing",
-            "erp": "ERP → SAP S/4HANA, Oracle ERP, Microsoft D365 Finance",
-        }
-        for t in focus_tech:
-            mapped = tech_map.get(t.lower(), t)
-            lines.append(f'  - "{company_name}" {t} contract OR pilot OR MSA 2019 2020 2021 2022 2023 2024 2025')
-            lines.append(f'  - "{company_name}" {mapped} deal OR implementation OR outsourcing')
-            lines.append(f'  - "{company_name}" {t} vendor partner announcement press release')
-        lines.append("  Focus EXCLUSIVELY on deals involving the specified technology above.")
-        lines.append("  Map enterprise equivalents: AI/GenAI → Automation & LLMs; Cloud → Migration &")
-        lines.append("  Modernization; Cybersecurity → MSSP & SOC. Ignore unrelated deal categories.")
-        extra_parts.append("\n".join(lines))
-
-    else:
-        # BOTH BLANK: Overall Corporate Ecosystem search
-        lines = [
-            "[CONDITIONAL MODE: OVERALL CORPORATE ECOSYSTEM — broad IT deal map]",
-            f"  Map the top active IT deals across {company_name}'s primary business units.",
-            f"  Highlight where they use third-party vendors vs internal Captive/GCC centres.",
-            f'  - "{company_name}" IT outsourcing vendor third-party 2020 2021 2022 2023 2024',
-            f'  - "{company_name}" captive GCC internal technology centre insourcing',
-            f'  - "{company_name}" managed services BPO ITO infrastructure 2020 2021 2022 2023 2024',
-            f'  - "{company_name}" digital transformation ERP CRM cloud AI deal 2020 2021 2022 2023 2024',
-            f'  - "{company_name}" technology partnership joint venture co-innovation',
-        ]
-        extra_parts.append("\n".join(lines))
-
+    extra_parts.append(_conditional_search_block(company_name, focus_tech, focus_vendor))
     extra = "\n\n".join(extra_parts)
 
     prompt2 = _make_prompt(company_name, domain, linkedin_block,
