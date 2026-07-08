@@ -125,6 +125,162 @@ Confidence scoring:
 """
 
 
+# ── Tech-Specific Taxonomy Overdrive (focus_categories) ───────────────────────
+_TS_TECH_TAXONOMY: list[tuple[tuple[str, ...], dict]] = [
+    (("ai", "genai", "generative ai", "llm", "rag", "agentic", "mlops", "machine learning", "ml"), {
+        "label": "AI / GenAI",
+        "layers": "LLM Fine-Tuning, RAG Architecture, Agentic Workflows, MLOps pipelines",
+    }),
+    (("cloud", "cloud infrastructure", "infrastructure", "kubernetes", "container", "finops"), {
+        "label": "Cloud Infrastructure",
+        "layers": "Public/Hybrid footprints (AWS/Azure/GCP), Containerization (Kubernetes), FinOps",
+    }),
+    (("cybersecurity", "security", "mssp", "soc", "zero trust", "iam", "identity", "endpoint"), {
+        "label": "Cybersecurity",
+        "layers": "MSSP/SOC as a Service, Zero-Trust, IAM (Okta/Ping), Endpoint Protection (CrowdStrike)",
+    }),
+    (("data", "analytics", "warehouse", "data mesh", "data fabric", "etl", "snowflake", "databricks"), {
+        "label": "Data / Analytics",
+        "layers": "Cloud Warehouses (Snowflake/Databricks), Data Mesh/Fabric, ETL pipelines",
+    }),
+    (("business application", "erp", "crm", "hcm", "sap", "oracle", "salesforce", "workday", "servicenow"), {
+        "label": "Business Applications",
+        "layers": "SAP S/4HANA, Oracle ERP, Salesforce Industry Clouds, Workday, ServiceNow",
+    }),
+]
+
+
+def _match_ts_tech_taxonomy(tech_input: str) -> dict | None:
+    t = tech_input.lower()
+    for triggers, tax in _TS_TECH_TAXONOMY:
+        if any(kw in t for kw in triggers):
+            return tax
+    return None
+
+
+# ── 37-Industry Comprehensive Fallback → Macro-Sector Cross-Tab Engine ────────
+_TS_INDUSTRY_MATRIX: list[tuple[tuple[str, ...], str, str]] = [
+    (("bank", "financial", "capital markets", "wealth", "asset management", "insurance",
+      "investment"), "Financial Services & Insurance (BFS)",
+     "Core Banking Systems (Temenos, Finacle, Mambu), Policy & Claims Admin platforms "
+     "(Guidewire, Duck Creek), High-frequency Trading Engines, Risk/Pricing Calculators, "
+     "Fraud/AML validation grids"),
+    (("pharma", "biotech", "medical device", "hospital", "healthcare", "payer", "clinical",
+      "life sciences"), "Healthcare & Life Sciences",
+     "Clinical Trial Management (Veeva, Medidata CDMS), Electronic Health Records "
+     "(Epic, Cerner), Laboratory Information Mgmt Systems (LIMS), PACS Imaging arch, "
+     "Connected Health/IoT device firmware grids"),
+    (("telecom", "wireless", "wireline", "cable", "satellite", "media", "entertainment",
+      "gaming", "publishing", "advertising"), "Telecom, Media & Entertainment (TMT)",
+     "OSS/BSS Modernisation engines, Billing/Revenue Management (Amdocs, Netcracker), "
+     "Policy Control (PCRF), Media Asset Management (MAM), Game engines, "
+     "Ad-Tech programmatic servers"),
+    (("automotive", "aerospace", "defense", "industrial machinery", "chemical manufactur",
+      "electronics manufactur", "hardware manufactur", "manufactur"), "Manufacturing & Industrial",
+     "PLM Enterprise Stacks (Siemens Teamcenter, PTC Windchill), Manufacturing Execution "
+     "Systems (MES), Digital Twin frameworks, Avionics software environments, Telematics "
+     "backends, Connected Fleet grids"),
+    (("retail", "e-commerce", "ecommerce", "cpg", "consumer packaged goods", "luxury",
+      "wholesale distribution", "grocery", "apparel"), "Consumer Goods & Retail",
+     "Omnichannel E-commerce Engines (commercetools, Shopify Plus, Adobe), Warehouse "
+     "Management Systems (WMS), AI Demand Forecasting/Replenishment tools, Customer Data "
+     "Platforms (CDP), RFID tracking backends"),
+    (("oil", "gas", "power", "utility", "utilities", "renewable energy", "mining", "metals",
+      "energy"), "Energy, Resources & Utilities",
+     "Asset Performance Management (APM), SCADA/ICS grid infrastructure, Geographic "
+     "Information Systems (GIS), Energy Trading and Risk Management (ETRM), Smart "
+     "Meter-to-Cash engines"),
+    (("airline", "logistics", "freight", "3pl", "hospitality", "hotel", "rail", "cruise",
+      "transportation", "travel"), "Transportation, Travel & Logistics",
+     "Passenger Service Systems (PSS / Sabre / Amadeus), Property Management Systems "
+     "(PMS / Opera), Global Freight Optimization networks, Predictive Fleet Maintenance "
+     "engines, Route/Baggage sorting grids"),
+    (("government", "federal", "state government", "municipal", "public sector",
+      "higher education", "university", "non-profit", "nonprofit", "gcc"), "Government, Education & Non-Profit",
+     "Citizen Service Portals, Student Information Systems (SIS / Banner), FedRAMP-certified "
+     "cloud isolation zones, Public benefit/disbursement engines, Secure Civic Registries, "
+     "Donor Ledger systems"),
+]
+
+
+def _match_ts_industry_matrix(company_name: str) -> tuple[str, str] | None:
+    """Best-effort industry guess from company name keywords — the model verifies/
+    corrects this against its own knowledge of the company."""
+    name_lower = company_name.lower()
+    for triggers, macro_sector, core_focus in _TS_INDUSTRY_MATRIX:
+        if any(kw in name_lower for kw in triggers):
+            return macro_sector, core_focus
+    return None
+
+
+_TS_ARCHITECTURE_RULES = """[STRICT ARCHITECTURE RULES]
+- Explicitly look for Multi-Vendor Coexistence: large enterprises rarely run on only one
+  system. Document where competing systems are deployed in different business units (e.g.
+  AWS for R&D, Azure for Corporate IT) — both rows are valid, do not collapse to one.
+- Track Captive/GCC Custom Technical Engineering: if a core layer is powered by proprietary
+  software BUILT INTERNALLY by the company's GCC/Captive tech teams instead of a standard
+  third-party SaaS product, add a row with vendor = "Internal Captive/GCC Build" and name
+  the internal platform if known.
+- Do NOT write "Unknown" for install size or deployment scale. If the exact figure isn't
+  public, estimate via tiering: "Enterprise-wide Deployment", "Division-level Pilot", or
+  "Legacy Footprint" in the tech_install field instead of leaving it blank."""
+
+
+def _tech_stack_conditional_block(company_name: str, focus_categories: list[str],
+                                   focus_vendors: list[str]) -> str:
+    """Implements the 3-mode conditional logic for Tech Stack Finder's focused scan."""
+    lines: list[str] = []
+
+    if focus_categories:
+        lines.append("[MODE: TECH-SPECIFIC TAXONOMY OVERDRIVE]")
+        lines.append("Do NOT search generic keywords. Expand each input into its precise")
+        lines.append("enterprise delivery layers below.")
+        for c in focus_categories:
+            tax = _match_ts_tech_taxonomy(c)
+            if tax:
+                lines.append(f'\n  Input "{c}" → {tax["label"]}:')
+                lines.append(f'    Target: {tax["layers"]}')
+                lines.append(f'    - "{company_name}" {tax["layers"]} deployed OR implemented OR "in use"')
+            else:
+                lines.append(f'\n  Input "{c}" (no taxonomy match — search literally, plus adjacent tech):')
+                lines.append(f'    - "{company_name}" {c} software OR vendor OR platform deployed OR implemented')
+
+    if focus_vendors:
+        lines.append("\n[MODE: VENDOR-SPECIFIC MAPPING + MULTI-VENDOR COEXISTENCE CHECK]")
+        for v in focus_vendors:
+            lines.append(f"  STEP A — Map the exact products, licensing footprints, or implementation")
+            lines.append(f"    modules that {v} provides to {company_name}:")
+            lines.append(f'    - "{company_name}" "{v}" deployed OR implemented OR "go-live" OR case study OR license')
+            lines.append(f"  STEP B — Automatically identify {v}'s direct alternative competitors and check")
+            lines.append(f"    if they ALSO co-exist within {company_name}'s stack (multi-vendor/hybrid setup —")
+            lines.append(f"    e.g. if input is 'Snowflake', check if 'Databricks' or 'AWS Redshift' is also deployed):")
+            lines.append(f'    - "{company_name}" [competitor of {v}] deployed OR implemented OR "in use" — for each competitor')
+
+    if not focus_categories and not focus_vendors:
+        matrix = _match_ts_industry_matrix(company_name)
+        lines.append("[MODE: 37-INDUSTRY COMPREHENSIVE FALLBACK]")
+        lines.append(f"  STEP A — Identify which of the 37 standard industry verticals {company_name}")
+        lines.append(f"    belongs to (use your own knowledge of the company).")
+        if matrix:
+            macro_sector, core_focus = matrix
+            lines.append(f"  STEP B — Best-guess Macro-Sector: {macro_sector}. Core Architecture Focus to")
+            lines.append(f"    search for: {core_focus}. VERIFY this against your own knowledge of the company")
+            lines.append(f"    and correct if wrong.")
+        else:
+            lines.append(f"  STEP B — Map {company_name}'s vertical to its Macro-Sector (Financial Services &")
+            lines.append(f"    Insurance, Healthcare & Life Sciences, Telecom/Media/Entertainment, Manufacturing")
+            lines.append(f"    & Industrial, Consumer Goods & Retail, Energy/Resources & Utilities,")
+            lines.append(f"    Transportation/Travel & Logistics, or Government/Education & Non-Profit), then")
+            lines.append(f"    identify that sector's core operational technology nodes, platforms, and")
+            lines.append(f"    software engines.")
+        lines.append(f"  STEP C — Reconstruct the target enterprise tech stack layers (Cloud Infrastructure,")
+        lines.append(f"    Data Fabric, Core Business Apps, DevOps/APIs, Cyber Security) through the specific")
+        lines.append(f"    lens of the industry-core platforms identified above — not generic software names.")
+
+    lines.append(f"\n{_TS_ARCHITECTURE_RULES}")
+    return "\n".join(lines)
+
+
 def _build_tech_stack_prompt(
     company_name: str,
     domain: str,
@@ -175,27 +331,14 @@ def _build_tech_stack_prompt(
         slice_info = WIDE_SLICES.get(call_num, WIDE_SLICES[1])
         focus_label = slice_info["label"]
         cats_to_search = slice_info["categories"]
+        industry_block = _tech_stack_conditional_block(company_name, [], [])
         scope_block = f"""MODE: WIDE-SPECTRUM — sweep these tech stack categories:
-{chr(10).join(f'  - {c}' for c in cats_to_search)}"""
+{chr(10).join(f'  - {c}' for c in cats_to_search)}
+
+{industry_block}"""
     else:
         cats_to_search = focus_categories or []
-        scope_block_parts = []
-        if focus_categories:
-            scope_block_parts.append(
-                "Focus categories (treat as a STARTING POINT, not exhaustive — also search "
-                "adjacent/related technology categories and the vendors who operate in that "
-                "space, not only the literal category name):\n"
-                + "\n".join(f"  - {c}" for c in focus_categories)
-            )
-        if focus_vendors:
-            scope_block_parts.append(
-                "Focus vendors (treat as a STARTING POINT, not exhaustive — for EACH vendor below, "
-                "using your own knowledge also identify and search for: (a) its subsidiaries/brands, "
-                "(b) its direct competitors in the same category, and (c) those competitors' "
-                "subsidiaries/brands. Include but do not limit yourself to obvious names):\n"
-                + "\n".join(f"  - {v}" for v in focus_vendors)
-            )
-        scope_block = "MODE: LASER-FOCUSED\n" + "\n".join(scope_block_parts)
+        scope_block = "MODE: LASER-FOCUSED\n" + _tech_stack_conditional_block(company_name, focus_categories, focus_vendors)
         focus_label = ", ".join(focus_categories[:3] or focus_vendors[:3]) or "specified categories"
 
     # Build category-driven searches — open-ended, no hardcoded vendor names
@@ -275,7 +418,10 @@ Field rules:
 - tech_level2 / tech_level1: leave as empty string — derived automatically
 - integration_partner: SI/consulting firm that IMPLEMENTED it (e.g. "Accenture", "TCS", "Deloitte") — from P1–P4 searches — or "-"
 - last_detected: "Mon YYYY" if known, or just "YYYY", or "-"
-- tech_install: numeric estimate of licensed users/seats based on company headcount and deployment scope (e.g. "500–2,000", "10,000–50,000", "100,000+") — or "-"
+- tech_install: numeric estimate of licensed users/seats based on company headcount and deployment scope
+  (e.g. "500–2,000", "10,000–50,000", "100,000+"). NEVER write "Unknown" — if an exact figure isn't
+  public, use an alternative tier instead: "Enterprise-wide Deployment", "Division-level Pilot", or
+  "Legacy Footprint".
 - renewal_date: estimated contract renewal quarter (e.g. "Q2 2027") — infer from: contract age (typical 3-5yr enterprise), press release dates, or R1/R3 search results — or "-"
 - confidence_score: "87%" etc — 95-99% for DNS/pixel/public API key; 85-94% for vendor case study/press release; 75-84% for job posting; 60-74% for industry inference
 - deal_value: TCV of this technology contract. NUMERIC $ ONLY — "$XM" or "$XB". Use public figure
