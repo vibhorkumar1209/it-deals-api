@@ -970,6 +970,24 @@ _TECH_TAXONOMY: list[tuple[tuple[str, ...], dict]] = [
         "metrics": ["seat-licensing vs. implementation SOW values", "SI phase-gates",
                     "multi-region rollout timelines"],
     }),
+    (("networking", "connectivity", "edge infrastructure", "network", "sd-wan", "sdwan",
+      "mpls", "sase", "private 5g", "wan", "edge"), {
+        "label": "Networking / Connectivity / Edge Infrastructure (CIT Parameters)",
+        "contracts": ["Managed Network Services (MNS)", "Software-Defined Wide Area Network (SD-WAN) migrations",
+                      "MPLS backbone retrofitting", "Secure Access Service Edge (SASE) networking loops",
+                      "Telco-neutral data center interconnects", "Private 5G enterprise networks"],
+        "metrics": ["circuit count", "branch site volumes", "carrier-agnostic bandwidth commitments",
+                    "hardware refresh capex vs. network-as-a-service (NaaS) opex structures"],
+        "split_logic": (
+            "SOW Feature Split Logic — you MUST explicitly decouple and split line-item delivery "
+            "parameters: SD-WAN vs. MPLS — isolate whether the deal is a legacy MPLS capacity "
+            "renewal, a complete \"MPLS-to-broadband\" SD-WAN replacement, or a hybrid overlay "
+            "deployment (MPLS for mission-critical core traffic + SD-WAN for public cloud/SaaS "
+            "edge branch routing). Report each distinctly if both are present in the same deal."
+        ),
+        "vendors": ["Cisco (Viptela/Meraki)", "VMware (VeloCloud)", "Fortinet", "Palo Alto (Prisma)",
+                    "Silver Peak (HPE Aruba)", "AT&T", "Verizon", "Orange", "BT"],
+    }),
 ]
 
 
@@ -1031,6 +1049,12 @@ def _conditional_search_block(company_name: str, focus_tech: list[str], focus_ve
                 lines.append(f'\n  Input "{t}" → {tax["label"]}:')
                 lines.append(f"  Target Contracts: {', '.join(tax['contracts'])}")
                 lines.append(f"  Search Metrics: {', '.join(tax['metrics'])}")
+                if tax.get("split_logic"):
+                    lines.append(f"  {tax['split_logic']}")
+                if tax.get("vendors"):
+                    lines.append(f"  Vendors to Track: {', '.join(tax['vendors'])}")
+                    for v in tax["vendors"][:6]:
+                        lines.append(f'    - "{company_name}" "{v}" contract OR deal OR deployment')
                 for c in tax["contracts"][:4]:
                     lines.append(f'    - "{company_name}" {c} contract OR deal OR agreement')
             else:
