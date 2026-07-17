@@ -1109,6 +1109,105 @@ def _conditional_search_block(company_name: str, focus_tech: list[str], focus_ve
     return "\n".join(lines)
 
 
+_ERD_TRIGGERS = ("engineering", "r&d", "rd", "erd", "er&d", "research and development",
+                  "research & development")
+
+
+def _has_erd_trigger(focus_tech: list[str]) -> bool:
+    for t in focus_tech:
+        norm = t.strip().lower().replace(" ", "")
+        if norm in ("engineering", "r&d", "rd", "erd", "er&d",
+                    "researchanddevelopment", "research&development"):
+            return True
+        if any(kw in t.strip().lower() for kw in ("engineering", "research and development",
+                                                    "research & development")):
+            return True
+    return False
+
+
+def _build_erd_prompt(company_name: str, domain: str, linkedin_block: str,
+                       fields_desc: str, fields_json_keys: dict) -> str:
+    return f"""You are the core intelligence engine for an enterprise-grade Deal Finder Module.
+Your primary objective is to scan, identify, extract, and structure high-value corporate deals
+for {company_name}{f" | {domain}" if domain else ""}{linkedin_block}, focusing heavily on
+Engineering, Research & Development (ER&D), and Strategic Tech Co-Development agreements.
+
+You must look beyond traditional BPO/IT outsourcing and explicitly capture transactions that
+involve the creation, design, testing, or scaling of physical products, software architectures,
+or underlying hardware components.
+
+## RECOGNITION TRIGGERS (WHAT QUALIFIES AS ER&D)
+Filter and flag a news release, financial filing (10-K/10-Q), or market report as an ER&D deal
+if it matches any of these five categories:
+1. Co-Development / Joint Engineering: Two or more firms sharing R&D costs to design shared
+   architectures, vehicle platforms, or engines (e.g., GM & Hyundai, GM & Honda).
+2. Software-Defined Architecture / Embedded Systems: Partnerships involving the creation of
+   localized operating systems, Advanced Driver Assistance Systems (ADAS), digital cockpits, or
+   automotive/industrial software (e.g., Qualcomm, Microsoft Azure for AV pipelines).
+3. Supply Chain R&D Engineering: Direct hardware/semiconductor capacity corridor contracts that
+   include custom silicon or component co-design (e.g., GlobalFoundries direct sourcing).
+4. Strategic M&A for IP/Prototype Capacity: The absolute acquisition or joint venture of boutique
+   engineering firms, tooling shops, gigacasting outfits, or battery cell chemistry specialists
+   (e.g., TEI acquisition, LG Energy Solution JVs).
+5. Autonomy & Deep-Tech Injections: Capital investments or development benchmarks tied directly
+   to validating autonomous systems, AI training infrastructure, or robotics (e.g., Cruise,
+   SoftBank Vision Fund rounds).
+
+## EXCLUSION FILTERS (WHAT TO IGNORE)
+To prevent noise, strictly EXCLUDE the following unless they are explicitly tied to product
+engineering R&D:
+- Commodity IT infrastructure upgrades (e.g., standard desktop migrations, legacy helpdesk support).
+- Pure marketing, advertising, or retail dealership network agreements.
+- General corporate legal, real estate, or standard commercial logistics agreements.
+
+## SEARCHES TO RUN
+  - "{company_name}" joint engineering OR co-development OR shared platform architecture
+  - "{company_name}" R&D partnership OR "research and development" agreement
+  - "{company_name}" ADAS OR "digital cockpit" OR "software-defined vehicle" partnership
+  - "{company_name}" custom silicon OR semiconductor co-design OR chip capacity agreement
+  - "{company_name}" acquires OR "joint venture" engineering firm OR tooling shop OR battery cell
+  - "{company_name}" autonomous systems OR AI training infrastructure OR robotics investment
+  - "{company_name}" gigacasting OR battery chemistry OR cell technology partnership
+  - "{company_name}" 10-K OR 10-Q R&D spending technology co-development
+  - site:linkedin.com "{company_name}" engineering partnership OR joint development
+
+Return ONLY a valid JSON array:
+[
+  {{
+{fields_desc}
+  }}
+]
+
+## DATA EXTRACTION SCHEMA & FIELD RULES
+- vendor: the Partner / Venture — the primary counterparty, including any special-purpose Joint
+  Venture (JV) formed. If a JV has its own name, include it alongside the parent(s), e.g.
+  "Ultium Cells (GM + LG Energy Solution JV)".
+- tech_level3: COMPULSORY — pick "Engineering Applications" unless a more specific match exists
+  in this taxonomy:
+{TECH_L3_LIST}
+- start_date: the exact month and year the agreement was announced, finalized, or expanded
+  (YYYY-MM). This is the Date field.
+- description: a 2-to-3 sentence summary written in universal, plain, non-native-jargon
+  accessible language. It MUST explicitly state (a) WHAT is being engineered, (b) HOW cost/IP is
+  being shared, and (c) WHICH end-products benefit. Bold key architectural components using
+  markdown, e.g. "**Ultium battery**", "**SDVerse**".
+{_tcv_acv_rules(company_name)}
+- deal_estimated: "Y" if deal_value/deal_acv is a calculated estimate rather than a stated public
+  figure — in this case ALSO prefix the description with "[Estimated]" or "[Undisclosed
+  baseline]" so the estimate basis is transparent to the reader.
+- end_date: Estimated Renewal / Key Milestone — the precise expiration window, framework refresh
+  cycle, or production roll-out target, in plain text if not a strict date (e.g. "First vehicles
+  set to roll out in 2028; framework is rolling").
+- source: verifiable source URL for the Partner/Venture announcement if available, else empty string.
+- deal_focus: 1-3 tags from: AI | Autonomous | Robotics | ER&D | Co-Development | Embedded Systems |
+  Semiconductor | Battery Tech | ADAS | Digital Twin | Other
+
+Return ONLY the raw JSON array. No prose. No markdown fences (except the bolded terms inside
+the description field itself, which should use markdown ** syntax).
+Example shape: {json.dumps(fields_json_keys)}
+"""
+
+
 def _build_prompts(
     company_name: str,
     domain: str,
@@ -1242,7 +1341,12 @@ FIELD RULES:
 Return ONLY the raw JSON array. If nothing found after all searches, return [].
 No prose. No markdown fences."""
 
-    return [prompt1, prompt2, prompt3]
+    prompts = [prompt1, prompt2, prompt3]
+
+    if _has_erd_trigger(focus_tech):
+        prompts.append(_build_erd_prompt(company_name, domain, linkedin_block, fields_desc, fields_json_keys))
+
+    return prompts
 
 
 def _gemini_extract_deals_sync(
@@ -1525,7 +1629,8 @@ async def enrich_company(
 
     for call_idx, prompt in enumerate(prompts, 1):
         label = {1: "broad IT & cloud deals", 2: "year-by-year + vendor sweep",
-                  3: "LinkedIn / implementation-partner sweep"}.get(call_idx, "additional sweep")
+                  3: "LinkedIn / implementation-partner sweep",
+                  4: "ER&D / engineering co-development sweep"}.get(call_idx, "additional sweep")
         yield {"type": "heartbeat",
                "message": f"🔍 [{call_idx}/{len(prompts)}] Searching {company_name}: {label}…"}
         await asyncio.sleep(0)
