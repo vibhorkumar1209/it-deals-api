@@ -1126,7 +1126,27 @@ def _has_erd_trigger(focus_tech: list[str]) -> bool:
 
 
 def _build_erd_prompt(company_name: str, domain: str, linkedin_block: str,
-                       fields_desc: str, fields_json_keys: dict) -> str:
+                       fields_desc: str, fields_json_keys: dict,
+                       focus_vendor: list[str] | None = None, variant: int = 1) -> str:
+    vendor_searches = ""
+    if focus_vendor:
+        lines = [f'  - "{company_name}" "{v}" engineering OR co-development OR joint R&D partnership'
+                  for v in focus_vendor]
+        vendor_searches = "\nVENDOR-SPECIFIC ER&D SEARCHES:\n" + "\n".join(lines)
+
+    # Variant 2: industry-agnostic sweep tuned for non-automotive verticals
+    # (medtech, industrial, aerospace, pharma) so the taxonomy isn't read as
+    # "cars only" when the target company is outside automotive/EV.
+    industry_examples = (
+        "medical device design partnerships, FDA-regulated product co-development, clinical "
+        "engineering JVs (e.g. Stryker & Vocera), industrial/aerospace component co-design, "
+        "pharma R&D collaboration agreements, or hardware/firmware engineering for connected "
+        "devices"
+        if variant == 2 else
+        "vehicle platforms, ADAS, embedded automotive software, or semiconductor/battery supply "
+        "chain engineering"
+    )
+
     return f"""You are the core intelligence engine for an enterprise-grade Deal Finder Module.
 Your primary objective is to scan, identify, extract, and structure high-value corporate deals
 for {company_name}{f" | {domain}" if domain else ""}{linkedin_block}, focusing heavily on
@@ -1134,42 +1154,53 @@ Engineering, Research & Development (ER&D), and Strategic Tech Co-Development ag
 
 You must look beyond traditional BPO/IT outsourcing and explicitly capture transactions that
 involve the creation, design, testing, or scaling of physical products, software architectures,
-or underlying hardware components.
+or underlying hardware components — for example {industry_examples}.
 
 ## RECOGNITION TRIGGERS (WHAT QUALIFIES AS ER&D)
 Filter and flag a news release, financial filing (10-K/10-Q), or market report as an ER&D deal
-if it matches any of these five categories:
+if it matches any of these five categories — adapt the examples to {company_name}'s ACTUAL
+industry, do not force an automotive lens onto a non-automotive company:
 1. Co-Development / Joint Engineering: Two or more firms sharing R&D costs to design shared
-   architectures, vehicle platforms, or engines (e.g., GM & Hyundai, GM & Honda).
-2. Software-Defined Architecture / Embedded Systems: Partnerships involving the creation of
-   localized operating systems, Advanced Driver Assistance Systems (ADAS), digital cockpits, or
-   automotive/industrial software (e.g., Qualcomm, Microsoft Azure for AV pipelines).
-3. Supply Chain R&D Engineering: Direct hardware/semiconductor capacity corridor contracts that
-   include custom silicon or component co-design (e.g., GlobalFoundries direct sourcing).
-4. Strategic M&A for IP/Prototype Capacity: The absolute acquisition or joint venture of boutique
-   engineering firms, tooling shops, gigacasting outfits, or battery cell chemistry specialists
-   (e.g., TEI acquisition, LG Energy Solution JVs).
+   product architectures or platforms (e.g., GM & Hyundai sharing a vehicle platform; a medtech
+   firm & a robotics firm co-developing a surgical device).
+2. Software-Defined Architecture / Embedded Systems: Partnerships creating localized operating
+   systems, embedded/firmware software, or connected-device software (e.g., ADAS/digital cockpit
+   software for automakers; connected-device firmware for medical or industrial equipment).
+3. Supply Chain R&D Engineering: Direct hardware/component capacity corridor contracts that
+   include custom component/silicon co-design (e.g., custom chip sourcing; precision component
+   co-design with a specialty manufacturer).
+4. Strategic M&A for IP/Prototype Capacity: The acquisition or joint venture of boutique
+   engineering firms, tooling shops, design studios, or specialty technology firms for their
+   IP/prototyping capacity (e.g., acquiring a robotics/surgical-navigation startup for its IP).
 5. Autonomy & Deep-Tech Injections: Capital investments or development benchmarks tied directly
-   to validating autonomous systems, AI training infrastructure, or robotics (e.g., Cruise,
-   SoftBank Vision Fund rounds).
+   to validating autonomous systems, AI training infrastructure, or robotics relevant to
+   {company_name}'s products (e.g., surgical robotics AI, autonomous industrial systems).
 
-## EXCLUSION FILTERS (WHAT TO IGNORE)
-To prevent noise, strictly EXCLUDE the following unless they are explicitly tied to product
-engineering R&D:
-- Commodity IT infrastructure upgrades (e.g., standard desktop migrations, legacy helpdesk support).
-- Pure marketing, advertising, or retail dealership network agreements.
+## EXCLUSION FILTERS (WHAT TO STRICTLY IGNORE — CRITICAL)
+DO NOT return any of the following, even if they mention "technology" or "digital":
+- Enterprise IT/software deals: ERP, CRM, cloud migration, data platform, cybersecurity,
+  IT outsourcing, managed services, HR/payroll systems, or any back-office software contract —
+  UNLESS the software IS the physical product being engineered/embedded (e.g. embedded firmware
+  shipped inside a device, not internal IT tooling).
+- Commodity IT infrastructure upgrades (desktop migrations, helpdesk support, data center leases).
+- Pure marketing, advertising, or distribution/dealership network agreements.
 - General corporate legal, real estate, or standard commercial logistics agreements.
+- SI/consulting implementation projects (Accenture/TCS/Infosys-style delivery work) unless the
+  deliverable is itself a physical product or embedded engineering component.
+If you are unsure whether a deal is ER&D or IT/software, DO NOT include it — precision over
+recall is required here.
 
 ## SEARCHES TO RUN
-  - "{company_name}" joint engineering OR co-development OR shared platform architecture
-  - "{company_name}" R&D partnership OR "research and development" agreement
-  - "{company_name}" ADAS OR "digital cockpit" OR "software-defined vehicle" partnership
-  - "{company_name}" custom silicon OR semiconductor co-design OR chip capacity agreement
-  - "{company_name}" acquires OR "joint venture" engineering firm OR tooling shop OR battery cell
-  - "{company_name}" autonomous systems OR AI training infrastructure OR robotics investment
-  - "{company_name}" gigacasting OR battery chemistry OR cell technology partnership
-  - "{company_name}" 10-K OR 10-Q R&D spending technology co-development
-  - site:linkedin.com "{company_name}" engineering partnership OR joint development
+  - "{company_name}" joint engineering OR co-development OR shared product architecture
+  - "{company_name}" R&D partnership OR "research and development" collaboration agreement
+  - "{company_name}" product design partnership OR co-design agreement
+  - "{company_name}" embedded software OR firmware engineering partnership
+  - "{company_name}" custom component OR semiconductor co-design OR manufacturing capacity agreement
+  - "{company_name}" acquires OR "joint venture" engineering firm OR design studio OR IP acquisition
+  - "{company_name}" autonomous systems OR robotics OR AI-enabled device development
+  - "{company_name}" 10-K OR 10-Q "research and development" spending technology co-development
+  - site:linkedin.com "{company_name}" engineering partnership OR joint product development
+  - "{company_name}" clinical OR regulatory co-development partnership (if applicable to industry){vendor_searches}
 
 Return ONLY a valid JSON array:
 [
@@ -1224,6 +1255,18 @@ def _build_prompts(
     linkedin_block = f" | LinkedIn: {linkedin_url}" if linkedin_url else ""
     fields_json_keys = {f["key"]: f"<{f['type']}>" for f in SCHEMA_FIELDS}
     fields_desc = "\n".join(f'  "{f["key"]}": "{f["description"]}"' for f in SCHEMA_FIELDS)
+
+    # ER&D is an EXCLUSIVE mode: when the user's focus tech signals engineering/R&D
+    # intent, run ONLY the ER&D-tuned prompts instead of the generic IT/software
+    # sweep — otherwise the generic prompts' cloud/ERP/outsourcing results dominate
+    # the output and drown out the ER&D-specific findings.
+    if _has_erd_trigger(focus_tech):
+        return [
+            _build_erd_prompt(company_name, domain, linkedin_block, fields_desc, fields_json_keys,
+                              focus_vendor, variant=1),
+            _build_erd_prompt(company_name, domain, linkedin_block, fields_desc, fields_json_keys,
+                              focus_vendor, variant=2),
+        ]
 
     sector_block = _detect_sector_block(company_name)
     sector_vendors, sector_searches = _detect_sector_extra(company_name)
@@ -1341,12 +1384,7 @@ FIELD RULES:
 Return ONLY the raw JSON array. If nothing found after all searches, return [].
 No prose. No markdown fences."""
 
-    prompts = [prompt1, prompt2, prompt3]
-
-    if _has_erd_trigger(focus_tech):
-        prompts.append(_build_erd_prompt(company_name, domain, linkedin_block, fields_desc, fields_json_keys))
-
-    return prompts
+    return [prompt1, prompt2, prompt3]
 
 
 def _gemini_extract_deals_sync(
@@ -1623,14 +1661,18 @@ async def enrich_company(
         return f"{vendor}|{date_part}|{desc_part}|{suffix}"
 
     prompts = _build_prompts(company_name, domain, linkedin_url, ft, fv)
+    erd_mode = _has_erd_trigger(ft)
     seen_keys: set[str] = set()   # deduplicate across the two calls
     total_deals = 0
     CALL_TIMEOUT = 150            # 2.5 min per call
 
     for call_idx, prompt in enumerate(prompts, 1):
-        label = {1: "broad IT & cloud deals", 2: "year-by-year + vendor sweep",
-                  3: "LinkedIn / implementation-partner sweep",
-                  4: "ER&D / engineering co-development sweep"}.get(call_idx, "additional sweep")
+        if erd_mode:
+            label = {1: "ER&D / engineering co-development sweep",
+                      2: "ER&D industry-adapted sweep"}.get(call_idx, "ER&D additional sweep")
+        else:
+            label = {1: "broad IT & cloud deals", 2: "year-by-year + vendor sweep",
+                      3: "LinkedIn / implementation-partner sweep"}.get(call_idx, "additional sweep")
         yield {"type": "heartbeat",
                "message": f"🔍 [{call_idx}/{len(prompts)}] Searching {company_name}: {label}…"}
         await asyncio.sleep(0)
