@@ -121,6 +121,35 @@ AFTERMARKET_DOMAINS = [
 
 # ── Shared Gemini call ────────────────────────────────────────────────────────
 
+_STOPWORDS = {
+    "the", "a", "an", "of", "for", "and", "or", "to", "in", "on", "with", "is", "are",
+    "was", "were", "at", "by", "from", "this", "that", "it", "its", "their", "as",
+}
+
+
+def _tokenize(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(w) > 2 and w not in _STOPWORDS}
+
+
+def _match_grounding_source_generic(row: dict, grounding_sources: list[tuple[str, str]]) -> str:
+    """Pick the grounding-verified URL whose title best overlaps this row's content.
+    Works across all Aftermarket Intelligence row shapes (capability, gap, spend, deal,
+    footprint, competitor rows) by matching against every string field in the row rather
+    than assuming a fixed schema. Always returns a real, working URL if grounding
+    triggered (falls back to the first chunk when no title overlap), or '' if Google
+    Search grounding returned nothing — so the report never shows a confidently broken link."""
+    if not grounding_sources:
+        return ""
+    row_text = " ".join(str(v) for k, v in row.items() if k != "source" and isinstance(v, (str, int, float)))
+    target_tokens = _tokenize(row_text)
+    best_score, best_uri = -1, grounding_sources[0][0]
+    for uri, title in grounding_sources:
+        score = len(target_tokens & _tokenize(title))
+        if score > best_score:
+            best_score, best_uri = score, uri
+    return best_uri
+
+
 def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_tokens: int = 16384, model: str = "gemini-2.5-flash", return_raw: bool = False, temperature: float = 0.15):
     try:
         from google import genai
@@ -180,6 +209,26 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
             return []
     else:
         return []
+
+    # ── Extract grounding metadata — REAL, working URLs from Google Search ──
+    # The model frequently invents/misremembers "source" URLs in its JSON output,
+    # which is the cause of 404s. Grounding chunks are Google's own verified
+    # redirect links to the pages it actually searched, so every row's "source"
+    # field is replaced with one of these below instead of trusting whatever
+    # URL string the model typed into the JSON.
+    grounding_sources: list[tuple[str, str]] = []
+    if use_search:
+        try:
+            for candidate in (response.candidates or []):
+                gm = getattr(candidate, "grounding_metadata", None)
+                if not gm:
+                    continue
+                for chunk in (getattr(gm, "grounding_chunks", None) or []):
+                    web = getattr(chunk, "web", None)
+                    if web and getattr(web, "uri", None):
+                        grounding_sources.append((web.uri, getattr(web, "title", "") or ""))
+        except Exception as g_err:
+            logger.warning(f"Grounding metadata extraction failed [{label}]: {g_err}")
 
     # Collect non-thought text parts. Gemini 2.5 Flash may return multiple parts
     # (e.g. two identical-start parts when search grounding is active). Try each
@@ -246,6 +295,18 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
             pass
         return None
 
+    def _apply_grounding(rows: list) -> list:
+        """Replace each row's model-typed 'source' URL with a real, grounding-verified
+        one (or '-' if grounding found nothing) — never trust a URL string the model
+        typed directly, that's what produces 404s in the generated report."""
+        if not use_search:
+            return rows
+        for row in rows:
+            if isinstance(row, dict) and "source" in row:
+                matched = _match_grounding_source_generic(row, grounding_sources)
+                row["source"] = matched or "-"
+        return rows
+
     # Try each part independently first (avoids concatenation of two full arrays)
     best: list | None = None
     for part_text in text_parts:
@@ -255,13 +316,13 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
                 best = result  # keep the part with the most rows
 
     if best is not None:
-        return best
+        return _apply_grounding(best)
 
     # Last resort: concatenate all parts and try again
     combined = "".join(text_parts)
     result = _try_parse(combined)
     if result:
-        return result
+        return _apply_grounding(result)
 
     logger.warning(f"_gemini_call_sync [{label}]: no JSON found. Parts={len(text_parts)}, preview: {text_parts[0][:200] if text_parts else ''}")
     return []
