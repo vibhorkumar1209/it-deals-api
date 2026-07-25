@@ -1125,82 +1125,83 @@ def _has_erd_trigger(focus_tech: list[str]) -> bool:
     return False
 
 
+# 12 Level-1 ER&D categories — every deal returned must be tagged with exactly one
+# of these, and both prompt halves together must attempt exhaustive coverage of all 12.
+_ERD_CATEGORIES = [
+    "Product Engineering", "Platform Engineering", "Design & Simulation",
+    "Prototyping & Testing", "Software Engineering", "AI/ML & Data Engineering",
+    "Digital Engineering & IoT", "Compliance & Certification", "Sustenance Engineering",
+    "Mechanical & Hardware Design", "Systems Engineering", "Program Management & PMO",
+]
+
+ERD_SCHEMA_FIELDS = SCHEMA_FIELDS + [
+    {"key": "erd_category", "label": "ER&D Category", "type": "string",
+     "description": f"COMPULSORY — exactly one of these 12 Level-1 categories: "
+                     f"{', '.join(_ERD_CATEGORIES)}. Never leave blank for an ER&D deal."},
+]
+
+
 def _build_erd_prompt(company_name: str, domain: str, linkedin_block: str,
-                       fields_desc: str, fields_json_keys: dict,
                        focus_vendor: list[str] | None = None, variant: int = 1) -> str:
+    categories = _ERD_CATEGORIES[:6] if variant == 1 else _ERD_CATEGORIES[6:]
+    cat_block = "\n".join(f"{i}. {c}" for i, c in enumerate(categories, 1))
+
     vendor_searches = ""
     if focus_vendor:
-        lines = [f'  - "{company_name}" "{v}" engineering OR co-development OR joint R&D partnership'
+        lines = [f'  - "{company_name}" "{v}" engineering OR co-development OR joint R&D partnership OR GCC'
                   for v in focus_vendor]
-        vendor_searches = "\nVENDOR-SPECIFIC ER&D SEARCHES:\n" + "\n".join(lines)
+        vendor_searches = "\nVENDOR-SPECIFIC SEARCHES:\n" + "\n".join(lines)
 
-    # Variant 2: industry-agnostic sweep tuned for non-automotive verticals
-    # (medtech, industrial, aerospace, pharma) so the taxonomy isn't read as
-    # "cars only" when the target company is outside automotive/EV.
-    industry_examples = (
-        "medical device design partnerships, FDA-regulated product co-development, clinical "
-        "engineering JVs (e.g. Stryker & Vocera), industrial/aerospace component co-design, "
-        "pharma R&D collaboration agreements, or hardware/firmware engineering for connected "
-        "devices"
-        if variant == 2 else
-        "vehicle platforms, ADAS, embedded automotive software, or semiconductor/battery supply "
-        "chain engineering"
+    fields_json_keys = {f["key"]: f"<{f['type']}>" for f in ERD_SCHEMA_FIELDS}
+    fields_desc = "\n".join(f'  "{f["key"]}": "{f["description"]}"' for f in ERD_SCHEMA_FIELDS)
+
+    cat_searches = "\n".join(
+        f'  - "{company_name}" {c} outsourcing OR MSA OR partnership OR GCC OR joint venture OR acquisition'
+        for c in categories
     )
 
-    return f"""You are the core intelligence engine for an enterprise-grade Deal Finder Module.
-Your primary objective is to scan, identify, extract, and structure high-value corporate deals
-for {company_name}{f" | {domain}" if domain else ""}{linkedin_block}, focusing heavily on
-Engineering, Research & Development (ER&D), and Strategic Tech Co-Development agreements.
+    return f"""You are an expert procurement and competitive intelligence analyst specializing in
+Global Engineering Research & Development (ER&D) spend, IT sourcing, and tech partnerships
+relevant to {company_name}'s industry.
 
-You must look beyond traditional BPO/IT outsourcing and explicitly capture transactions that
-involve the creation, design, testing, or scaling of physical products, software architectures,
-or underlying hardware components — for example {industry_examples}.
+Your objective is to comprehensively map, identify, and categorize EVERY known engineering
+outsourcing deal, Master Service Agreement (MSA), Global Capability Center (GCC) expansion,
+joint venture, tech partnership, or R&D acquisition involving {company_name}{f" | {domain}" if domain else ""}{linkedin_block}.
 
-## RECOGNITION TRIGGERS (WHAT QUALIFIES AS ER&D)
-Filter and flag a news release, financial filing (10-K/10-Q), or market report as an ER&D deal
-if it matches any of these five categories — adapt the examples to {company_name}'s ACTUAL
-industry, do not force an automotive lens onto a non-automotive company:
-1. Co-Development / Joint Engineering: Two or more firms sharing R&D costs to design shared
-   product architectures or platforms (e.g., GM & Hyundai sharing a vehicle platform; a medtech
-   firm & a robotics firm co-developing a surgical device).
-2. Software-Defined Architecture / Embedded Systems: Partnerships creating localized operating
-   systems, embedded/firmware software, or connected-device software (e.g., ADAS/digital cockpit
-   software for automakers; connected-device firmware for medical or industrial equipment).
-3. Supply Chain R&D Engineering: Direct hardware/component capacity corridor contracts that
-   include custom component/silicon co-design (e.g., custom chip sourcing; precision component
-   co-design with a specialty manufacturer).
-4. Strategic M&A for IP/Prototype Capacity: The acquisition or joint venture of boutique
-   engineering firms, tooling shops, design studios, or specialty technology firms for their
-   IP/prototyping capacity (e.g., acquiring a robotics/surgical-navigation startup for its IP).
-5. Autonomy & Deep-Tech Injections: Capital investments or development benchmarks tied directly
-   to validating autonomous systems, AI training infrastructure, or robotics relevant to
-   {company_name}'s products (e.g., surgical robotics AI, autonomous industrial systems).
+## CRITICAL STRUCTURAL ARCHITECTURE (LEVEL 1 CATEGORIES — THIS CALL COVERS {len(categories)} OF 12)
+Every deal you return MUST be tagged with exactly one of these categories via the erd_category
+field:
+{cat_block}
 
-## EXCLUSION FILTERS (WHAT TO STRICTLY IGNORE — CRITICAL)
-DO NOT return any of the following, even if they mention "technology" or "digital":
-- Enterprise IT/software deals: ERP, CRM, cloud migration, data platform, cybersecurity,
-  IT outsourcing, managed services, HR/payroll systems, or any back-office software contract —
-  UNLESS the software IS the physical product being engineered/embedded (e.g. embedded firmware
-  shipped inside a device, not internal IT tooling).
-- Commodity IT infrastructure upgrades (desktop migrations, helpdesk support, data center leases).
-- Pure marketing, advertising, or distribution/dealership network agreements.
-- General corporate legal, real estate, or standard commercial logistics agreements.
-- SI/consulting implementation projects (Accenture/TCS/Infosys-style delivery work) unless the
-  deliverable is itself a physical product or embedded engineering component.
-If you are unsure whether a deal is ER&D or IT/software, DO NOT include it — precision over
-recall is required here.
+## CRITICAL EXECUTION CONSTRAINTS
+1. ZERO MISSES: Attempt to find at least one deal for EACH of the {len(categories)} categories
+   above. Do not skip a category just because it's harder to find — search exhaustively before
+   concluding there are no deals in that category.
+2. EXHAUSTIVE DISCOVERY: Look through corporate annual reports, financial press releases, analyst
+   filings (HfS, Everest Group, ISG), tech vendor case studies, and engineering news. If a
+   category features multiple historical or concurrent deals, list ALL of them as SEPARATE rows —
+   never merge two distinct deals into one row.
+3. HANDLING HIDDEN VALUES: If exact financial deal values or exact dates are under strict
+   NDA/confidentiality, provide a market intelligence estimate (via the TCV/ACV rules below) and
+   set deal_estimated="Y", prefixing the description with "[Estimated]"; if truly no basis exists
+   for even an estimate, state "Not Publicly Disclosed (NDA Confidential)" in the description
+   instead of inventing a number.
+4. DENSE TECHNICAL DETAIL: Row descriptions must specify the exact nature of the engineering work
+   — specific hardware platforms, language/tech stacks, or exact compliance protocols involved —
+   not vague summaries like "provides engineering services."
 
-## SEARCHES TO RUN
-  - "{company_name}" joint engineering OR co-development OR shared product architecture
+## EXCLUSION FILTERS — DO NOT return generic back-office IT/software deals (ERP, CRM, cloud
+migration, cybersecurity, IT outsourcing, HR/payroll systems) UNLESS the software/platform IS
+itself the engineered product or an embedded component of it. When unsure, exclude — precision
+over recall.
+
+## SEARCHES TO RUN (run ALL, one per category minimum)
+{cat_searches}
   - "{company_name}" R&D partnership OR "research and development" collaboration agreement
-  - "{company_name}" product design partnership OR co-design agreement
-  - "{company_name}" embedded software OR firmware engineering partnership
-  - "{company_name}" custom component OR semiconductor co-design OR manufacturing capacity agreement
+  - "{company_name}" Global Capability Center OR GCC expansion engineering
   - "{company_name}" acquires OR "joint venture" engineering firm OR design studio OR IP acquisition
-  - "{company_name}" autonomous systems OR robotics OR AI-enabled device development
-  - "{company_name}" 10-K OR 10-Q "research and development" spending technology co-development
-  - site:linkedin.com "{company_name}" engineering partnership OR joint product development
-  - "{company_name}" clinical OR regulatory co-development partnership (if applicable to industry){vendor_searches}
+  - "{company_name}" 10-K OR 10-Q "research and development" spending engineering partnership
+  - site:linkedin.com "{company_name}" engineering partnership OR joint product development{vendor_searches}
 
 Return ONLY a valid JSON array:
 [
@@ -1209,32 +1210,33 @@ Return ONLY a valid JSON array:
   }}
 ]
 
-## DATA EXTRACTION SCHEMA & FIELD RULES
-- vendor: the Partner / Venture — the primary counterparty, including any special-purpose Joint
-  Venture (JV) formed. If a JV has its own name, include it alongside the parent(s), e.g.
-  "Ultium Cells (GM + LG Energy Solution JV)".
+## OUTPUT TABLE SCHEMA — FIELD RULES (equivalent to: Tech Vendor / GCC Hub | Comprehensive Deal
+Description & Scope | Deal Value | Start Date | End Date)
+- vendor: Tech Vendor / GCC Hub — the primary engineering partner, SI, or the name of
+  {company_name}'s own internal Global Capability Center if the work is insourced. Include a
+  named Joint Venture alongside its parent(s), e.g. "Ultium Cells (GM + LG Energy Solution JV)".
+- erd_category: COMPULSORY — exactly one of the {len(categories)} categories listed above,
+  verbatim.
 - tech_level3: COMPULSORY — pick "Engineering Applications" unless a more specific match exists
   in this taxonomy:
 {TECH_L3_LIST}
-- start_date: the exact month and year the agreement was announced, finalized, or expanded
-  (YYYY-MM). This is the Date field.
-- description: a 2-to-3 sentence summary written in universal, plain, non-native-jargon
-  accessible language. It MUST explicitly state (a) WHAT is being engineered, (b) HOW cost/IP is
-  being shared, and (c) WHICH end-products benefit. Bold key architectural components using
-  markdown, e.g. "**Ultium battery**", "**SDVerse**".
+- start_date: exact month/year the agreement was announced, finalized, or expanded (YYYY-MM).
+- description: Comprehensive Deal Description & Scope — dense, technical, specific: name the
+  exact hardware platforms, language/tech stacks, or compliance protocols (e.g. ISO 13485, FDA
+  21 CFR Part 820) involved. Bold key architectural components using markdown, e.g.
+  "**Ultium battery**", "**SDVerse**". If value is NDA-confidential and inestimable, state
+  "Not Publicly Disclosed (NDA Confidential)" here explicitly.
 {_tcv_acv_rules(company_name)}
 - deal_estimated: "Y" if deal_value/deal_acv is a calculated estimate rather than a stated public
-  figure — in this case ALSO prefix the description with "[Estimated]" or "[Undisclosed
-  baseline]" so the estimate basis is transparent to the reader.
-- end_date: Estimated Renewal / Key Milestone — the precise expiration window, framework refresh
-  cycle, or production roll-out target, in plain text if not a strict date (e.g. "First vehicles
-  set to roll out in 2028; framework is rolling").
-- source: verifiable source URL for the Partner/Venture announcement if available, else empty string.
-- deal_focus: 1-3 tags from: AI | Autonomous | Robotics | ER&D | Co-Development | Embedded Systems |
-  Semiconductor | Battery Tech | ADAS | Digital Twin | Other
+  figure — in this case ALSO prefix the description with "[Estimated]".
+- end_date: contract expiration, framework refresh cycle, or production/milestone target — plain
+  text if not a strict date (e.g. "Framework is rolling; next refresh 2027").
+- source: verifiable source URL for the deal announcement if available, else empty string.
+- deal_focus: 1-3 tags from: AI | Automation | Robotics | ER&D | Co-Development | Embedded Systems |
+  Semiconductor | Compliance | Digital Twin | GCC | Other
 
-Return ONLY the raw JSON array. No prose. No markdown fences (except the bolded terms inside
-the description field itself, which should use markdown ** syntax).
+Return ONLY the raw JSON array. No prose. No markdown fences (except the bolded terms inside the
+description field itself, which should use markdown ** syntax).
 Example shape: {json.dumps(fields_json_keys)}
 """
 
@@ -1262,10 +1264,8 @@ def _build_prompts(
     # the output and drown out the ER&D-specific findings.
     if _has_erd_trigger(focus_tech):
         return [
-            _build_erd_prompt(company_name, domain, linkedin_block, fields_desc, fields_json_keys,
-                              focus_vendor, variant=1),
-            _build_erd_prompt(company_name, domain, linkedin_block, fields_desc, fields_json_keys,
-                              focus_vendor, variant=2),
+            _build_erd_prompt(company_name, domain, linkedin_block, focus_vendor, variant=1),
+            _build_erd_prompt(company_name, domain, linkedin_block, focus_vendor, variant=2),
         ]
 
     sector_block = _detect_sector_block(company_name)
@@ -1406,7 +1406,7 @@ def _gemini_extract_deals_sync(
         logger.error("GOOGLE_AI_API_KEY env var not set")
         return []
 
-    field_keys = [f["key"] for f in SCHEMA_FIELDS]
+    field_keys = [f["key"] for f in ERD_SCHEMA_FIELDS]
 
     import time as _time
     MAX_RETRIES = 3
