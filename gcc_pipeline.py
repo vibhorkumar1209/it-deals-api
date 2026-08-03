@@ -155,11 +155,34 @@ async def _collect(loop, fn_args: tuple, label: str, timeout: int = 200):
 
 # ── LOCATION DISCOVERY (per company) ─────────────────────────────────────────
 
+# Shared restriction block — applied to every location-discovery prompt so that
+# GCC Intelligence output is strictly scoped to delivery/execution centers, never
+# generic corporate footprint (HQ, sales offices, regional admin branches).
+_GCC_SCOPE_RULES = """QUALIFYING FACILITY DEFINITION — a location only qualifies if it is one of:
+- A dedicated technology hub (engineering/development/innovation center)
+- A shared services center (GBS/SSC handling finance, HR, procurement, IT ops at scale)
+- An R&D facility (product/platform engineering, not a lab-only or manufacturing plant)
+- An offshore/nearshore delivery office (captive GCC, BOT, or GCC-as-a-Service center)
+
+STRICT EXCLUSIONS — do NOT include, even if easily found in search results:
+- Corporate headquarters or the company's primary registered/listed HQ address
+- Standard sales offices, account management offices, or client-facing commercial offices
+- Regional administrative branches (HR/legal/finance admin only, no delivery function)
+- Retail locations, showrooms, branches, or any commercial real estate / storefront
+- Manufacturing plants, warehouses, or distribution centers with no tech/engineering/GBS function
+- Any office you cannot confirm performs GCC/GDC-type delivery work — if a location's function
+  is ambiguous or unconfirmed, EXCLUDE it rather than guess. Precision over recall."""
+
+
 def _location_discovery_prompt(company_name: str, domain: str, location_filter: str) -> str:
     loc_clause = f"LOCATION FILTER: Only include locations in or near: {location_filter}" if location_filter else \
                  "SCOPE: Return ALL worldwide locations — cover every continent equally. Do NOT bias toward any single region."
     domain_hint = f" (official website: {domain})" if domain else ""
-    return f"""Find every Global Capability Center (GCC), technology hub, shared services center, and offshore delivery center that {company_name} operates worldwide.{domain_hint}
+    return f"""Conduct a targeted search focusing EXCLUSIVELY on {company_name}'s Global Capability
+Centers (GCC) or Global Delivery Centers (GDC) worldwide.{domain_hint} Filter out all commercial
+real estate, corporate headquarters, local sales branches, and retail locations.
+
+{_GCC_SCOPE_RULES}
 
 {loc_clause}
 
@@ -169,21 +192,23 @@ Run EVERY one of these 12 searches:
 1. "{company_name}" "global capability center" OR "GCC" locations worldwide full list 2024 2025
 2. "{company_name}" "technology center" OR "tech hub" OR "engineering center" OR "development center" global locations
 3. "{company_name}" "shared services" OR "global business services" OR "GBS" OR "captive center" locations worldwide
-4. site:linkedin.com/company "{company_name}" offices locations worldwide — check the Locations tab
-5. "{company_name}" global offices employees headcount 2024 site:linkedin.com
-6. "{company_name}" annual report 2024 OR 2025 global offices technology hubs locations operations
+4. site:linkedin.com/company "{company_name}" GCC OR "technology center" OR "shared services" locations — check the Locations tab, ignore sales/HQ entries
+5. "{company_name}" GCC OR "delivery center" employees headcount 2024 site:linkedin.com
+6. "{company_name}" annual report 2024 OR 2025 global technology hubs GCC delivery centers (not HQ/sales offices)
 7. "{company_name}" technology center OR engineering hub OR delivery center — all countries all regions
 8. "{company_name}" "center of excellence" OR "CoE" OR "innovation hub" OR "delivery center" location city country
 9. site:nasscom.in OR site:globalcapabilitycenters.com OR site:zinnov.com OR site:everestgrp.com "{company_name}" GCC
-10. "{company_name}" GCC OR "captive" OR "offshore" OR "nearshore" headcount employees city 2024
-11. "{company_name}" technology strategy global footprint locations 2024 2025
-12. "{company_name}" office locations careers site — jobs pages often list all active office locations
+10. "{company_name}" GCC OR "captive" OR "offshore" OR "nearshore" delivery center headcount employees city 2024
+11. "{company_name}" technology strategy global GCC footprint locations 2024 2025
+12. "{company_name}" careers "global capability center" OR "technology hub" OR "shared services" site — jobs pages that name a specific delivery center, not general office listings
 
 RULES:
-- Include EVERY city where {company_name} has any GCC/tech/ops center regardless of size
+- Include EVERY city where {company_name} has a confirmed GCC/GDC-qualifying center, regardless of size
 - Report what the searches actually find — do not assume India if searches show other regions
-- If a company has multiple centers in the same country, list each city separately
+- If a company has multiple qualifying centers in the same country, list each city separately
 - Headcount: use the most recent figure; if unknown write "Unknown"
+- Before including any location, verify against the QUALIFYING FACILITY DEFINITION above —
+  when in doubt, exclude rather than include
 
 Return a JSON array. Each element must have exactly these fields:
 [
@@ -204,17 +229,22 @@ Return ONLY the raw JSON array. No explanation. No markdown. No prose before or 
 
 def _location_discovery_prompt_simple(company_name: str) -> str:
     """Simpler fallback discovery prompt — used on retry when full prompt fails to parse."""
-    return f"""Search for all GCC, technology hub, and shared services center locations of {company_name} worldwide.
+    return f"""Search EXCLUSIVELY for {company_name}'s Global Capability Center (GCC) and Global
+Delivery Center (GDC) locations worldwide — technology hubs, shared services centers, R&D
+facilities, and offshore/nearshore delivery offices only.
+
+{_GCC_SCOPE_RULES}
 
 Run ALL of these searches — do not skip any:
 1. "{company_name}" "global capability center" OR "technology center" OR "tech hub" locations worldwide list
-2. "{company_name}" offices global locations employees 2024 site:linkedin.com
+2. "{company_name}" GCC OR "shared services" offices global locations employees 2024 site:linkedin.com
 3. "{company_name}" GCC OR captive OR offshore OR nearshore technology hub locations all countries
-4. "{company_name}" annual report 2024 global offices locations technology hubs
+4. "{company_name}" annual report 2024 global GCC technology hubs delivery centers
 5. "{company_name}" "shared services" OR "engineering center" OR "delivery center" city country
-6. "{company_name}" office locations careers site — jobs pages list all active office locations
+6. "{company_name}" careers "global capability center" OR "technology hub" site — jobs pages that name a specific delivery center
 
-IMPORTANT: Return ALL regions found — do not assume or default to any single country.
+IMPORTANT: Return ALL regions found — do not assume or default to any single country. Exclude
+corporate HQ, sales offices, and any location that isn't a confirmed GCC/GDC-qualifying facility.
 
 Return a JSON array — one entry per city:
 [{{"gcc_name": "<name>", "gcc_location": "<City, Country>", "city": "<city>", "country": "<country>", "headcount": "<number or Unknown>", "established_year": "<year or Unknown>", "operating_model": "Unknown", "primary_focus": "Mixed", "source": "<URL>"}}]
@@ -423,14 +453,22 @@ def _discovery_prompt(industry: str, location: str) -> str:
                  " — focus on: India, Poland, Philippines, Romania, Malaysia, Mexico, Hungary"
     return f"""You are a GCC research analyst with live Google Search.
 
-TASK: Find companies from the {industry} industry that have established GCCs{loc_clause}.
+TASK: Find companies from the {industry} industry that have established a Global Capability
+Center (GCC) or Global Delivery Center (GDC){loc_clause}.
+
+{_GCC_SCOPE_RULES}
+
+Only return a company if its presence at gcc_location is a confirmed GCC/GDC-qualifying facility
+(dedicated technology hub, shared services center, R&D facility, or offshore/nearshore delivery
+office) — not merely a regional sales office or branch that happens to be in a common offshoring
+market.
 
 Run ALL these searches:
 - "{industry}" companies GCC "global capability center" {location or "India OR Poland OR Philippines"}
-- "{industry}" company captive center offshore 2022 OR 2023 OR 2024 OR 2025
-- "{industry}" "global delivery center" OR "center of excellence" {location or "India"}
+- "{industry}" company captive center offshore delivery 2022 OR 2023 OR 2024 OR 2025
+- "{industry}" "global delivery center" OR "center of excellence" OR "shared services" {location or "India"}
 - site:nasscom.in OR site:globalcapabilitycenters.com "{industry}"
-- "{industry}" GCC headcount employees established
+- "{industry}" GCC OR GDC delivery center headcount employees established
 
 Return a JSON array of up to 50 companies:
 [
