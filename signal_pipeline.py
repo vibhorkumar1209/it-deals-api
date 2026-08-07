@@ -206,14 +206,32 @@ def _date_window(lookback_days: int = 365) -> str:
     return f"{cutoff.strftime(fmt)} – {today.strftime(fmt)}"
 
 def _source_instructions(domain: str) -> str:
-    news_url = f"{domain.rstrip('/')}/news" if domain else ""
-    press_url = f"{domain.rstrip('/')}/press" if domain else ""
-    url_hint = f"  • Company newsroom / press releases: {news_url} or {press_url}\n" if domain else ""
-    return f"""Search the following sources in priority order:
-{url_hint}  • LinkedIn posts, announcements, and job listings for {domain or 'the company'}
+    if domain:
+        d = domain.rstrip("/").replace("https://", "").replace("http://", "")
+        own_site_searches = "\n".join([
+            f'  • site:{d} press release OR newsroom OR media center OR "in the news"',
+            f'  • site:{d}/news OR site:{d}/press OR site:{d}/press-releases OR site:{d}/newsroom OR site:{d}/media OR site:{d}/media-center OR site:{d}/about/news OR site:{d}/investors/news',
+            f'  • "{d}" press release OR newsroom OR "media center" (in case the press section lives on a different subdomain, e.g. investors.{d} or news.{d})',
+        ])
+        own_site_block = f"""FIRST — search the company's OWN official website press/media section directly, using ALL of these:
+{own_site_searches}
+This is the highest-priority, most authoritative source: if a company's own press release, newsroom,
+or media/investor-news page covers the event, prefer that URL as the "source" field over a third-party
+wire re-publishing the same story.
+
+THEN — search these secondary sources:"""
+    else:
+        own_site_block = "Search the following sources in priority order:"
+
+    return f"""{own_site_block}
+  • LinkedIn posts, announcements, and job listings for {domain or 'the company'}
   • Google News and open web search
   • Business wires: PR Newswire, Business Wire, GlobeNewswire, Businesswire
-  • Industry trade press and analyst reports"""
+  • Industry trade press and analyst reports
+
+SOURCE URL RULE: When the same event appears on both the company's own press/newsroom page AND a
+third-party wire or news site, ALWAYS cite the company's own press/newsroom/media page URL as the
+"source" field, not the third-party republication."""
 
 
 def _exec_leadership_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365) -> str:
