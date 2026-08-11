@@ -188,6 +188,8 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
                 config=types.GenerateContentConfig(**config_kwargs),
             )
             logger.info(f"Gemini [{label}] attempt {attempt} succeeded")
+            from usage_logger import log_gemini_usage
+            log_gemini_usage("aftermarket_intelligence", label, response, grounded=use_search, model=model)
             break
         except Exception as e:
             err = str(e)

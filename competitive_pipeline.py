@@ -32,7 +32,7 @@ MODULES = {
 
 # ── Gemini helpers ────────────────────────────────────────────────────────────
 
-def _gemini_call_sync(prompt: str, use_search: bool = True, max_tokens: int = 8192) -> str:
+def _gemini_call_sync(prompt: str, use_search: bool = True, max_tokens: int = 8192, label: str = "") -> str:
     from google import genai
     from google.genai import types
 
@@ -53,6 +53,8 @@ def _gemini_call_sync(prompt: str, use_search: bool = True, max_tokens: int = 81
                 contents=prompt,
                 config=types.GenerateContentConfig(**config_kwargs),
             )
+            from usage_logger import log_gemini_usage
+            log_gemini_usage("compkill", label, resp, grounded=use_search)
             return resp.text or ""
         except Exception as e:
             if attempt == retries:
@@ -167,7 +169,7 @@ async def discover_competitors(target_company: str, target_domain: str = "", ind
     """Return list of {{name, domain, descriptor}} dicts."""
     prompt = _discovery_prompt(target_company, target_domain, industry_context, technology_context)
     text = await asyncio.wait_for(
-        asyncio.to_thread(_gemini_call_sync, prompt, True, 4096),
+        asyncio.to_thread(_gemini_call_sync, prompt, True, 4096, f"discover|{target_company[:20]}"),
         timeout=CALL_TIMEOUT,
     )
     result = _parse_json_from_text(text)
@@ -494,7 +496,8 @@ async def _run_module(
     async with sem:
         try:
             text = await asyncio.wait_for(
-                asyncio.to_thread(_gemini_call_sync, prompt_fn(company, industry, tech), True, 8192),
+                asyncio.to_thread(_gemini_call_sync, prompt_fn(company, industry, tech), True, 8192,
+                                  f"{module_id}|{company[:20]}"),
                 timeout=CALL_TIMEOUT,
             )
             data = _parse_json_from_text(text) or {}
@@ -570,7 +573,7 @@ async def _run_synthesis(
     prompt = _synthesis_prompt(target, competitors, benchmark_focus, all_results, industry_context, technology_context)
     try:
         text = await asyncio.wait_for(
-            asyncio.to_thread(_gemini_call_sync, prompt, False, 4096),
+            asyncio.to_thread(_gemini_call_sync, prompt, False, 4096, f"synthesis|{target[:20]}"),
             timeout=120,
         )
         return text.strip()

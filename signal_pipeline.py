@@ -114,6 +114,8 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
                 contents=prompt,
                 config=types.GenerateContentConfig(**config_kwargs),
             )
+            from usage_logger import log_gemini_usage
+            log_gemini_usage("signal_intelligence", label, response, grounded=use_search)
             break
         except Exception as e:
             err = str(e)

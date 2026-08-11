@@ -1425,6 +1425,8 @@ def _gemini_extract_deals_sync(
                     max_output_tokens=24576,  # raised for longer (100-200 word) deal descriptions
                 ),
             )
+            from usage_logger import log_gemini_usage
+            log_gemini_usage("it_deal_finder", company_name, response, grounded=True)
             break   # success
         except Exception as api_err:
             err_str = str(api_err)

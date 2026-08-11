@@ -100,6 +100,21 @@ async def health():
     return {"status": "ok", "service": "it-deals-api", "v": "2.1.0", "env": keys}
 
 
+@app.get("/api/usage")
+async def usage_summary():
+    """Aggregate Gemini API usage (calls, tokens, cost) by module, from the
+    in-memory usage log. Resets on deploy/restart — see usage_logger.py."""
+    from usage_logger import get_usage_summary
+    return get_usage_summary()
+
+
+@app.get("/api/usage/recent")
+async def usage_recent(limit: int = 200):
+    """Most recent N logged Gemini calls, newest last."""
+    from usage_logger import get_recent_usage
+    return {"entries": get_recent_usage(limit)}
+
+
 @app.post("/api/scrape")
 async def scrape(req: ScrapeRequest):
     """Stream deal results via SSE. Each event is a JSON object."""
@@ -287,16 +302,15 @@ class EnrichTaskRequest(BaseModel):
 
 @app.post("/api/enrich-task")
 async def enrich_task(req: EnrichTaskRequest):
-    """SSE stream: search → Apify scrape → identify → Claude classify."""
+    """SSE stream: Gemini + Google Search Grounding → deal extraction."""
     from enrich_pipeline import enrich_company
 
     async def _generate():
         def _sse(obj: dict) -> str:
             return f"data: {json.dumps(obj)}\n\n"
 
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-        if not anthropic_key:
-            yield _sse({"type": "error", "message": "ANTHROPIC_API_KEY not set on server."})
+        if not os.getenv("GOOGLE_AI_API_KEY"):
+            yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set on server."})
             return
 
         schema_fields = [f.model_dump() for f in req.schema_fields]

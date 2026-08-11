@@ -470,6 +470,8 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
                     max_output_tokens=16384,
                 ),
             )
+            from usage_logger import log_gemini_usage
+            log_gemini_usage("tech_stack_finder", company_name, response, grounded=True)
             break   # success
         except Exception as api_err:
             err_str = str(api_err)

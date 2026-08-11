@@ -62,6 +62,8 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192):
                     **cfg_extra,
                 ),
             )
+            from usage_logger import log_gemini_usage
+            log_gemini_usage("gcc_intelligence", label, response, grounded=True)
             break
         except Exception as e:
             err = str(e)
@@ -749,6 +751,8 @@ def _gemini_text_sync(prompt: str, label: str, max_output_tokens: int = 12288) -
                     **cfg_extra,
                 ),
             )
+            from usage_logger import log_gemini_usage
+            log_gemini_usage("gcc_intelligence", label, response, grounded=True)
             break
         except Exception as e:
             err = str(e)

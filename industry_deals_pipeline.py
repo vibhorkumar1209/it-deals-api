@@ -115,7 +115,7 @@ Return ONLY a raw JSON array. Include deals from 2018 onwards. Return [] if none
 
 # ── Gemini helper ─────────────────────────────────────────────────────────────
 
-def _gemini_sync(prompt: str) -> str:
+def _gemini_sync(prompt: str, label: str = "") -> str:
     try:
         from google import genai
         from google.genai import types
@@ -140,6 +140,8 @@ def _gemini_sync(prompt: str) -> str:
                     max_output_tokens=8192,
                 ),
             )
+            from usage_logger import log_gemini_usage
+            log_gemini_usage("it_deals_by_industry", label, resp, grounded=True)
             raw = ""
             for cand in (resp.candidates or []):
                 for part in (cand.content.parts or []):
@@ -267,7 +269,7 @@ def generate_company_list(
     focus_tech: str = "",
 ) -> list[dict]:
     prompt = _company_list_prompt(industry, geography, company_name, domain, focus_tech)
-    text = _gemini_sync(prompt)
+    text = _gemini_sync(prompt, label=f"company_list|{industry[:20]}")
     logger.info(f"Company list raw text length: {len(text)}, first 300: {text[:300]!r}")
 
     parsed = _parse_json(text)
@@ -329,7 +331,8 @@ async def search_industry_deals(
         async with sem:
             try:
                 text = await asyncio.wait_for(
-                    asyncio.to_thread(_gemini_sync, _deals_prompt(cname, cdomain, industry, geography, focus_tech)),
+                    asyncio.to_thread(_gemini_sync, _deals_prompt(cname, cdomain, industry, geography, focus_tech),
+                                      f"deals|{cname[:20]}"),
                     timeout=CALL_TIMEOUT,
                 )
             except asyncio.TimeoutError:
