@@ -2,20 +2,29 @@
 Shared Gemini API usage logger — used by every pipeline module.
 
 Extracts real token counts from each Gemini response's `usage_metadata` (not
-estimated from prompt length) and logs a structured line + keeps an in-memory
-ring buffer so `/api/usage` can report measured, not modeled, cost per report.
+estimated from prompt length) and records it, so `/api/usage` can report
+measured, not modeled, cost per report.
+
+Backed by SQLite rather than an in-memory buffer: the app runs as 4 separate
+Uvicorn worker processes (see render.yaml `--workers 4`), each with its own
+Python interpreter — an in-memory deque would silently fragment usage data
+across 4 invisible-to-each-other buffers, which is why an earlier version of
+this file under-reported real usage. SQLite's file is shared by all workers
+in the same container, and WAL mode lets 4 processes write concurrently
+without corrupting each other's writes.
+
+Storage is still ephemeral — Render's local disk doesn't survive a redeploy —
+so this remains a rolling window, not a permanent billing record.
 """
 
 import logging
+import os
+import sqlite3
 import time
-from collections import deque
 
 logger = logging.getLogger("usage")
 
-# In-memory ring buffer — resets on deploy/restart, which is fine: this is a
-# rolling window for spot-checking recent activity, not a billing system of
-# record. Swap for a DB/file sink later if durable history is needed.
-_RECENT: deque = deque(maxlen=5000)
+_DB_PATH = os.path.join(os.getenv("USAGE_DB_DIR", "/tmp"), "gemini_usage.db")
 
 # Gemini 2.5 Flash pricing (Aug 2026) — see cost ledger for sourcing. Used only
 # to attach a derived cost estimate to each logged call; the token counts
@@ -23,6 +32,54 @@ _RECENT: deque = deque(maxlen=5000)
 _IN_RATE = 0.30 / 1_000_000
 _OUT_RATE = 2.50 / 1_000_000
 _GROUND_RATE = 35 / 1000  # per grounded request, beyond the free daily allotment
+
+
+def _retrying(fn, *, attempts: int = 8, base_delay: float = 0.05):
+    """Run fn() with retries on 'database is locked' — SQLite raises this even
+    with busy_timeout set when several processes hit the very first write
+    (WAL-mode initialization or table creation) at the exact same instant on
+    cold start, e.g. 4 Uvicorn workers all handling their first Gemini call
+    right after a deploy. busy_timeout covers lock waits during a single
+    statement; it does NOT cover the gap between our own retry attempts, so
+    we still need this wrapper on top."""
+    last_err = None
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            last_err = e
+            if "locked" not in str(e).lower():
+                raise
+            time.sleep(base_delay * (attempt + 1))
+    raise last_err
+
+
+def _get_conn() -> sqlite3.Connection:
+    """New connection per call — cheap for SQLite, avoids sharing a connection
+    object across threads/processes in ways sqlite3 doesn't like."""
+    conn = sqlite3.connect(_DB_PATH, timeout=10)
+
+    def _setup():
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                module TEXT NOT NULL,
+                label TEXT,
+                model TEXT,
+                grounded INTEGER,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                total_tokens INTEGER,
+                cost_usd REAL
+            )
+        """)
+        conn.commit()
+
+    _retrying(_setup)
+    return conn
 
 
 def log_gemini_usage(module: str, label: str, response, grounded: bool = True,
@@ -53,7 +110,21 @@ def log_gemini_usage(module: str, label: str, response, grounded: bool = True,
             "total_tokens": total_tok,
             "cost_usd": round(cost, 6),
         }
-        _RECENT.append(entry)
+
+        conn = _get_conn()
+        try:
+            def _insert():
+                conn.execute(
+                    "INSERT INTO usage (ts, module, label, model, grounded, input_tokens, "
+                    "output_tokens, total_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (entry["ts"], module, label, model, int(grounded), in_tok, out_tok,
+                     total_tok, entry["cost_usd"]),
+                )
+                conn.commit()
+            _retrying(_insert)
+        finally:
+            conn.close()
+
         logger.info(
             f"[usage] {module}/{label} model={model} grounded={grounded} "
             f"in={in_tok} out={out_tok} total={total_tok} cost=${cost:.4f}"
@@ -66,36 +137,66 @@ def log_gemini_usage(module: str, label: str, response, grounded: bool = True,
 
 def get_recent_usage(limit: int = 200) -> list[dict]:
     """Most recent N logged calls, newest last."""
-    return list(_RECENT)[-limit:]
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT ts, module, label, model, grounded, input_tokens, output_tokens, "
+            "total_tokens, cost_usd FROM usage ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    cols = ["ts", "module", "label", "model", "grounded", "input_tokens",
+            "output_tokens", "total_tokens", "cost_usd"]
+    entries = [dict(zip(cols, row)) for row in rows]
+    for e in entries:
+        e["grounded"] = bool(e["grounded"])
+    entries.reverse()  # oldest-first within the returned window, newest last
+    return entries
 
 
 def get_usage_summary() -> dict:
-    """Aggregate the in-memory buffer by module — calls, grounded calls, tokens, cost."""
-    entries = list(_RECENT)
-    if not entries:
+    """Aggregate all logged usage by module — calls, grounded calls, tokens, cost."""
+    conn = _get_conn()
+    try:
+        total_row = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(cost_usd),0), MIN(ts), MAX(ts) FROM usage"
+        ).fetchone()
+        count, total_cost, window_start, window_end = total_row
+
+        rows = conn.execute("""
+            SELECT module,
+                   COUNT(*) AS calls,
+                   SUM(grounded) AS grounded_calls,
+                   COALESCE(SUM(input_tokens),0) AS input_tokens,
+                   COALESCE(SUM(output_tokens),0) AS output_tokens,
+                   COALESCE(SUM(cost_usd),0) AS cost_usd
+            FROM usage
+            GROUP BY module
+            ORDER BY cost_usd DESC
+        """).fetchall()
+    finally:
+        conn.close()
+
+    if not count:
         return {"count": 0, "by_module": {}}
 
-    by_module: dict[str, dict] = {}
-    total_cost = 0.0
-    for e in entries:
-        m = by_module.setdefault(e["module"], {
-            "calls": 0, "grounded_calls": 0,
-            "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0,
-        })
-        m["calls"] += 1
-        m["grounded_calls"] += 1 if e["grounded"] else 0
-        m["input_tokens"] += e["input_tokens"]
-        m["output_tokens"] += e["output_tokens"]
-        m["cost_usd"] += e["cost_usd"]
-        total_cost += e["cost_usd"]
-
-    for m in by_module.values():
-        m["cost_usd"] = round(m["cost_usd"], 4)
+    by_module = {
+        module: {
+            "calls": calls,
+            "grounded_calls": grounded_calls or 0,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost_usd": round(cost_usd, 4),
+        }
+        for module, calls, grounded_calls, input_tokens, output_tokens, cost_usd in rows
+    }
 
     return {
-        "count": len(entries),
+        "count": count,
         "total_cost_usd": round(total_cost, 4),
-        "window_start": entries[0]["ts"],
-        "window_end": entries[-1]["ts"],
+        "window_start": window_start,
+        "window_end": window_end,
         "by_module": by_module,
     }
