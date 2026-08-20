@@ -1390,6 +1390,7 @@ No prose. No markdown fences."""
 def _gemini_extract_deals_sync(
     prompt: str,
     company_name: str,
+    run_id: str = "",
 ) -> list[dict]:
     """
     Blocking Gemini 2.5 Flash call with Google Search grounding.
@@ -1426,7 +1427,7 @@ def _gemini_extract_deals_sync(
                 ),
             )
             from usage_logger import log_gemini_usage
-            log_gemini_usage("it_deal_finder", company_name, response, grounded=True)
+            log_gemini_usage("it_deal_finder", company_name, response, grounded=True, run_id=run_id)
             break   # success
         except Exception as api_err:
             err_str = str(api_err)
@@ -1601,6 +1602,7 @@ async def enrich_company(
     linkedin_url: str = "",
     focus_tech: list[str] | None = None,
     focus_vendor: list[str] | None = None,
+    run_id: str = "",
     # legacy aliases accepted but ignored
     extra_vendors: list[str] | None = None,
     extra_sources: list[str] | None = None,
@@ -1680,7 +1682,7 @@ async def enrich_company(
         await asyncio.sleep(0)
 
         loop = asyncio.get_event_loop()
-        future = loop.run_in_executor(None, _gemini_extract_deals_sync, prompt, company_name)
+        future = loop.run_in_executor(None, _gemini_extract_deals_sync, prompt, company_name, run_id)
 
         elapsed = 0
         call_deals: list[dict] = []
@@ -1736,7 +1738,7 @@ async def enrich_company(
             await asyncio.sleep(0)
 
             loop = asyncio.get_event_loop()
-            future = loop.run_in_executor(None, _gemini_extract_deals_sync, prompt, brand_name)
+            future = loop.run_in_executor(None, _gemini_extract_deals_sync, prompt, brand_name, run_id)
             elapsed = 0
             call_deals: list[dict] = []
 
@@ -1822,7 +1824,7 @@ Return ONLY the raw JSON array. No prose. No markdown fences.
 """
 
         loop = asyncio.get_event_loop()
-        partner_future = loop.run_in_executor(None, _gemini_extract_deals_sync, partner_prompt, company_name)
+        partner_future = loop.run_in_executor(None, _gemini_extract_deals_sync, partner_prompt, company_name, run_id)
         elapsed = 0
         partner_deals: list[dict] = []
 

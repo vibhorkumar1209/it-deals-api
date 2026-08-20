@@ -86,7 +86,7 @@ _SIGNAL_TYPE_DEFAULT_IMPORTANCE = {
 
 # ── Shared Gemini call (copied from aftermarket_pipeline pattern) ─────────────
 
-def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_tokens: int = 16384):
+def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_tokens: int = 16384, run_id: str = ""):
     try:
         from google import genai
         from google.genai import types
@@ -115,7 +115,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
                 config=types.GenerateContentConfig(**config_kwargs),
             )
             from usage_logger import log_gemini_usage
-            log_gemini_usage("signal_intelligence", label, response, grounded=use_search)
+            log_gemini_usage("signal_intelligence", label, response, grounded=use_search, run_id=run_id)
             break
         except Exception as e:
             err = str(e)
@@ -482,6 +482,7 @@ def _run_category_sync(
     key_triggers: str,
     target_tech: str,
     lookback_days: int = 365,
+    run_id: str = "",
 ) -> list:
     prompts = {
         "executive_leadership": _exec_leadership_prompt,
@@ -493,7 +494,7 @@ def _run_category_sync(
     prompt_fn = prompts[category]
     prompt = prompt_fn(company, domain, key_triggers, target_tech, lookback_days)
     label = f"{company[:20]}|{category}"
-    rows = _gemini_call_sync(prompt, use_search=True, label=label, max_output_tokens=8192)
+    rows = _gemini_call_sync(prompt, use_search=True, label=label, max_output_tokens=8192, run_id=run_id)
 
     # signal_type → category map. Each prompt asks the model for a signal_type
     # from a fixed, category-specific enum (see prompt functions above) — that
@@ -554,12 +555,13 @@ def _rank_signals_sync(
     user_domain: str,
     key_triggers: str,
     target_tech: str,
+    run_id: str = "",
 ) -> list:
     if not signals:
         return signals
     prompt = _ranking_prompt(company, signals, user_company, user_domain, key_triggers, target_tech)
     label = f"rank|{company[:20]}"
-    ranked = _gemini_call_sync(prompt, use_search=False, label=label, max_output_tokens=8192)
+    ranked = _gemini_call_sync(prompt, use_search=False, label=label, max_output_tokens=8192, run_id=run_id)
     if not ranked or len(ranked) != len(signals):
         return signals
     # Merge importance fields back into original signal objects
@@ -588,6 +590,9 @@ async def run_signal_intelligence(
       {type: "signals_ranked", company: str, rows: list}   — only if user_company set
       {type: "complete", total: int, companies_done: int}
     """
+    from usage_logger import new_run_id, get_usage_by_run
+    run_id = new_run_id()
+
     total_signals = 0
     companies_done = 0
     n = len(target_companies)
@@ -608,7 +613,7 @@ async def run_signal_intelligence(
 
             # Run 4 categories in parallel via thread pool
             futures = [
-                asyncio.to_thread(_run_category_sync, name, domain, cat, key_triggers, target_tech, lookback_days)
+                asyncio.to_thread(_run_category_sync, name, domain, cat, key_triggers, target_tech, lookback_days, run_id)
                 for cat in SIGNAL_CATEGORIES
             ]
             cat_results = await asyncio.gather(*futures, return_exceptions=True)
@@ -635,6 +640,7 @@ async def run_signal_intelligence(
                     name, company_rows,
                     user_company, user_domain,
                     key_triggers, target_tech,
+                    run_id,
                 )
                 yield_queue.append({"type": "signals_ranked", "company": name, "rows": ranked})
 
@@ -668,4 +674,5 @@ async def run_signal_intelligence(
         "type": "complete",
         "total": total_signals,
         "companies_done": companies_done,
+        "usage": get_usage_by_run(run_id),
     }

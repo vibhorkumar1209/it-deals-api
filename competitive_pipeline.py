@@ -32,7 +32,8 @@ MODULES = {
 
 # ── Gemini helpers ────────────────────────────────────────────────────────────
 
-def _gemini_call_sync(prompt: str, use_search: bool = True, max_tokens: int = 8192, label: str = "") -> str:
+def _gemini_call_sync(prompt: str, use_search: bool = True, max_tokens: int = 8192, label: str = "",
+                       run_id: str = "") -> str:
     from google import genai
     from google.genai import types
 
@@ -54,7 +55,7 @@ def _gemini_call_sync(prompt: str, use_search: bool = True, max_tokens: int = 81
                 config=types.GenerateContentConfig(**config_kwargs),
             )
             from usage_logger import log_gemini_usage
-            log_gemini_usage("compkill", label, resp, grounded=use_search)
+            log_gemini_usage("compkill", label, resp, grounded=use_search, run_id=run_id)
             return resp.text or ""
         except Exception as e:
             if attempt == retries:
@@ -488,6 +489,7 @@ async def _run_module(
     sem: asyncio.Semaphore,
     industry: str = "",
     tech: str = "",
+    run_id: str = "",
 ) -> dict:
     prompt_fn = _MODULE_PROMPTS.get(module_id)
     if not prompt_fn:
@@ -497,7 +499,7 @@ async def _run_module(
         try:
             text = await asyncio.wait_for(
                 asyncio.to_thread(_gemini_call_sync, prompt_fn(company, industry, tech), True, 8192,
-                                  f"{module_id}|{company[:20]}"),
+                                  f"{module_id}|{company[:20]}", run_id),
                 timeout=CALL_TIMEOUT,
             )
             data = _parse_json_from_text(text) or {}
@@ -569,11 +571,12 @@ async def _run_synthesis(
     all_results: list[dict],
     industry_context: str = "",
     technology_context: str = "",
+    run_id: str = "",
 ) -> str:
     prompt = _synthesis_prompt(target, competitors, benchmark_focus, all_results, industry_context, technology_context)
     try:
         text = await asyncio.wait_for(
-            asyncio.to_thread(_gemini_call_sync, prompt, False, 4096, f"synthesis|{target[:20]}"),
+            asyncio.to_thread(_gemini_call_sync, prompt, False, 4096, f"synthesis|{target[:20]}", run_id),
             timeout=120,
         )
         return text.strip()
@@ -594,6 +597,8 @@ async def run_competitive_analysis(
     technology_context: str = "",
 ) -> AsyncGenerator[dict, None]:
     """Yield SSE-ready dicts for each module result, then synthesis."""
+    from usage_logger import new_run_id, get_usage_by_run
+    run_id = new_run_id()
 
     all_companies = [{"name": target_company, "domain": target_domain, "is_target": True}]
     for c in competitors:
@@ -613,7 +618,7 @@ async def run_competitive_analysis(
         nonlocal done_calls
         company_name = company_info["name"]
         async with company_sem:
-            tasks = [_run_module(company_name, mod, module_sem, industry_context, technology_context) for mod in enabled_modules]
+            tasks = [_run_module(company_name, mod, module_sem, industry_context, technology_context, run_id) for mod in enabled_modules]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
         modules_out = []
@@ -671,7 +676,7 @@ async def run_competitive_analysis(
     if all_results:
         yield {"type": "synthesis_start"}
         competitor_names = [c["name"] for c in competitors]
-        synthesis_text = await _run_synthesis(target_company, competitor_names, benchmark_focus, all_results, industry_context, technology_context)
+        synthesis_text = await _run_synthesis(target_company, competitor_names, benchmark_focus, all_results, industry_context, technology_context, run_id)
         yield {"type": "synthesis", "text": synthesis_text}
 
-    yield {"type": "complete", "total_companies": len(all_results)}
+    yield {"type": "complete", "total_companies": len(all_results), "usage": get_usage_by_run(run_id)}

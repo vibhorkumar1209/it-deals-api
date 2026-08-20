@@ -150,7 +150,7 @@ def _match_grounding_source_generic(row: dict, grounding_sources: list[tuple[str
     return best_uri
 
 
-def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_tokens: int = 16384, model: str = "gemini-2.5-flash", return_raw: bool = False, temperature: float = 0.15):
+def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_tokens: int = 16384, model: str = "gemini-2.5-flash", return_raw: bool = False, temperature: float = 0.15, run_id: str = ""):
     try:
         from google import genai
         from google.genai import types
@@ -189,7 +189,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
             )
             logger.info(f"Gemini [{label}] attempt {attempt} succeeded")
             from usage_logger import log_gemini_usage
-            log_gemini_usage("aftermarket_intelligence", label, response, grounded=use_search, model=model)
+            log_gemini_usage("aftermarket_intelligence", label, response, grounded=use_search, model=model, run_id=run_id)
             break
         except Exception as e:
             err = str(e)
@@ -343,10 +343,11 @@ async def _collect_future(future, label: str, timeout: int = 90) -> list:
         return []
 
 
-async def _run_async(prompt: str, use_search: bool, label: str, timeout: int = 110) -> list:
+async def _run_async(prompt: str, use_search: bool, label: str, timeout: int = 110, run_id: str = "") -> list:
     """Run a Gemini call in executor with hard timeout. No asyncio.shield."""
     loop = asyncio.get_event_loop()
-    future = loop.run_in_executor(None, _gemini_call_sync, prompt, use_search, label)
+    future = loop.run_in_executor(None, _gemini_call_sync, prompt, use_search, label,
+                                  16384, "gemini-2.5-flash", False, 0.15, run_id)
     try:
         result = await asyncio.wait_for(future, timeout=timeout)
         return result if isinstance(result, list) else []
@@ -1164,6 +1165,9 @@ async def run_aftermarket_deep_dive(
 
     sections_to_run: subset of ALL_SECTIONS to regenerate. None = run all.
     """
+    from usage_logger import new_run_id, get_usage_by_run
+    run_id = new_run_id()
+
     run = set(sections_to_run) if sections_to_run else ALL_SECTIONS
     partial = bool(sections_to_run)  # True if only regenerating some sections
 
@@ -1186,11 +1190,11 @@ async def run_aftermarket_deep_dive(
     cap_futures = [
         loop.run_in_executor(None, _gemini_call_sync,
                              _cap_batch_prompt(company_name, batch, industry, target_vendor),
-                             True, f"cap_batch_{bi}", 24576)
+                             True, f"cap_batch_{bi}", 24576, "gemini-2.5-flash", False, 0.15, run_id)
         for bi, batch in enumerate(_CAP_BATCHES)
     ] if "capabilities" in run else []
-    agg_future  = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend", 4096, "gemini-2.5-flash", False, 0.0) if "agg_spend" in run else None
-    deals_future = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals") if "spend_deals" in run else None
+    agg_future  = loop.run_in_executor(None, _gemini_call_sync, _aggregate_spend_prompt(company_name, industry), True, "agg_spend", 4096, "gemini-2.5-flash", False, 0.0, run_id) if "agg_spend" in run else None
+    deals_future = loop.run_in_executor(None, _gemini_call_sync, _spend_deals_prompt(company_name, industry), True, "spend_deals", 16384, "gemini-2.5-flash", False, 0.15, run_id) if "spend_deals" in run else None
 
     # If spend_module (but NOT readiness-only) is requested without capabilities,
     # fire a lightweight search to get context for synthesis.
@@ -1200,7 +1204,7 @@ async def run_aftermarket_deep_dive(
     context_future = loop.run_in_executor(
         None, _gemini_call_sync,
         _cap_prompt(company_name, "Warranty Management", industry, target_vendor),
-        True, "cap_context_lite"
+        True, "cap_context_lite", 16384, "gemini-2.5-flash", False, 0.15, run_id
     ) if needs_context else None
 
     spend_future   = None
@@ -1220,7 +1224,7 @@ async def run_aftermarket_deep_dive(
         ready_research_future = loop.run_in_executor(
             None, _gemini_call_sync,
             _readiness_research_prompt(company_name, industry),
-            True, "readiness_research", 4096, "gemini-2.5-flash", True,  # return_raw=True
+            True, "readiness_research", 4096, "gemini-2.5-flash", True, 0.15, run_id,  # return_raw=True
         )
     else:
         ready_research_future = None
@@ -1283,7 +1287,7 @@ async def run_aftermarket_deep_dive(
     elif "spend_module" in run:
         yield {"type": "heartbeat", "message": "💰 Fetching spend context…"}
         await asyncio.sleep(0)
-        agg_rows = await _run_async(_aggregate_spend_prompt(company_name, industry), True, "agg_context", timeout=90)
+        agg_rows = await _run_async(_aggregate_spend_prompt(company_name, industry), True, "agg_context", timeout=90, run_id=run_id)
     else:
         agg_rows = []
     if "agg_spend" in run:
@@ -1321,7 +1325,7 @@ async def run_aftermarket_deep_dive(
         spend_future = loop.run_in_executor(
             None, _gemini_call_sync,
             _spend_module_prompt(company_name, industry, all_cap_rows, agg_list),
-            False, "spend_module", 8192, "gemini-2.5-flash", False, 0.0
+            False, "spend_module", 8192, "gemini-2.5-flash", False, 0.0, run_id
         )
 
     # Build spend lines from agg_rows for readiness TAM (module-level spend not yet available)
@@ -1349,7 +1353,7 @@ async def run_aftermarket_deep_dive(
                                     research_text, all_cap_rows, _BATCH_A,
                                     spend_lines_for_ready, agg_ref_for_ready,
                                     vendor_rel_map),
-            True, "readiness_score_a", 16384, "gemini-2.5-flash",
+            True, "readiness_score_a", 16384, "gemini-2.5-flash", False, 0.15, run_id,
         )
         score_b = loop.run_in_executor(
             None, _gemini_call_sync,
@@ -1357,7 +1361,7 @@ async def run_aftermarket_deep_dive(
                                     research_text, all_cap_rows, _BATCH_B,
                                     spend_lines_for_ready, agg_ref_for_ready,
                                     vendor_rel_map),
-            True, "readiness_score_b", 16384, "gemini-2.5-flash",
+            True, "readiness_score_b", 16384, "gemini-2.5-flash", False, 0.15, run_id,
         )
 
     # ── Collect IT deals (already running since t=0) ──────────────────────────
@@ -1418,7 +1422,7 @@ async def run_aftermarket_deep_dive(
                                             research_text, all_cap_rows, _BATCH_A,
                                             spend_lines_for_ready, agg_ref_for_ready,
                                             vendor_rel_map),
-                    True, "readiness_retry_a", 16384, "gemini-2.5-flash",
+                    True, "readiness_retry_a", 16384, "gemini-2.5-flash", False, 0.15, run_id,
                 ))
                 retry_labels.append("retry_a")
             if not got_b:
@@ -1428,7 +1432,7 @@ async def run_aftermarket_deep_dive(
                                             research_text, all_cap_rows, _BATCH_B,
                                             spend_lines_for_ready, agg_ref_for_ready,
                                             vendor_rel_map),
-                    True, "readiness_retry_b", 16384, "gemini-2.5-flash",
+                    True, "readiness_retry_b", 16384, "gemini-2.5-flash", False, 0.15, run_id,
                 ))
                 retry_labels.append("retry_b")
             try:
@@ -1469,7 +1473,7 @@ async def run_aftermarket_deep_dive(
     yield {"type": "heartbeat", "message": "🔎 Table 2: Identifying technology gaps…"}
     await asyncio.sleep(0)
 
-    gap_rows = await _run_async(_gap_prompt(company_name, industry, []), True, "gaps", timeout=100) if "gaps" in run else []
+    gap_rows = await _run_async(_gap_prompt(company_name, industry, []), True, "gaps", timeout=100, run_id=run_id) if "gaps" in run else []
     for row in (gap_rows if isinstance(gap_rows, list) else []):
         if isinstance(row, dict):
             yield {"type": "gap_row", "row": row}
@@ -1484,7 +1488,7 @@ async def run_aftermarket_deep_dive(
         yield {"type": "heartbeat", "message": f"🏆 Competitive benchmarking vs {competitors}…"}
         await asyncio.sleep(0)
 
-        comp_rows = await _run_async(_comp_prompt(company_name, industry, competitors), True, "competitive", timeout=100)
+        comp_rows = await _run_async(_comp_prompt(company_name, industry, competitors), True, "competitive", timeout=100, run_id=run_id)
         for row in (comp_rows if isinstance(comp_rows, list) else []):
             if isinstance(row, dict):
                 yield {"type": "competitor_row", "row": row}
@@ -1504,4 +1508,5 @@ async def run_aftermarket_deep_dive(
         "readiness": readiness_rows if isinstance(readiness_rows, list) else [],
         "vendor_footprint": [],  # removed as separate section
         "competitors": comp_rows if isinstance(comp_rows, list) else [],
+        "usage": get_usage_by_run(run_id),
     }

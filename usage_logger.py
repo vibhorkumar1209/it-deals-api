@@ -73,9 +73,11 @@ def _get_conn() -> sqlite3.Connection:
                 input_tokens INTEGER,
                 output_tokens INTEGER,
                 total_tokens INTEGER,
-                cost_usd REAL
+                cost_usd REAL,
+                run_id TEXT
             )
         """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_run_id ON usage(run_id)")
         conn.commit()
 
     _retrying(_setup)
@@ -83,12 +85,17 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def log_gemini_usage(module: str, label: str, response, grounded: bool = True,
-                      model: str = "gemini-2.5-flash") -> dict | None:
+                      model: str = "gemini-2.5-flash", run_id: str = "") -> dict | None:
     """Extract real usage_metadata from a Gemini response and record it.
 
     Call this right after every `client.models.generate_content(...)` call,
     across every pipeline. Never raises — a logging failure must never break
     the pipeline that's actually serving the request.
+
+    run_id: an opaque id generated once per report (see new_run_id()) and
+    threaded through every Gemini call made while producing that report — lets
+    get_usage_by_run() answer "what did THIS report cost", which is what the
+    frontend's report-history view shows per saved entry.
     """
     try:
         um = getattr(response, "usage_metadata", None)
@@ -109,6 +116,7 @@ def log_gemini_usage(module: str, label: str, response, grounded: bool = True,
             "output_tokens": out_tok,
             "total_tokens": total_tok,
             "cost_usd": round(cost, 6),
+            "run_id": run_id,
         }
 
         conn = _get_conn()
@@ -116,9 +124,9 @@ def log_gemini_usage(module: str, label: str, response, grounded: bool = True,
             def _insert():
                 conn.execute(
                     "INSERT INTO usage (ts, module, label, model, grounded, input_tokens, "
-                    "output_tokens, total_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "output_tokens, total_tokens, cost_usd, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (entry["ts"], module, label, model, int(grounded), in_tok, out_tok,
-                     total_tok, entry["cost_usd"]),
+                     total_tok, entry["cost_usd"], run_id),
                 )
                 conn.commit()
             _retrying(_insert)
@@ -126,7 +134,7 @@ def log_gemini_usage(module: str, label: str, response, grounded: bool = True,
             conn.close()
 
         logger.info(
-            f"[usage] {module}/{label} model={model} grounded={grounded} "
+            f"[usage] {module}/{label} run={run_id} model={model} grounded={grounded} "
             f"in={in_tok} out={out_tok} total={total_tok} cost=${cost:.4f}"
         )
         return entry
@@ -135,20 +143,52 @@ def log_gemini_usage(module: str, label: str, response, grounded: bool = True,
         return None
 
 
+def new_run_id() -> str:
+    """Generate one id per report, to pass as `run_id` into every log_gemini_usage()
+    call made while producing that report."""
+    import uuid
+    return uuid.uuid4().hex[:16]
+
+
+def get_usage_by_run(run_id: str) -> dict:
+    """Aggregate usage for one report run — calls, grounded calls, tokens, cost.
+    Returns zeros (not None) if the run_id logged nothing, so callers can embed
+    this directly into a report's SSE 'complete' event without a None-check."""
+    if not run_id:
+        return {"calls": 0, "grounded_calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+    conn = _get_conn()
+    try:
+        row = conn.execute("""
+            SELECT COUNT(*), COALESCE(SUM(grounded),0), COALESCE(SUM(input_tokens),0),
+                   COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd),0)
+            FROM usage WHERE run_id = ?
+        """, (run_id,)).fetchone()
+    finally:
+        conn.close()
+    calls, grounded_calls, input_tokens, output_tokens, cost_usd = row
+    return {
+        "calls": calls,
+        "grounded_calls": grounded_calls,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cost_usd": round(cost_usd, 4),
+    }
+
+
 def get_recent_usage(limit: int = 200) -> list[dict]:
     """Most recent N logged calls, newest last."""
     conn = _get_conn()
     try:
         rows = conn.execute(
             "SELECT ts, module, label, model, grounded, input_tokens, output_tokens, "
-            "total_tokens, cost_usd FROM usage ORDER BY id DESC LIMIT ?",
+            "total_tokens, cost_usd, run_id FROM usage ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
     finally:
         conn.close()
 
     cols = ["ts", "module", "label", "model", "grounded", "input_tokens",
-            "output_tokens", "total_tokens", "cost_usd"]
+            "output_tokens", "total_tokens", "cost_usd", "run_id"]
     entries = [dict(zip(cols, row)) for row in rows]
     for e in entries:
         e["grounded"] = bool(e["grounded"])

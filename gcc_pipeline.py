@@ -22,7 +22,7 @@ GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
 
 # ── Shared Gemini caller ──────────────────────────────────────────────────────
 
-def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192):
+def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192, run_id: str = ""):
     try:
         from google import genai
         from google.genai import types
@@ -63,7 +63,7 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192):
                 ),
             )
             from usage_logger import log_gemini_usage
-            log_gemini_usage("gcc_intelligence", label, response, grounded=True)
+            log_gemini_usage("gcc_intelligence", label, response, grounded=True, run_id=run_id)
             break
         except Exception as e:
             err = str(e)
@@ -538,17 +538,18 @@ async def _enrich_one_location(
     location_info: dict,
     domain: str,
     loop,
+    run_id: str = "",
 ) -> dict:
     """Run 5 parallel enrichment calls for one GCC location. Retry empty sections once."""
     gcc_location = location_info.get("gcc_location", "")
     gcc_name     = location_info.get("gcc_name", "")
     label = f"{company_name[:20]}@{gcc_location[:15]}"
 
-    caps_task  = _collect(loop, (_capabilities_prompt(company_name, gcc_location, gcc_name), f"cap_{label}",  6144), f"cap_{label}",  160)
-    proj_task  = _collect(loop, (_projects_prompt(company_name, gcc_location, gcc_name),     f"proj_{label}", 6144), f"proj_{label}", 160)
-    tal_task   = _collect(loop, (_talent_prompt(company_name, gcc_location, gcc_name),        f"tal_{label}",  6144), f"tal_{label}",  160)
-    fin_task   = _collect(loop, (_financials_prompt(company_name, gcc_location, gcc_name),    f"fin_{label}",  4096), f"fin_{label}",  160)
-    tech_task  = _collect(loop, (_techstack_prompt(company_name, gcc_location, gcc_name),     f"tech_{label}", 4096), f"tech_{label}", 160)
+    caps_task  = _collect(loop, (_capabilities_prompt(company_name, gcc_location, gcc_name), f"cap_{label}",  6144, run_id), f"cap_{label}",  160)
+    proj_task  = _collect(loop, (_projects_prompt(company_name, gcc_location, gcc_name),     f"proj_{label}", 6144, run_id), f"proj_{label}", 160)
+    tal_task   = _collect(loop, (_talent_prompt(company_name, gcc_location, gcc_name),        f"tal_{label}",  6144, run_id), f"tal_{label}",  160)
+    fin_task   = _collect(loop, (_financials_prompt(company_name, gcc_location, gcc_name),    f"fin_{label}",  4096, run_id), f"fin_{label}",  160)
+    tech_task  = _collect(loop, (_techstack_prompt(company_name, gcc_location, gcc_name),     f"tech_{label}", 4096, run_id), f"tech_{label}", 160)
 
     caps, projs, talent, fin, tech = await asyncio.gather(
         caps_task, proj_task, tal_task, fin_task, tech_task,
@@ -566,11 +567,11 @@ async def _enrich_one_location(
 
     # Retry any sections that returned empty — one additional attempt each
     retry_tasks = {}
-    if caps_v  is None: retry_tasks["caps"]  = _collect(loop, (_capabilities_prompt(company_name, gcc_location, gcc_name), f"cap2_{label}",  6144), f"cap2_{label}",  120)
-    if projs_v is None: retry_tasks["projs"] = _collect(loop, (_projects_prompt(company_name, gcc_location, gcc_name),     f"proj2_{label}", 6144), f"proj2_{label}", 120)
-    if tal_v   is None: retry_tasks["tal"]   = _collect(loop, (_talent_prompt(company_name, gcc_location, gcc_name),        f"tal2_{label}",  6144), f"tal2_{label}",  120)
-    if fin_v   is None: retry_tasks["fin"]   = _collect(loop, (_financials_prompt(company_name, gcc_location, gcc_name),    f"fin2_{label}",  4096), f"fin2_{label}",  120)
-    if tech_v  is None: retry_tasks["tech"]  = _collect(loop, (_techstack_prompt(company_name, gcc_location, gcc_name),     f"tech2_{label}", 4096), f"tech2_{label}", 120)
+    if caps_v  is None: retry_tasks["caps"]  = _collect(loop, (_capabilities_prompt(company_name, gcc_location, gcc_name), f"cap2_{label}",  6144, run_id), f"cap2_{label}",  120)
+    if projs_v is None: retry_tasks["projs"] = _collect(loop, (_projects_prompt(company_name, gcc_location, gcc_name),     f"proj2_{label}", 6144, run_id), f"proj2_{label}", 120)
+    if tal_v   is None: retry_tasks["tal"]   = _collect(loop, (_talent_prompt(company_name, gcc_location, gcc_name),        f"tal2_{label}",  6144, run_id), f"tal2_{label}",  120)
+    if fin_v   is None: retry_tasks["fin"]   = _collect(loop, (_financials_prompt(company_name, gcc_location, gcc_name),    f"fin2_{label}",  4096, run_id), f"fin2_{label}",  120)
+    if tech_v  is None: retry_tasks["tech"]  = _collect(loop, (_techstack_prompt(company_name, gcc_location, gcc_name),     f"tech2_{label}", 4096, run_id), f"tech2_{label}", 120)
 
     if retry_tasks:
         logger.info(f"[{label}] retrying empty sections: {list(retry_tasks.keys())}")
@@ -626,6 +627,9 @@ async def run_gcc_enrichment(
         yield {"type": "error", "message": "No companies provided"}
         return
 
+    from usage_logger import new_run_id, get_usage_by_run
+    run_id = new_run_id()
+
     total_cos = min(len(companies), 50)
     yield {"type": "heartbeat", "message": f"🚀 Starting GCC enrichment for {total_cos} compan{'y' if total_cos == 1 else 'ies'}…"}
     await asyncio.sleep(0)
@@ -645,7 +649,7 @@ async def run_gcc_enrichment(
             # Step 1: discover locations for this company — full prompt first
             loc_result = await _collect(
                 loop,
-                (_location_discovery_prompt(cname, domain, loc_filter), f"locs_{cname[:20]}", 8192),
+                (_location_discovery_prompt(cname, domain, loc_filter), f"locs_{cname[:20]}", 8192, run_id),
                 f"locs_{cname[:20]}",
                 timeout=160,
             )
@@ -657,7 +661,7 @@ async def run_gcc_enrichment(
                 await asyncio.sleep(0)
                 loc_result2 = await _collect(
                     loop,
-                    (_location_discovery_prompt_simple(cname), f"locs2_{cname[:20]}", 4096),
+                    (_location_discovery_prompt_simple(cname), f"locs2_{cname[:20]}", 4096, run_id),
                     f"locs2_{cname[:20]}",
                     timeout=120,
                 )
@@ -694,7 +698,7 @@ async def run_gcc_enrichment(
 
             async def enrich_loc(loc_info):
                 async with loc_sem:
-                    return await _enrich_one_location(cname, loc_info, domain, loop)
+                    return await _enrich_one_location(cname, loc_info, domain, loop, run_id)
 
             loc_tasks = [enrich_loc(loc) for loc in locations[:10]]
             for coro in asyncio.as_completed(loc_tasks):
@@ -710,12 +714,12 @@ async def run_gcc_enrichment(
         async for event in process_company(company):
             yield event
 
-    yield {"type": "complete", "total_companies": total_cos}
+    yield {"type": "complete", "total_companies": total_cos, "usage": get_usage_by_run(run_id)}
 
 
 # ── TEXT GEMINI CALLER (returns raw text, not JSON) ──────────────────────────
 
-def _gemini_text_sync(prompt: str, label: str, max_output_tokens: int = 12288) -> str | None:
+def _gemini_text_sync(prompt: str, label: str, max_output_tokens: int = 12288, run_id: str = "") -> str | None:
     """Like _gemini_call_sync but returns raw text instead of parsed JSON."""
     try:
         from google import genai
@@ -752,7 +756,7 @@ def _gemini_text_sync(prompt: str, label: str, max_output_tokens: int = 12288) -
                 ),
             )
             from usage_logger import log_gemini_usage
-            log_gemini_usage("gcc_intelligence", label, response, grounded=True)
+            log_gemini_usage("gcc_intelligence", label, response, grounded=True, run_id=run_id)
             break
         except Exception as e:
             err = str(e)

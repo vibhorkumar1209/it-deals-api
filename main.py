@@ -236,6 +236,7 @@ class TechStackRequest(BaseModel):
 async def tech_stack(req: TechStackRequest):
     """SSE stream: technographic profile per company."""
     from tech_stack_pipeline import find_tech_stack, TECH_STACK_FIELDS
+    from usage_logger import new_run_id, get_usage_by_run
 
     async def _generate():
         def _sse(obj: dict) -> str:
@@ -245,6 +246,7 @@ async def tech_stack(req: TechStackRequest):
             yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set on server."})
             return
 
+        run_id = new_run_id()
         yield _sse({"type": "progress", "message": f"🚀 Scanning tech stack for {len(req.inputs)} companies…"})
 
         results: list[dict] = []
@@ -259,6 +261,7 @@ async def tech_stack(req: TechStackRequest):
                     linkedin_url=inp.linkedin_url,
                     focus_categories=inp.focus_categories,
                     focus_vendors=inp.focus_vendors,
+                    run_id=run_id,
                 ):
                     if event["type"] == "row_done":
                         results.append(event["row"])
@@ -270,7 +273,7 @@ async def tech_stack(req: TechStackRequest):
                 logger.error(f"Tech stack error for {inp.company_name}: {e}", exc_info=True)
                 yield _sse({"type": "heartbeat", "message": f"⚠️ Error for {inp.company_name}: {e}"})
 
-        yield _sse({"type": "complete", "results": results, "total": len(results)})
+        yield _sse({"type": "complete", "results": results, "total": len(results), "usage": get_usage_by_run(run_id)})
 
     return StreamingResponse(
         _generate(),
@@ -304,6 +307,7 @@ class EnrichTaskRequest(BaseModel):
 async def enrich_task(req: EnrichTaskRequest):
     """SSE stream: Gemini + Google Search Grounding → deal extraction."""
     from enrich_pipeline import enrich_company
+    from usage_logger import new_run_id, get_usage_by_run
 
     async def _generate():
         def _sse(obj: dict) -> str:
@@ -313,6 +317,7 @@ async def enrich_task(req: EnrichTaskRequest):
             yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set on server."})
             return
 
+        run_id = new_run_id()
         schema_fields = [f.model_dump() for f in req.schema_fields]
 
         yield _sse({"type": "progress", "message": f"🚀 Starting enrichment for {len(req.inputs)} companies…"})
@@ -335,6 +340,7 @@ async def enrich_task(req: EnrichTaskRequest):
                     linkedin_url=inp.linkedin_url,
                     focus_tech=inp.focus_tech or [],
                     focus_vendor=inp.focus_vendor or [],
+                    run_id=run_id,
                 ):
                     if event["type"] == "row_done":
                         deal_row = event["row"]
@@ -361,6 +367,7 @@ async def enrich_task(req: EnrichTaskRequest):
             "results": results,
             "total": len(results),
             "succeeded": sum(1 for r in results if r.get("_status") == "ok"),
+            "usage": get_usage_by_run(run_id),
         })
 
     return StreamingResponse(

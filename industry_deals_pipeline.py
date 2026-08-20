@@ -115,7 +115,7 @@ Return ONLY a raw JSON array. Include deals from 2018 onwards. Return [] if none
 
 # ── Gemini helper ─────────────────────────────────────────────────────────────
 
-def _gemini_sync(prompt: str, label: str = "") -> str:
+def _gemini_sync(prompt: str, label: str = "", run_id: str = "") -> str:
     try:
         from google import genai
         from google.genai import types
@@ -141,7 +141,7 @@ def _gemini_sync(prompt: str, label: str = "") -> str:
                 ),
             )
             from usage_logger import log_gemini_usage
-            log_gemini_usage("it_deals_by_industry", label, resp, grounded=True)
+            log_gemini_usage("it_deals_by_industry", label, resp, grounded=True, run_id=run_id)
             raw = ""
             for cand in (resp.candidates or []):
                 for part in (cand.content.parts or []):
@@ -313,6 +313,9 @@ async def search_industry_deals(
     renewal_timeframe: str,
     focus_tech: str = "",
 ) -> AsyncGenerator[dict, None]:
+    from usage_logger import new_run_id, get_usage_by_run
+    run_id = new_run_id()
+
     renewal_days = RENEWAL_WINDOW_DAYS.get(renewal_timeframe, 365)
     today = datetime.date.today()
     window_end = today + datetime.timedelta(days=renewal_days)
@@ -332,7 +335,7 @@ async def search_industry_deals(
             try:
                 text = await asyncio.wait_for(
                     asyncio.to_thread(_gemini_sync, _deals_prompt(cname, cdomain, industry, geography, focus_tech),
-                                      f"deals|{cname[:20]}"),
+                                      f"deals|{cname[:20]}", run_id),
                     timeout=CALL_TIMEOUT,
                 )
             except asyncio.TimeoutError:
@@ -393,4 +396,4 @@ async def search_industry_deals(
         }
         await asyncio.sleep(0)
 
-    yield {"type": "complete", "processed": processed, "total": total}
+    yield {"type": "complete", "processed": processed, "total": total, "usage": get_usage_by_run(run_id)}

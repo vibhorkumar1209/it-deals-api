@@ -439,7 +439,7 @@ Return ONLY a raw JSON array, no markdown:
 """
 
 
-def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
+def _gemini_tech_stack_sync(prompt: str, company_name: str, run_id: str = "") -> list[dict]:
     """Blocking Gemini call. Runs inside run_in_executor."""
     try:
         from google import genai
@@ -471,7 +471,7 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str) -> list[dict]:
                 ),
             )
             from usage_logger import log_gemini_usage
-            log_gemini_usage("tech_stack_finder", company_name, response, grounded=True)
+            log_gemini_usage("tech_stack_finder", company_name, response, grounded=True, run_id=run_id)
             break   # success
         except Exception as api_err:
             err_str = str(api_err)
@@ -624,6 +624,7 @@ async def find_tech_stack(
     linkedin_url: str = "",
     focus_categories: list[str] | None = None,
     focus_vendors: list[str] | None = None,
+    run_id: str = "",
 ) -> AsyncGenerator[dict, None]:
     """
     Yields heartbeat + row_done events for each detected tech tool.
@@ -674,7 +675,7 @@ async def find_tech_stack(
         # Wide scan: pass empty focus lists so prompt uses wide-spectrum slices
         prompt = _build_tech_stack_prompt(company_name, domain, linkedin_url, [], [], call_num)
         loop = asyncio.get_event_loop()
-        future = loop.run_in_executor(None, _gemini_tech_stack_sync, prompt, company_name)
+        future = loop.run_in_executor(None, _gemini_tech_stack_sync, prompt, company_name, run_id)
 
         elapsed = 0
         call_tools: list[dict] = []
@@ -722,7 +723,7 @@ async def find_tech_stack(
 
             prompt = _build_tech_stack_prompt(company_name, domain, linkedin_url, fc, fv, call_num)
             loop = asyncio.get_event_loop()
-            future = loop.run_in_executor(None, _gemini_tech_stack_sync, prompt, company_name)
+            future = loop.run_in_executor(None, _gemini_tech_stack_sync, prompt, company_name, run_id)
 
             elapsed = 0
             call_tools = []
@@ -766,7 +767,7 @@ async def find_tech_stack(
 
         fallback_prompt = _build_tech_stack_prompt(brand_name, domain, linkedin_url, [], [], 1)
         loop = asyncio.get_event_loop()
-        future = loop.run_in_executor(None, _gemini_tech_stack_sync, fallback_prompt, brand_name)
+        future = loop.run_in_executor(None, _gemini_tech_stack_sync, fallback_prompt, brand_name, run_id)
 
         elapsed = 0
         fallback_tools: list[dict] = []
