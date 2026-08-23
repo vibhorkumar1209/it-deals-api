@@ -124,6 +124,17 @@ async def reports_list(module: str = "", limit: int = 100):
     return {"reports": list_reports(module, limit)}
 
 
+@app.get("/api/reports/{run_id}")
+async def reports_get_one(run_id: str):
+    """Full report record, including result data — lets ANY client (not just
+    the browser that originally streamed it) open a report for full detail."""
+    from report_store import get_report
+    report = get_report(run_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
+
+
 @app.delete("/api/reports/{run_id}")
 async def reports_delete_one(run_id: str):
     from report_store import delete_report
@@ -299,7 +310,8 @@ async def tech_stack(req: TechStackRequest):
         ts_usage = get_usage_by_run(run_id)
         from report_store import save_report
         save_report(run_id, "tech_stack_finder", ", ".join(i.company_name for i in req.inputs),
-                    f"{len(results)} tools found", ts_usage)
+                    f"{len(results)} tools found", ts_usage,
+                    data={"companies": [i.company_name for i in req.inputs], "rows": results})
         yield _sse({"type": "complete", "results": results, "total": len(results), "usage": ts_usage, "run_id": run_id})
 
     return StreamingResponse(
@@ -393,7 +405,8 @@ async def enrich_task(req: EnrichTaskRequest):
         deal_usage = get_usage_by_run(run_id)
         from report_store import save_report
         save_report(run_id, "it_deal_finder", ", ".join(i.company_name for i in req.inputs),
-                    f"{succeeded}/{len(results)} deals found", deal_usage)
+                    f"{succeeded}/{len(results)} deals found", deal_usage,
+                    data={"companies": [i.company_name for i in req.inputs], "rows": results})
         yield _sse({
             "type": "complete",
             "results": results,
@@ -766,15 +779,20 @@ async def gcc_enrich(req: GCCEnrichRequest):
             yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set."})
             return
 
+        gcc_results = []
         try:
             async for event in run_gcc_enrichment(
                 companies=[c.model_dump() for c in req.companies],
             ):
-                if event.get("type") == "complete" and event.get("run_id"):
+                if event.get("type") == "gcc_location_result":
+                    gcc_results.append(event.get("result"))
+                elif event.get("type") == "complete" and event.get("run_id"):
                     from report_store import save_report
                     save_report(event["run_id"], "gcc_intelligence",
                                ", ".join(c.company_name for c in req.companies),
-                               f"{event.get('total_companies', 0)} companies enriched", event.get("usage"))
+                               f"{event.get('total_companies', 0)} companies enriched", event.get("usage"),
+                               data={"mode": "company", "query": ", ".join(c.company_name for c in req.companies),
+                                     "results": gcc_results, "deepProfiles": {}})
                 yield _sse(event)
         except Exception as e:
             logger.error(f"GCC Enrich error: {e}", exc_info=True)
@@ -895,7 +913,15 @@ async def aftermarket_dive(req: AftermarketRequest):
                 if event.get("type") == "complete" and event.get("run_id"):
                     from report_store import save_report
                     save_report(event["run_id"], "aftermarket_intelligence", req.company_name,
-                               f"{len(event.get('sections_ran', []))} section(s)", event.get("usage"))
+                               f"{len(event.get('sections_ran', []))} section(s)", event.get("usage"),
+                               data={"company": req.company_name, "domain": req.domain,
+                                     "summary": f"{len(event.get('capabilities', []))} capabilities · {len(event.get('aggregate_spend', []))} spend categories",
+                                     "capRows": event.get("capabilities", []),
+                                     "spendRows": event.get("spend_modules", []),
+                                     "aggRows": event.get("aggregate_spend", []),
+                                     "spendDealRows": event.get("spend_deals", []),
+                                     "readyRows": event.get("readiness", []),
+                                     "compRows": event.get("competitors", [])})
                 yield _sse(event)
         except Exception as e:
             logger.error(f"Aftermarket dive error: {e}", exc_info=True)
@@ -1013,6 +1039,7 @@ async def signal_intel(req: SignalIntelRequest):
             yield _sse({"type": "error", "message": "GOOGLE_AI_API_KEY not set."})
             return
 
+        all_signals = []
         try:
             companies = [{"name": c.name, "domain": c.domain} for c in req.target_companies]
             async for event in run_signal_intelligence(
@@ -1023,12 +1050,22 @@ async def signal_intel(req: SignalIntelRequest):
                 target_tech=req.target_tech,
                 lookback_days=req.lookback_days,
             ):
-                if event.get("type") == "complete" and event.get("run_id"):
+                if event.get("type") == "signal_row" and event.get("row"):
+                    all_signals.append(event["row"])
+                elif event.get("type") == "signals_ranked":
+                    company = event.get("company")
+                    all_signals = [r for r in all_signals if r.get("company") != company] + (event.get("rows") or [])
+                elif event.get("type") == "complete" and event.get("run_id"):
                     from report_store import save_report
                     save_report(event["run_id"], "signal_intelligence",
                                ", ".join(c.name for c in req.target_companies),
                                f"{event.get('total', 0)} signals · {event.get('companies_done', 0)} companies",
-                               event.get("usage"))
+                               event.get("usage"),
+                               data={"companies": ", ".join(c.name for c in req.target_companies),
+                                     "total": event.get("total", 0),
+                                     "userCompany": req.user_company,
+                                     "timeline": f"{req.lookback_days}d",
+                                     "rows": all_signals})
                 yield _sse(event)
         except Exception as e:
             logger.error(f"Signal Intel error: {e}", exc_info=True)
@@ -1106,6 +1143,8 @@ async def competitive_analyze(req: CompetitiveAnalyzeRequest):
 
         benchmark_focus_str = ", ".join(req.benchmark_focus) if isinstance(req.benchmark_focus, list) else req.benchmark_focus
 
+        comp_results = []
+        comp_synthesis = ""
         try:
             async for event in run_competitive_analysis(
                 target_company=req.target_company,
@@ -1116,10 +1155,19 @@ async def competitive_analyze(req: CompetitiveAnalyzeRequest):
                 industry_context=req.industry_context,
                 technology_context=req.technology_context,
             ):
-                if event.get("type") == "complete" and event.get("run_id"):
+                if event.get("type") == "company_result":
+                    comp_results.append({"company": event.get("company"), "domain": event.get("domain"),
+                                         "is_target": event.get("is_target"), "modules": event.get("modules") or []})
+                elif event.get("type") == "synthesis":
+                    comp_synthesis = event.get("text", "")
+                elif event.get("type") == "complete" and event.get("run_id"):
                     from report_store import save_report
                     save_report(event["run_id"], "compkill", req.target_company,
-                               f"{len(competitors)} competitors · {len(enabled)} modules", event.get("usage"))
+                               f"{len(competitors)} competitors · {len(enabled)} modules", event.get("usage"),
+                               data={"target": req.target_company, "competitors": [c["name"] for c in competitors],
+                                     "modules": enabled, "benchmarkFoci": req.benchmark_focus,
+                                     "industryContext": req.industry_context, "technologyContext": req.technology_context,
+                                     "results": comp_results, "synthesis": comp_synthesis})
                 yield _sse(event)
         except Exception as e:
             logger.error(f"Competitive analyze error: {e}", exc_info=True)
@@ -1208,15 +1256,26 @@ async def industry_deals_search(req: IndustryDealsSearchRequest):
     async def _generate():
         def _sse(obj: dict) -> str:
             return f"data: {json.dumps(obj)}\n\n"
+        renewal_deals = []
+        all_deals = []
         try:
             async for event in search_industry_deals(
                 req.companies, req.industry, req.geography,
                 req.renewal_timeframe, req.focus_tech,
             ):
-                if event.get("type") == "complete" and event.get("run_id"):
+                if event.get("type") == "deal" and event.get("deal"):
+                    deal = event["deal"]
+                    all_deals.append(deal)
+                    if deal.get("in_renewal_window"):
+                        renewal_deals.append(deal)
+                elif event.get("type") == "complete" and event.get("run_id"):
                     from report_store import save_report
                     save_report(event["run_id"], "it_deals_by_industry", f"{req.industry} · {req.geography}",
-                               f"{event.get('processed', 0)}/{event.get('total', 0)} companies searched", event.get("usage"))
+                               f"{event.get('processed', 0)}/{event.get('total', 0)} companies searched", event.get("usage"),
+                               data={"industry": req.industry, "geography": req.geography,
+                                     "renewal_timeframe": req.renewal_timeframe, "focus_tech": req.focus_tech,
+                                     "companies": [c.get("company_name") for c in req.companies],
+                                     "renewalDeals": renewal_deals, "allDeals": all_deals})
                 yield _sse(event)
         except Exception as e:
             logger.error(f"Industry deals search error: {e}", exc_info=True)

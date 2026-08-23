@@ -3,11 +3,11 @@ Server-side report ledger — records that a report was generated, by which
 module, and what it cost, regardless of which client triggered it (the app's
 own frontend, or a direct API call/curl/automation/another client).
 
-Deliberately lightweight: stores identifying metadata + usage, NOT the full
-row/result data, so it stays cheap no matter how large a report's results
-are. Full report content still lives in the frontend's localStorage for
-UI-triggered runs; this ledger's job is just to make EVERY report (including
-ones the browser never saw) show up in Report History with its real cost.
+Stores the FULL result data alongside metadata, so any report — including
+ones a browser never streamed itself — can be opened for full detail from
+`GET /api/reports/{run_id}`, not just listed with a cost figure.
+`list_reports()` deliberately excludes the data blob to keep the summary
+listing cheap; `get_report()` is the only call that pays for it.
 
 Shares the same SQLite file as usage_logger.py — same WAL/multi-worker
 rationale applies, and storage is ephemeral (Render's local disk doesn't
@@ -51,7 +51,8 @@ def _get_conn() -> sqlite3.Connection:
                 module TEXT NOT NULL,
                 target TEXT,
                 summary TEXT,
-                usage_json TEXT
+                usage_json TEXT,
+                data_json TEXT
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_reports_module ON reports(module)")
@@ -61,9 +62,12 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-def save_report(run_id: str, module: str, target: str, summary: str, usage: dict | None) -> None:
-    """Record one completed report. Never raises — a ledger write failure must
-    never break the response the caller is waiting on."""
+def save_report(run_id: str, module: str, target: str, summary: str,
+                 usage: dict | None, data: dict | None = None) -> None:
+    """Record one completed report, including its full result data so it can
+    later be opened for detail regardless of which client generated it.
+    Never raises — a ledger write failure must never break the response the
+    caller is waiting on."""
     if not run_id:
         return
     try:
@@ -71,9 +75,11 @@ def save_report(run_id: str, module: str, target: str, summary: str, usage: dict
         try:
             def _insert():
                 conn.execute(
-                    "INSERT OR REPLACE INTO reports (run_id, ts, module, target, summary, usage_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (run_id, time.time(), module, target or "", summary or "", json.dumps(usage or {})),
+                    "INSERT OR REPLACE INTO reports "
+                    "(run_id, ts, module, target, summary, usage_json, data_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (run_id, time.time(), module, target or "", summary or "",
+                     json.dumps(usage or {}), json.dumps(data if data is not None else {})),
                 )
                 conn.commit()
             _retrying(_insert)
@@ -84,6 +90,7 @@ def save_report(run_id: str, module: str, target: str, summary: str, usage: dict
 
 
 def list_reports(module: str = "", limit: int = 100) -> list[dict]:
+    """Summary listing only — no data_json, keeps this cheap for the History panel."""
     conn = _get_conn()
     try:
         if module:
@@ -110,6 +117,32 @@ def list_reports(module: str = "", limit: int = 100) -> list[dict]:
         out.append({"run_id": run_id, "ts": ts, "module": mod, "target": target,
                      "summary": summary, "usage": usage})
     return out
+
+
+def get_report(run_id: str) -> dict | None:
+    """Full record including result data — for opening an entry's detail view."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT run_id, ts, module, target, summary, usage_json, data_json "
+            "FROM reports WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    run_id, ts, mod, target, summary, usage_json, data_json = row
+    try:
+        usage = json.loads(usage_json) if usage_json else {}
+    except Exception:
+        usage = {}
+    try:
+        data = json.loads(data_json) if data_json else {}
+    except Exception:
+        data = {}
+    return {"run_id": run_id, "ts": ts, "module": mod, "target": target,
+            "summary": summary, "usage": usage, "data": data}
 
 
 def delete_report(run_id: str) -> None:
