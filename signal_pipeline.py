@@ -675,4 +675,5 @@ async def run_signal_intelligence(
         "total": total_signals,
         "companies_done": companies_done,
         "usage": get_usage_by_run(run_id),
+        "run_id": run_id,
     }

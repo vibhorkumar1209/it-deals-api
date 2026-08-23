@@ -396,4 +396,4 @@ async def search_industry_deals(
         }
         await asyncio.sleep(0)
 
-    yield {"type": "complete", "processed": processed, "total": total, "usage": get_usage_by_run(run_id)}
+    yield {"type": "complete", "processed": processed, "total": total, "usage": get_usage_by_run(run_id), "run_id": run_id}

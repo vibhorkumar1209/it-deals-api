@@ -679,4 +679,4 @@ async def run_competitive_analysis(
         synthesis_text = await _run_synthesis(target_company, competitor_names, benchmark_focus, all_results, industry_context, technology_context, run_id)
         yield {"type": "synthesis", "text": synthesis_text}
 
-    yield {"type": "complete", "total_companies": len(all_results), "usage": get_usage_by_run(run_id)}
+    yield {"type": "complete", "total_companies": len(all_results), "usage": get_usage_by_run(run_id), "run_id": run_id}

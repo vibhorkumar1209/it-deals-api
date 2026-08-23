@@ -714,7 +714,7 @@ async def run_gcc_enrichment(
         async for event in process_company(company):
             yield event
 
-    yield {"type": "complete", "total_companies": total_cos, "usage": get_usage_by_run(run_id)}
+    yield {"type": "complete", "total_companies": total_cos, "usage": get_usage_by_run(run_id), "run_id": run_id}
 
 
 # ── TEXT GEMINI CALLER (returns raw text, not JSON) ──────────────────────────

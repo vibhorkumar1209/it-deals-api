@@ -1509,4 +1509,5 @@ async def run_aftermarket_deep_dive(
         "vendor_footprint": [],  # removed as separate section
         "competitors": comp_rows if isinstance(comp_rows, list) else [],
         "usage": get_usage_by_run(run_id),
+        "run_id": run_id,
     }
