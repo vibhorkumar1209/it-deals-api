@@ -286,32 +286,39 @@ async def tech_stack(req: TechStackRequest):
         results: list[dict] = []
         row_index = 0
 
-        for i, inp in enumerate(req.inputs):
-            yield _sse({"type": "heartbeat", "message": f"🔍 Company {i+1}/{len(req.inputs)}: {inp.company_name}"})
-            try:
-                async for event in find_tech_stack(
-                    company_name=inp.company_name,
-                    domain=inp.domain,
-                    linkedin_url=inp.linkedin_url,
-                    focus_categories=inp.focus_categories,
-                    focus_vendors=inp.focus_vendors,
-                    run_id=run_id,
-                ):
-                    if event["type"] == "row_done":
-                        results.append(event["row"])
-                        yield _sse({"type": "row", "row": event["row"], "index": row_index})
-                        row_index += 1
-                    else:
-                        yield _sse(event)
-            except Exception as e:
-                logger.error(f"Tech stack error for {inp.company_name}: {e}", exc_info=True)
-                yield _sse({"type": "heartbeat", "message": f"⚠️ Error for {inp.company_name}: {e}"})
-
-        ts_usage = get_usage_by_run(run_id)
-        from report_store import save_report
-        save_report(run_id, "tech_stack_finder", ", ".join(i.company_name for i in req.inputs),
-                    f"{len(results)} tools found", ts_usage,
-                    data={"companies": [i.company_name for i in req.inputs], "rows": results})
+        # Saving is done in `finally` (not after the loop) so a report is still
+        # recorded with whatever partial results exist if the caller disconnects
+        # mid-scan — e.g. a direct API/curl/automation call whose timeout is
+        # shorter than the full multi-company scan. Without this, the client's
+        # early disconnect raises GeneratorExit inside the loop above and the
+        # code after it never runs, silently dropping the report entirely.
+        try:
+            for i, inp in enumerate(req.inputs):
+                yield _sse({"type": "heartbeat", "message": f"🔍 Company {i+1}/{len(req.inputs)}: {inp.company_name}"})
+                try:
+                    async for event in find_tech_stack(
+                        company_name=inp.company_name,
+                        domain=inp.domain,
+                        linkedin_url=inp.linkedin_url,
+                        focus_categories=inp.focus_categories,
+                        focus_vendors=inp.focus_vendors,
+                        run_id=run_id,
+                    ):
+                        if event["type"] == "row_done":
+                            results.append(event["row"])
+                            yield _sse({"type": "row", "row": event["row"], "index": row_index})
+                            row_index += 1
+                        else:
+                            yield _sse(event)
+                except Exception as e:
+                    logger.error(f"Tech stack error for {inp.company_name}: {e}", exc_info=True)
+                    yield _sse({"type": "heartbeat", "message": f"⚠️ Error for {inp.company_name}: {e}"})
+        finally:
+            ts_usage = get_usage_by_run(run_id)
+            from report_store import save_report
+            save_report(run_id, "tech_stack_finder", ", ".join(i.company_name for i in req.inputs),
+                        f"{len(results)} tools found", ts_usage,
+                        data={"companies": [i.company_name for i in req.inputs], "rows": results})
         yield _sse({"type": "complete", "results": results, "total": len(results), "usage": ts_usage, "run_id": run_id})
 
     return StreamingResponse(
@@ -365,48 +372,55 @@ async def enrich_task(req: EnrichTaskRequest):
 
         deal_index = 0  # global row counter across all companies
 
-        for i, inp in enumerate(req.inputs):
-            yield _sse({"type": "heartbeat", "message": f"🔍 Company {i+1}/{len(req.inputs)}: {inp.company_name}"})
+        # Saving is done in `finally` (not after the loop) so a report is still
+        # recorded with whatever partial results exist if the caller disconnects
+        # mid-scan — e.g. a direct API/curl/automation call whose timeout is
+        # shorter than the full multi-company scan. Without this, the client's
+        # early disconnect raises GeneratorExit inside the loop above and the
+        # code after it never runs, silently dropping the report entirely.
+        try:
+            for i, inp in enumerate(req.inputs):
+                yield _sse({"type": "heartbeat", "message": f"🔍 Company {i+1}/{len(req.inputs)}: {inp.company_name}"})
 
-            company_deals: list[dict] = []
+                company_deals: list[dict] = []
 
-            try:
-                async for event in enrich_company(
-                    company_name=inp.company_name,
-                    domain=inp.domain,
-                    goal=req.goal,
-                    schema_fields=schema_fields,
-                    linkedin_url=inp.linkedin_url,
-                    focus_tech=inp.focus_tech or [],
-                    focus_vendor=inp.focus_vendor or [],
-                    run_id=run_id,
-                ):
-                    if event["type"] == "row_done":
-                        deal_row = event["row"]
-                        company_deals.append(deal_row)
-                        results.append(deal_row)
-                        yield _sse({"type": "row", "row": deal_row, "index": deal_index, "total": None})
-                        deal_index += 1
-                    else:
-                        yield _sse(event)
-            except Exception as e:
-                logger.error(f"Enrich pipeline error for {inp.company_name}: {e}", exc_info=True)
-                # emit a no_result row so frontend doesn't hang
-                fallback = {"company_name": inp.company_name, "domain": inp.domain, "_status": "error"}
-                for f in req.schema_fields:
-                    fallback[f.key] = ""
-                results.append(fallback)
-                yield _sse({"type": "row", "row": fallback, "index": deal_index, "total": None})
-                deal_index += 1
+                try:
+                    async for event in enrich_company(
+                        company_name=inp.company_name,
+                        domain=inp.domain,
+                        goal=req.goal,
+                        schema_fields=schema_fields,
+                        linkedin_url=inp.linkedin_url,
+                        focus_tech=inp.focus_tech or [],
+                        focus_vendor=inp.focus_vendor or [],
+                        run_id=run_id,
+                    ):
+                        if event["type"] == "row_done":
+                            deal_row = event["row"]
+                            company_deals.append(deal_row)
+                            results.append(deal_row)
+                            yield _sse({"type": "row", "row": deal_row, "index": deal_index, "total": None})
+                            deal_index += 1
+                        else:
+                            yield _sse(event)
+                except Exception as e:
+                    logger.error(f"Enrich pipeline error for {inp.company_name}: {e}", exc_info=True)
+                    # emit a no_result row so frontend doesn't hang
+                    fallback = {"company_name": inp.company_name, "domain": inp.domain, "_status": "error"}
+                    for f in req.schema_fields:
+                        fallback[f.key] = ""
+                    results.append(fallback)
+                    yield _sse({"type": "row", "row": fallback, "index": deal_index, "total": None})
+                    deal_index += 1
 
-            yield _sse({"type": "heartbeat", "message": f"✅ {inp.company_name}: {len(company_deals)} deals found"})
-
-        succeeded = sum(1 for r in results if r.get("_status") == "ok")
-        deal_usage = get_usage_by_run(run_id)
-        from report_store import save_report
-        save_report(run_id, "it_deal_finder", ", ".join(i.company_name for i in req.inputs),
-                    f"{succeeded}/{len(results)} deals found", deal_usage,
-                    data={"companies": [i.company_name for i in req.inputs], "rows": results})
+                yield _sse({"type": "heartbeat", "message": f"✅ {inp.company_name}: {len(company_deals)} deals found"})
+        finally:
+            succeeded = sum(1 for r in results if r.get("_status") == "ok")
+            deal_usage = get_usage_by_run(run_id)
+            from report_store import save_report
+            save_report(run_id, "it_deal_finder", ", ".join(i.company_name for i in req.inputs),
+                        f"{succeeded}/{len(results)} deals found", deal_usage,
+                        data={"companies": [i.company_name for i in req.inputs], "rows": results})
         yield _sse({
             "type": "complete",
             "results": results,
