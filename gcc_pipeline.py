@@ -160,13 +160,27 @@ async def _collect(loop, fn_args: tuple, label: str, timeout: int = 200):
 # Shared restriction block — applied to every location-discovery prompt so that
 # GCC Intelligence output is strictly scoped to delivery/execution centers, never
 # generic corporate footprint (HQ, sales offices, regional admin branches).
-_GCC_SCOPE_RULES = """QUALIFYING FACILITY DEFINITION — a location only qualifies if it is one of:
+def _gcc_scope_rules(company_name: str = "the company") -> str:
+    return f"""QUALIFYING FACILITY DEFINITION — a location only qualifies if it is one of:
 - A dedicated technology hub (engineering/development/innovation center)
 - A shared services center (GBS/SSC handling finance, HR, procurement, IT ops at scale)
 - An R&D facility (product/platform engineering, not a lab-only or manufacturing plant)
 - An offshore/nearshore delivery office (captive GCC, BOT, or GCC-as-a-Service center)
 
+A GCC is an insourced, wholly-owned captive unit of a foreign-headquartered company, established
+in a DIFFERENT country than its headquarters to leverage local talent for technology, R&D, or
+global business services.
+
+HOME-COUNTRY RULE (CRITICAL — apply before anything else):
+A company CANNOT have a GCC in its own home country. First identify the country where {company_name}
+is headquartered (its primary registered/listed HQ). Any office, campus, or center this company
+operates INSIDE that same home country is a domestic corporate office — NOT a GCC — regardless of
+its size, technology focus, or shared-services function. Exclude it entirely. Example: an
+India-headquartered company (e.g. HDFC Bank, Infosys) operating in India is a domestic corporate
+office, not a GCC — even if that office does engineering or shared-services work.
+
 STRICT EXCLUSIONS — do NOT include, even if easily found in search results:
+- Any office located in {company_name}'s own headquarters country (see HOME-COUNTRY RULE above)
 - Corporate headquarters or the company's primary registered/listed HQ address
 - Standard sales offices, account management offices, or client-facing commercial offices
 - Regional administrative branches (HR/legal/finance admin only, no delivery function)
@@ -176,17 +190,28 @@ STRICT EXCLUSIONS — do NOT include, even if easily found in search results:
   is ambiguous or unconfirmed, EXCLUDE it rather than guess. Precision over recall."""
 
 
+# Backward-compat constant (generic phrasing, no company name) — prefer _gcc_scope_rules(company_name).
+_GCC_SCOPE_RULES = _gcc_scope_rules()
+
+
 def _location_discovery_prompt(company_name: str, domain: str, location_filter: str) -> str:
     loc_clause = f"LOCATION FILTER: Only include locations in or near: {location_filter}" if location_filter else \
                  "SCOPE: Return ALL worldwide locations — cover every continent equally. Do NOT bias toward any single region."
     domain_hint = f" (official website: {domain})" if domain else ""
+    verify_clause = (
+        f"\nVERIFICATION TARGET: The caller asked specifically about \"{location_filter}\". Before searching for "
+        f"centers, first verify whether {location_filter} is (or is inside) {company_name}'s own headquarters "
+        f"country. If it is, this is a HOME-COUNTRY RULE disqualification — set \"disqualified\": true, explain "
+        f"why in \"disqualified_reason\", and return an EMPTY \"locations\" array. Do not list domestic offices "
+        f"as GCCs just because they were asked about."
+    ) if location_filter else ""
     return f"""Conduct a targeted search focusing EXCLUSIVELY on {company_name}'s Global Capability
 Centers (GCC) or Global Delivery Centers (GDC) worldwide.{domain_hint} Filter out all commercial
 real estate, corporate headquarters, local sales branches, and retail locations.
 
-{_GCC_SCOPE_RULES}
+{_gcc_scope_rules(company_name)}
 
-{loc_clause}
+{loc_clause}{verify_clause}
 
 CRITICAL INSTRUCTION: You MUST run ALL searches below before answering. Return results for ALL regions found — do not limit to any single country or continent.
 
@@ -204,7 +229,11 @@ Run EVERY one of these 12 searches:
 11. "{company_name}" technology strategy global GCC footprint locations 2024 2025
 12. "{company_name}" careers "global capability center" OR "technology hub" OR "shared services" site — jobs pages that name a specific delivery center, not general office listings
 
+Also run this search FIRST, before the rest, to establish the HQ country used by the HOME-COUNTRY RULE:
+0. "{company_name}" headquarters OR "headquartered in" OR "corporate office" official HQ country
+
 RULES:
+- Apply the HOME-COUNTRY RULE above before including anything — never list a location inside {company_name}'s own HQ country
 - Include EVERY city where {company_name} has a confirmed GCC/GDC-qualifying center, regardless of size
 - Report what the searches actually find — do not assume India if searches show other regions
 - If a company has multiple qualifying centers in the same country, list each city separately
@@ -212,32 +241,43 @@ RULES:
 - Before including any location, verify against the QUALIFYING FACILITY DEFINITION above —
   when in doubt, exclude rather than include
 
-Return a JSON array. Each element must have exactly these fields:
-[
-  {{
-    "gcc_name": "<official center name, e.g. 'Walmart Global Tech, Bengaluru'>",
-    "gcc_location": "<City, Country>",
-    "city": "<city only>",
-    "country": "<country only>",
-    "headcount": "<number or range e.g. '13,000' or '2,000–3,000' or 'Unknown'>",
-    "established_year": "<4-digit year or 'Unknown'>",
-    "operating_model": "<Pure Captive | BOT | GCC-as-a-Service | Unknown>",
-    "primary_focus": "<Engineering & R&D | Shared Services | Digital Transformation | AI/ML & Data | Customer Experience | Mixed>",
-    "source": "<URL of press release, LinkedIn, annual report, or news article>"
-  }}
-]
-Return ONLY the raw JSON array. No explanation. No markdown. No prose before or after."""
+Return a single JSON OBJECT with exactly these top-level fields:
+{{
+  "hq_country": "<country {company_name} is headquartered in, as found by search 0>",
+  "disqualified": <true only if the caller's location filter is inside hq_country — see VERIFICATION TARGET above; otherwise false>,
+  "disqualified_reason": "<1-2 sentence reason if disqualified, else empty string>",
+  "locations": [
+    {{
+      "gcc_name": "<official center name, e.g. 'Walmart Global Tech, Bengaluru'>",
+      "gcc_location": "<City, Country>",
+      "city": "<city only>",
+      "country": "<country only>",
+      "headcount": "<number or range e.g. '13,000' or '2,000–3,000' or 'Unknown'>",
+      "established_year": "<4-digit year or 'Unknown'>",
+      "operating_model": "<Pure Captive | BOT | GCC-as-a-Service | Unknown>",
+      "primary_focus": "<Engineering & R&D | Shared Services | Digital Transformation | AI/ML & Data | Customer Experience | Mixed>",
+      "source": "<URL of press release, LinkedIn, annual report, or news article>"
+    }}
+  ]
+}}
+Return ONLY the raw JSON object. No explanation. No markdown. No prose before or after."""
 
 
-def _location_discovery_prompt_simple(company_name: str) -> str:
+def _location_discovery_prompt_simple(company_name: str, location_filter: str = "") -> str:
     """Simpler fallback discovery prompt — used on retry when full prompt fails to parse."""
+    verify_clause = (
+        f"\nVERIFICATION TARGET: The caller asked specifically about \"{location_filter}\". If that is (or is "
+        f"inside) {company_name}'s own headquarters country, this is a HOME-COUNTRY RULE disqualification — "
+        f"set \"disqualified\": true and return an EMPTY \"locations\" array."
+    ) if location_filter else ""
     return f"""Search EXCLUSIVELY for {company_name}'s Global Capability Center (GCC) and Global
 Delivery Center (GDC) locations worldwide — technology hubs, shared services centers, R&D
 facilities, and offshore/nearshore delivery offices only.
 
-{_GCC_SCOPE_RULES}
+{_gcc_scope_rules(company_name)}{verify_clause}
 
 Run ALL of these searches — do not skip any:
+0. "{company_name}" headquarters OR "headquartered in" official HQ country
 1. "{company_name}" "global capability center" OR "technology center" OR "tech hub" locations worldwide list
 2. "{company_name}" GCC OR "shared services" offices global locations employees 2024 site:linkedin.com
 3. "{company_name}" GCC OR captive OR offshore OR nearshore technology hub locations all countries
@@ -246,11 +286,12 @@ Run ALL of these searches — do not skip any:
 6. "{company_name}" careers "global capability center" OR "technology hub" site — jobs pages that name a specific delivery center
 
 IMPORTANT: Return ALL regions found — do not assume or default to any single country. Exclude
-corporate HQ, sales offices, and any location that isn't a confirmed GCC/GDC-qualifying facility.
+corporate HQ, sales offices, and any location inside {company_name}'s own headquarters country
+(HOME-COUNTRY RULE), and any location that isn't a confirmed GCC/GDC-qualifying facility.
 
-Return a JSON array — one entry per city:
-[{{"gcc_name": "<name>", "gcc_location": "<City, Country>", "city": "<city>", "country": "<country>", "headcount": "<number or Unknown>", "established_year": "<year or Unknown>", "operating_model": "Unknown", "primary_focus": "Mixed", "source": "<URL>"}}]
-Return ONLY the JSON array. No text outside the array."""
+Return a single JSON OBJECT:
+{{"hq_country": "<country {company_name} is headquartered in>", "disqualified": <true/false>, "disqualified_reason": "<reason or empty string>", "locations": [{{"gcc_name": "<name>", "gcc_location": "<City, Country>", "city": "<city>", "country": "<country>", "headcount": "<number or Unknown>", "established_year": "<year or Unknown>", "operating_model": "Unknown", "primary_focus": "Mixed", "source": "<URL>"}}]}}
+Return ONLY the JSON object. No text outside it."""
 
 
 # ── PER-LOCATION ENRICHMENT PROMPTS ──────────────────────────────────────────
@@ -310,6 +351,13 @@ IMPORTANT: If {city}-specific results are sparse, broaden to {country}-wide and 
 
 Count as a project/initiative: headcount expansions, facility openings, technology programs, vendor partnerships, digital/AI/cloud initiatives, CoE launches, R&D programs, automation rollouts.
 
+EXPANSION SIGNALS: separately flag any item from the LAST 12–24 MONTHS that specifically signals this
+center is growing — a new office space lease, a major executive hire, a global charter/workstream
+being transitioned to this location, a tech-stack migration announcement, or a press release
+indicating workforce scaling plans. Set "is_expansion_signal": true for these and pick the closest
+"signal_type"; leave both false/"-" for older or non-growth items (e.g. a completed project with no
+forward signal).
+
 Return a JSON array — one object per distinct project, initiative, or announcement:
 [
   {{
@@ -321,6 +369,8 @@ Return a JSON array — one object per distinct project, initiative, or announce
     "partner_vendor": "<partner/vendor if mentioned or '-'>",
     "timeline": "<year or date range>",
     "hiring_signal": "<new roles being added e.g. '2,000 engineers by 2025' or '-'>",
+    "is_expansion_signal": <true if this is a growth signal from the last 12-24 months, else false>,
+    "signal_type": "<Office Lease | Executive Hire | Charter Transition | Tech Migration | Workforce Scaling | '-'>",
     "source": "<URL of press release, news article, or LinkedIn post>"
   }}
 ]
@@ -407,9 +457,9 @@ Return ONLY the JSON object."""
 def _techstack_prompt(company_name: str, gcc_location: str, gcc_name: str = "") -> str:
     city = gcc_location.split(",")[0].strip()
     country = gcc_location.split(",")[-1].strip() if "," in gcc_location else gcc_location.strip()
-    return f"""What is the technology stack and digital maturity of {company_name}'s center in {gcc_location}?
+    return f"""What is the technology stack, digital maturity, and local partner/talent ecosystem of {company_name}'s center in {gcc_location}?
 
-Cover: cloud providers and migration status, automation and RPA/hyper-automation, DevOps/DevSecOps maturity, key technology vendors, programming languages and frameworks in active use, and estimated modern-cloud vs legacy split.
+Cover: cloud providers and migration status, automation and RPA/hyper-automation, DevOps/DevSecOps maturity, key technology vendors, programming languages and frameworks in active use, estimated modern-cloud vs legacy split, consulting/system-integration partners active at this center, staffing/RPO partners used for local hiring, and the dominant technical and functional skill sets mapped to local teams.
 
 Run ALL of these searches — do not skip any:
 1. site:linkedin.com/jobs "{company_name}" "{city}" software engineer OR developer OR architect — extract required tech skills from job descriptions
@@ -424,8 +474,11 @@ Run ALL of these searches — do not skip any:
 10. "{company_name}" global SAP OR Salesforce OR ServiceNow OR Oracle OR Microsoft OR Workday — enterprise vendors
 11. "{company_name}" "{city}" OR "{country}" AI OR "machine learning" OR LLM OR "generative AI" technology platform 2024 OR 2025
 12. "{company_name}" technology strategy 2024 2025 — global tech investments relevant to {gcc_location}
+13. "{company_name}" "{city}" OR "{country}" Accenture OR TCS OR Infosys OR Wipro OR Cognizant OR EY OR Deloitte OR "system integrator" partner OR vendor
+14. "{company_name}" "{city}" OR "{country}" recruitment agency OR RPO OR "staffing partner" OR "talent partner" hiring
+15. site:linkedin.com/jobs "{company_name}" "{city}" — scan job titles/descriptions across postings to map dominant tech skills AND non-tech domain/functional skills (e.g. procurement, actuarial, supply chain, product management)
 
-NOTE: Job postings on LinkedIn/Indeed/Glassdoor are the BEST signal for tech stack — search those first. Also use company engineering blogs and GitHub.
+NOTE: Job postings on LinkedIn/Indeed/Glassdoor are the BEST signal for tech stack and skills — search those first. Also use company engineering blogs, GitHub, and press releases naming SI/consulting/staffing partners.
 
 Extract from job postings: required programming languages, preferred tools, frameworks, cloud platforms, and certifications mentioned.
 
@@ -440,6 +493,10 @@ Return a JSON object:
   "frameworks_tools": "<e.g. Spring Boot, React, Node.js, Kubernetes, Kafka, Spark>",
   "ai_ml_platforms": "<AI/ML stack: TensorFlow, PyTorch, Azure ML, SageMaker, LangChain, or '-'>",
   "enterprise_vendors": "<SAP, Salesforce, Oracle, ServiceNow, Microsoft, Workday etc.>",
+  "consulting_partners": "<GSI/consulting/system-integration partners active at this center e.g. Accenture, TCS, EY, or '-'>",
+  "staffing_partners": "<recruitment agencies, RPO vendors, or staffing/talent partners used for local hiring, or '-'>",
+  "high_demand_tech_skills": "<specific technical skills mapped to local teams from job postings e.g. PyTorch, Azure DevOps, Data Engineering, SAP Architecture, or '-'>",
+  "domain_functional_skills": "<non-tech domain/functional skills mapped to local teams e.g. Global Procurement, Product Management, Actuarial Science, Supply Chain Analytics, or '-'>",
   "modern_vs_legacy_split": "<estimate e.g. '70% modern cloud / 30% legacy' — based on job posting evidence>",
   "digital_maturity_level": "<Foundational | Developing | Advanced | Leading>",
   "tech_highlights": "<2-3 sentence summary citing specific tools and sources found>",
@@ -521,7 +578,7 @@ def _fallback_capabilities(company_name: str, gcc_location: str) -> list:
     return [{"capability_area": "Engineering & R&D", "description": f"{company_name} GCC in {gcc_location} — data unavailable, search did not return results.", "team_size_estimate": "Unknown", "key_functions": "Requires manual verification"}]
 
 def _fallback_projects(company_name: str, gcc_location: str) -> list:
-    return [{"project_name": "No public projects found", "category": "Other", "description": f"No announced projects found for {company_name} GCC in {gcc_location} at this time.", "status": "Unknown", "investment_value": "Unknown", "partner_vendor": "-", "timeline": "-", "hiring_signal": "-", "source": "-"}]
+    return [{"project_name": "No public projects found", "category": "Other", "description": f"No announced projects found for {company_name} GCC in {gcc_location} at this time.", "status": "Unknown", "investment_value": "Unknown", "partner_vendor": "-", "timeline": "-", "hiring_signal": "-", "is_expansion_signal": False, "signal_type": "-", "source": "-"}]
 
 def _fallback_talent(company_name: str, gcc_location: str) -> list:
     return [{"type": "Talent Insight", "name": "-", "title": "GCC Leadership", "seniority": "N/A", "function": "Technology", "linkedin_url": "-", "reporting_to": "-", "contact_hint": "-", "insight": f"No publicly listed leaders found for {company_name} GCC in {gcc_location}. Check LinkedIn directly."}]
@@ -530,7 +587,7 @@ def _fallback_financials(company_name: str, gcc_location: str) -> dict:
     return {"parent_global_revenue": "Not found — check investor relations", "gcc_operational_budget": "Estimated based on headcount benchmarks", "gcc_cost_to_parent": "Unknown", "cost_arbitrage_estimate": "60–70% vs onshore (industry average)", "ip_patents_at_location": "Unknown", "proprietary_platforms": "-", "r_and_d_investment": "Unknown", "financial_notes": f"No disclosed financials found for {company_name} GCC in {gcc_location}.", "source": "-"}
 
 def _fallback_techstack(company_name: str, gcc_location: str) -> dict:
-    return {"cloud_providers": "Unknown — check job postings", "cloud_maturity_score": 0, "cloud_migration_maturity": "Unknown", "automation_index": "Unknown", "devops_tools": "-", "programming_languages": "-", "frameworks_tools": "-", "ai_ml_platforms": "-", "enterprise_vendors": "-", "modern_vs_legacy_split": "Unknown", "digital_maturity_level": "Unknown", "tech_highlights": f"No tech stack data found for {company_name} GCC in {gcc_location}. No public job postings or tech blog entries available.", "source": "-"}
+    return {"cloud_providers": "Unknown — check job postings", "cloud_maturity_score": 0, "cloud_migration_maturity": "Unknown", "automation_index": "Unknown", "devops_tools": "-", "programming_languages": "-", "frameworks_tools": "-", "ai_ml_platforms": "-", "enterprise_vendors": "-", "consulting_partners": "-", "staffing_partners": "-", "high_demand_tech_skills": "-", "domain_functional_skills": "-", "modern_vs_legacy_split": "Unknown", "digital_maturity_level": "Unknown", "tech_highlights": f"No tech stack data found for {company_name} GCC in {gcc_location}. No public job postings or tech blog entries available.", "source": "-"}
 
 
 async def _enrich_one_location(
@@ -605,6 +662,7 @@ async def _enrich_one_location(
         "headcount":        location_info.get("headcount", "Unknown"),
         "operating_model":  location_info.get("operating_model", "Unknown"),
         "primary_focus":    location_info.get("primary_focus", "-"),
+        "verified":         location_info.get("verified", True),
         "capabilities":     caps_v,
         "projects":         projs_v,
         "talent":           tal_v,
@@ -643,32 +701,55 @@ async def run_gcc_enrichment(
             domain = company.get("domain", "")
             loc_filter = company.get("gcc_location") or company.get("location") or ""
 
-            yield {"type": "heartbeat", "message": f"🔍 Finding GCC locations for {cname}…"}
+            yield {"type": "heartbeat", "message": f"🔍 Verifying GCC presence for {cname}…"}
             await asyncio.sleep(0)
 
-            # Step 1: discover locations for this company — full prompt first
+            def _parse_discovery_result(result) -> tuple[list, bool, str]:
+                """Normalize a discovery-prompt result (new dict shape, or legacy bare
+                array) into (locations, disqualified, reason)."""
+                if isinstance(result, dict):
+                    locs = result.get("locations")
+                    locs = locs if isinstance(locs, list) else []
+                    return locs, bool(result.get("disqualified")), result.get("disqualified_reason") or ""
+                if isinstance(result, list):
+                    return result, False, ""
+                return [], False, ""
+
+            # Step 1: verify + discover locations for this company — full prompt first
             loc_result = await _collect(
                 loop,
                 (_location_discovery_prompt(cname, domain, loc_filter), f"locs_{cname[:20]}", 8192, run_id),
                 f"locs_{cname[:20]}",
                 timeout=160,
             )
-            locations = loc_result if isinstance(loc_result, list) and len(loc_result) > 0 else []
+            locations, disqualified, disqualified_reason = _parse_discovery_result(loc_result)
 
-            # Retry with simpler prompt if first attempt failed or returned empty
-            if not locations:
+            # Retry with simpler prompt if first attempt failed or returned empty — but never
+            # retry past a positive HOME-COUNTRY RULE disqualification, that's a confirmed answer.
+            if not locations and not disqualified:
                 yield {"type": "heartbeat", "message": f"🔄 {cname}: retrying location discovery with simplified prompt…"}
                 await asyncio.sleep(0)
                 loc_result2 = await _collect(
                     loop,
-                    (_location_discovery_prompt_simple(cname), f"locs2_{cname[:20]}", 4096, run_id),
+                    (_location_discovery_prompt_simple(cname, loc_filter), f"locs2_{cname[:20]}", 4096, run_id),
                     f"locs2_{cname[:20]}",
                     timeout=120,
                 )
-                locations = loc_result2 if isinstance(loc_result2, list) and len(loc_result2) > 0 else []
+                locations, disqualified, disqualified_reason = _parse_discovery_result(loc_result2)
+
+            if disqualified:
+                # Verified negative — e.g. the requested location is the company's own home
+                # country. Do NOT fabricate fallback locations for a company we've confirmed
+                # has no GCC here; report it and move on.
+                reason = disqualified_reason or f"{cname} is headquartered in the country/region requested, so this is a domestic office, not a GCC."
+                yield {"type": "heartbeat", "message": f"🚫 {cname}: no GCC present — {reason}"}
+                yield {"type": "gcc_verification", "company_name": cname, "status": "no_gcc", "reasoning": reason}
+                return
 
             if not locations:
-                # Last resort: synthesize entries for the most common worldwide GCC hubs
+                # Genuinely no confirmed centers found (not a home-country disqualification) —
+                # last resort: synthesize entries for the most common worldwide GCC hubs, clearly
+                # flagged as unverified so the UI/user knows these are guesses, not confirmed data.
                 if loc_filter:
                     fallback_locs = [loc_filter]
                 else:
@@ -682,14 +763,17 @@ async def run_gcc_enrichment(
                     {"gcc_name": f"{cname} GCC", "gcc_location": fl, "city": fl.split(",")[0].strip(),
                      "country": fl.split(",")[-1].strip() if "," in fl else fl,
                      "established_year": "Unknown", "headcount": "Unknown",
-                     "operating_model": "Unknown", "primary_focus": "-"}
+                     "operating_model": "Unknown", "primary_focus": "-", "verified": False}
                     for fl in fallback_locs
                 ]
-                yield {"type": "heartbeat", "message": f"⚠️ {cname}: location search returned no results — enriching {len(locations)} probable hub{'s' if len(locations)>1 else ''}"}
+                yield {"type": "heartbeat", "message": f"⚠️ {cname}: location search returned no results — enriching {len(locations)} probable hub{'s' if len(locations)>1 else ''} (unverified)"}
             else:
+                for loc in locations:
+                    if isinstance(loc, dict):
+                        loc.setdefault("verified", True)
                 loc_names = ", ".join(l.get("gcc_location", "") for l in locations[:6])
                 extra = f" (+{len(locations)-6} more)" if len(locations) > 6 else ""
-                yield {"type": "heartbeat", "message": f"📍 {cname}: {len(locations)} location{'s' if len(locations) > 1 else ''} found — {loc_names}{extra}"}
+                yield {"type": "heartbeat", "message": f"📍 {cname}: {len(locations)} verified location{'s' if len(locations) > 1 else ''} found — {loc_names}{extra}"}
 
             await asyncio.sleep(0)
 
