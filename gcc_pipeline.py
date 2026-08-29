@@ -155,6 +155,33 @@ async def _collect(loop, fn_args: tuple, label: str, timeout: int = 200):
         return None
 
 
+async def _collect_with_heartbeats(loop, fn_args: tuple, label: str, timeout: int, ping_message_fn, ping_interval: int = 20):
+    """Like _collect, but a single slow Gemini call (this one can legitimately take
+    2-3+ minutes with retries) used to leave the SSE stream completely silent until
+    it finished — which read as a hang to anyone watching. Yields periodic heartbeat
+    dicts while waiting, then yields {"type": "_result", "value": <result-or-None>}
+    as its final item once the call finishes or the timeout is hit."""
+    fut = loop.run_in_executor(None, _gemini_call_sync, *fn_args)
+    start = _time.time()
+    while True:
+        remaining = timeout - (_time.time() - start)
+        if remaining <= 0:
+            logger.warning(f"[{label}] timed out after {timeout}s")
+            yield {"type": "_result", "value": None}
+            return
+        try:
+            result = await asyncio.wait_for(asyncio.shield(fut), timeout=min(ping_interval, remaining))
+            yield {"type": "_result", "value": result}
+            return
+        except asyncio.TimeoutError:
+            elapsed = int(_time.time() - start)
+            yield {"type": "heartbeat", "message": ping_message_fn(elapsed)}
+        except Exception as e:
+            logger.error(f"[{label}] collect error: {e}")
+            yield {"type": "_result", "value": None}
+            return
+
+
 # ── LOCATION DISCOVERY (per company) ─────────────────────────────────────────
 
 # Shared restriction block — applied to every location-discovery prompt so that
@@ -715,13 +742,21 @@ async def run_gcc_enrichment(
                     return result, False, ""
                 return [], False, ""
 
-            # Step 1: verify + discover locations for this company — full prompt first
-            loc_result = await _collect(
+            # Step 1: verify + discover locations for this company — full prompt first.
+            # This single call can legitimately take minutes (12 embedded searches +
+            # retries) — surface periodic progress so the stream never looks frozen.
+            loc_result = None
+            async for ev in _collect_with_heartbeats(
                 loop,
                 (_location_discovery_prompt(cname, domain, loc_filter), f"locs_{cname[:20]}", 8192, run_id),
                 f"locs_{cname[:20]}",
                 timeout=160,
-            )
+                ping_message_fn=lambda e, c=cname: f"⏳ {c}: still searching for GCC locations… ({e}s)",
+            ):
+                if ev["type"] == "_result":
+                    loc_result = ev["value"]
+                else:
+                    yield ev
             locations, disqualified, disqualified_reason = _parse_discovery_result(loc_result)
 
             # Retry with simpler prompt if first attempt failed or returned empty — but never
@@ -729,12 +764,18 @@ async def run_gcc_enrichment(
             if not locations and not disqualified:
                 yield {"type": "heartbeat", "message": f"🔄 {cname}: retrying location discovery with simplified prompt…"}
                 await asyncio.sleep(0)
-                loc_result2 = await _collect(
+                loc_result2 = None
+                async for ev in _collect_with_heartbeats(
                     loop,
                     (_location_discovery_prompt_simple(cname, loc_filter), f"locs2_{cname[:20]}", 4096, run_id),
                     f"locs2_{cname[:20]}",
                     timeout=120,
-                )
+                    ping_message_fn=lambda e, c=cname: f"⏳ {c}: still retrying location search… ({e}s)",
+                ):
+                    if ev["type"] == "_result":
+                        loc_result2 = ev["value"]
+                    else:
+                        yield ev
                 locations, disqualified, disqualified_reason = _parse_discovery_result(loc_result2)
 
             if disqualified:
@@ -793,10 +834,33 @@ async def run_gcc_enrichment(
                 except Exception as e:
                     logger.error(f"Location enrichment error: {e}")
 
-    # Process companies sequentially (semaphore inside handles concurrency)
-    for company in companies[:50]:
-        async for event in process_company(company):
-            yield event
+    # Run all companies' generators concurrently (company_sem above caps how many are
+    # actually doing work at once to max_concurrent) and fan their events into one
+    # queue as they arrive. Previously this drove one company's generator fully to
+    # completion before even starting the next — company_sem was inert dead code,
+    # so N companies took the SUM of their individual times instead of the max,
+    # which is what made a 2-company, no-location-filter request (the heaviest
+    # path — full worldwide discovery per company) look hung for many minutes.
+    _DONE = object()
+    fanin_queue: asyncio.Queue = asyncio.Queue()
+
+    async def _pump(company: dict):
+        try:
+            async for event in process_company(company):
+                await fanin_queue.put(event)
+        except Exception as e:
+            logger.error(f"GCC process_company crashed: {e}")
+        finally:
+            await fanin_queue.put(_DONE)
+
+    pump_tasks = [asyncio.ensure_future(_pump(company)) for company in companies[:50]]
+    remaining = len(pump_tasks)
+    while remaining > 0:
+        item = await fanin_queue.get()
+        if item is _DONE:
+            remaining -= 1
+            continue
+        yield item
 
     yield {"type": "complete", "total_companies": total_cos, "usage": get_usage_by_run(run_id), "run_id": run_id}
 
