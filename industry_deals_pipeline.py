@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import AsyncGenerator
 
 logger = logging.getLogger(__name__)
@@ -376,8 +377,16 @@ async def search_industry_deals(
         yield {"type": "heartbeat", "message": f"📋 Batch {batch_start // BATCH_SIZE + 1}: {', '.join(names)}…"}
         await asyncio.sleep(0)
 
-        tasks   = [_search_one(co) for co in batch]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Each batch can take up to CALL_TIMEOUT; ping every 20s instead of
+        # going silent for the whole wait.
+        gathered = asyncio.ensure_future(asyncio.gather(*[_search_one(co) for co in batch], return_exceptions=True))
+        batch_t0 = time.time()
+        while True:
+            try:
+                results = await asyncio.wait_for(asyncio.shield(gathered), timeout=20)
+                break
+            except asyncio.TimeoutError:
+                yield {"type": "heartbeat", "message": f"⏳ Searching batch {batch_start // BATCH_SIZE + 1}… ({int(time.time() - batch_t0)}s)"}
 
         for co, result in zip(batch, results):
             processed += 1

@@ -854,8 +854,15 @@ async def run_gcc_enrichment(
 
     pump_tasks = [asyncio.ensure_future(_pump(company)) for company in companies[:50]]
     remaining = len(pump_tasks)
+    fanin_start = _time.time()
     while remaining > 0:
-        item = await fanin_queue.get()
+        # A location's 5 parallel section calls (+ retries) can take ~4-5 min
+        # before its first result — keep the stream visibly alive meanwhile.
+        try:
+            item = await asyncio.wait_for(fanin_queue.get(), timeout=20)
+        except asyncio.TimeoutError:
+            yield {"type": "heartbeat", "message": f"⏳ Enriching GCC locations… ({int(_time.time() - fanin_start)}s)"}
+            continue
         if item is _DONE:
             remaining -= 1
             continue
@@ -1011,6 +1018,28 @@ SOURCE RULES:
 Return ONLY the Markdown table above, filled with real data for {company_name} in {gcc_location}. Do not add any text before or after the table."""
 
 
+async def _await_with_pings(fut, timeout: int, label: str, ping_interval: int = 20):
+    """Await a single long executor future, yielding a heartbeat every
+    ping_interval seconds so the stream doesn't sit silent for minutes. Last
+    item yielded is {"type": "_result", "value": <result-or-None>}."""
+    start = _time.time()
+    while True:
+        remaining = timeout - (_time.time() - start)
+        if remaining <= 0:
+            yield {"type": "_result", "value": None}
+            return
+        try:
+            value = await asyncio.wait_for(asyncio.shield(fut), timeout=min(ping_interval, remaining))
+            yield {"type": "_result", "value": value}
+            return
+        except asyncio.TimeoutError:
+            yield {"type": "heartbeat", "message": f"⏳ {label}… ({int(_time.time() - start)}s)"}
+        except Exception as e:
+            logger.error(f"[{label}] error: {e}")
+            yield {"type": "_result", "value": None}
+            return
+
+
 # ── TABLE 2 RUNNER ────────────────────────────────────────────────────────────
 
 async def run_gcc_profile(company_name: str, gcc_location: str) -> AsyncGenerator[dict, None]:
@@ -1022,10 +1051,12 @@ async def run_gcc_profile(company_name: str, gcc_location: str) -> AsyncGenerato
     prompt = _table2_prompt(company_name, gcc_location)
 
     fut = loop.run_in_executor(None, _gemini_text_sync, prompt, "gcc_profile", 12288)
-    try:
-        text = await asyncio.wait_for(fut, timeout=280)
-    except asyncio.TimeoutError:
-        text = None
+    text = None
+    async for ev in _await_with_pings(fut, 280, "Building operational profile"):
+        if ev["type"] == "_result":
+            text = ev["value"]
+        else:
+            yield ev
 
     if text:
         yield {"type": "profile_text", "text": text}
@@ -1045,10 +1076,12 @@ async def run_gcc_design(company_name: str, gcc_location: str) -> AsyncGenerator
     prompt = _table3_prompt(company_name, gcc_location)
 
     fut = loop.run_in_executor(None, _gemini_text_sync, prompt, "gcc_design", 12288)
-    try:
-        text = await asyncio.wait_for(fut, timeout=280)
-    except asyncio.TimeoutError:
-        text = None
+    text = None
+    async for ev in _await_with_pings(fut, 280, "Building design profile"):
+        if ev["type"] == "_result":
+            text = ev["value"]
+        else:
+            yield ev
 
     if text:
         yield {"type": "design_text", "text": text}
