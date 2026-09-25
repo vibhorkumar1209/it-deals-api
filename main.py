@@ -22,6 +22,16 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="IT Deals Intelligence API", version="1.0.0")
 
+
+@app.on_event("startup")
+async def _size_thread_pool():
+    # Every Gemini call runs in the default executor (to_thread / run_in_executor)
+    # and blocks a thread for 30-90s. Python's default pool is cpu+4 threads —
+    # ~5 on Render — so one GCC or Signal run from anyone on this worker filled
+    # it and every other request queued behind it with nothing streamed.
+    from concurrent.futures import ThreadPoolExecutor
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=64))
+
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:3000,https://localhost:3000"
@@ -314,9 +324,9 @@ async def tech_stack(req: TechStackRequest):
                     logger.error(f"Tech stack error for {inp.company_name}: {e}", exc_info=True)
                     yield _sse({"type": "heartbeat", "message": f"⚠️ Error for {inp.company_name}: {e}"})
         finally:
-            ts_usage = get_usage_by_run(run_id)
+            ts_usage = await asyncio.to_thread(get_usage_by_run, run_id)
             from report_store import save_report
-            save_report(run_id, "tech_stack_finder", ", ".join(i.company_name for i in req.inputs),
+            await asyncio.to_thread(save_report, run_id, "tech_stack_finder", ", ".join(i.company_name for i in req.inputs),
                         f"{len(results)} tools found", ts_usage,
                         data={"companies": [i.company_name for i in req.inputs], "rows": results})
         yield _sse({"type": "complete", "results": results, "total": len(results), "usage": ts_usage, "run_id": run_id})
@@ -416,9 +426,9 @@ async def enrich_task(req: EnrichTaskRequest):
                 yield _sse({"type": "heartbeat", "message": f"✅ {inp.company_name}: {len(company_deals)} deals found"})
         finally:
             succeeded = sum(1 for r in results if r.get("_status") == "ok")
-            deal_usage = get_usage_by_run(run_id)
+            deal_usage = await asyncio.to_thread(get_usage_by_run, run_id)
             from report_store import save_report
-            save_report(run_id, "it_deal_finder", ", ".join(i.company_name for i in req.inputs),
+            await asyncio.to_thread(save_report, run_id, "it_deal_finder", ", ".join(i.company_name for i in req.inputs),
                         f"{succeeded}/{len(results)} deals found", deal_usage,
                         data={"companies": [i.company_name for i in req.inputs], "rows": results})
         yield _sse({
@@ -552,7 +562,7 @@ async def debug_enrich():
         def _test_gemini():
             from google import genai
             from google.genai import types
-            client = genai.Client(api_key=google_key)
+            client = genai.Client(api_key=google_key, http_options={"timeout": 180_000})
             resp = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents='Return ONLY this JSON array: [{"ok": true}]',
@@ -578,7 +588,7 @@ async def debug_gemini_search(company: str = "Daimler Truck North America", full
     def _run():
         from google import genai
         from google.genai import types
-        client = genai.Client(api_key=google_key)
+        client = genai.Client(api_key=google_key, http_options={"timeout": 180_000})
         if full_prompt:
             from enrich_pipeline import _build_prompts
             prompts = _build_prompts(company, "", "", [], [])
@@ -652,7 +662,7 @@ async def debug_tech_stack(company: str = "Kubota North America", call_num: int 
         from google.genai import types
         from tech_stack_pipeline import _build_tech_stack_prompt
         prompt = _build_tech_stack_prompt(company, "", "", [], [], call_num)
-        client = genai.Client(api_key=google_key)
+        client = genai.Client(api_key=google_key, http_options={"timeout": 180_000})
         resp = client.models.generate_content(
             model="gemini-2.5-flash", contents=prompt,
             config=types.GenerateContentConfig(
@@ -802,7 +812,7 @@ async def gcc_enrich(req: GCCEnrichRequest):
                     gcc_results.append(event.get("result"))
                 elif event.get("type") == "complete" and event.get("run_id"):
                     from report_store import save_report
-                    save_report(event["run_id"], "gcc_intelligence",
+                    await asyncio.to_thread(save_report, event["run_id"], "gcc_intelligence",
                                ", ".join(c.company_name for c in req.companies),
                                f"{event.get('total_companies', 0)} companies enriched", event.get("usage"),
                                data={"mode": "company", "query": ", ".join(c.company_name for c in req.companies),
@@ -926,7 +936,7 @@ async def aftermarket_dive(req: AftermarketRequest):
             ):
                 if event.get("type") == "complete" and event.get("run_id"):
                     from report_store import save_report
-                    save_report(event["run_id"], "aftermarket_intelligence", req.company_name,
+                    await asyncio.to_thread(save_report, event["run_id"], "aftermarket_intelligence", req.company_name,
                                f"{len(event.get('sections_ran', []))} section(s)", event.get("usage"),
                                data={"company": req.company_name, "domain": req.domain,
                                      "summary": f"{len(event.get('capabilities', []))} capabilities · {len(event.get('aggregate_spend', []))} spend categories",
@@ -969,7 +979,7 @@ async def debug_aftermarket_section(company: str = "Daimler Truck North America"
     def _run():
         import re as _re, json as _json
         max_tok = 32768 if section == "readiness" else 16384
-        client = genai.Client(api_key=GOOGLE_AI_KEY)
+        client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": 180_000})
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
@@ -1071,7 +1081,7 @@ async def signal_intel(req: SignalIntelRequest):
                     all_signals = [r for r in all_signals if r.get("company") != company] + (event.get("rows") or [])
                 elif event.get("type") == "complete" and event.get("run_id"):
                     from report_store import save_report
-                    save_report(event["run_id"], "signal_intelligence",
+                    await asyncio.to_thread(save_report, event["run_id"], "signal_intelligence",
                                ", ".join(c.name for c in req.target_companies),
                                f"{event.get('total', 0)} signals · {event.get('companies_done', 0)} companies",
                                event.get("usage"),
@@ -1176,7 +1186,7 @@ async def competitive_analyze(req: CompetitiveAnalyzeRequest):
                     comp_synthesis = event.get("text", "")
                 elif event.get("type") == "complete" and event.get("run_id"):
                     from report_store import save_report
-                    save_report(event["run_id"], "compkill", req.target_company,
+                    await asyncio.to_thread(save_report, event["run_id"], "compkill", req.target_company,
                                f"{len(competitors)} competitors · {len(enabled)} modules", event.get("usage"),
                                data={"target": req.target_company, "competitors": [c["name"] for c in competitors],
                                      "modules": enabled, "benchmarkFoci": req.benchmark_focus,
@@ -1284,7 +1294,7 @@ async def industry_deals_search(req: IndustryDealsSearchRequest):
                         renewal_deals.append(deal)
                 elif event.get("type") == "complete" and event.get("run_id"):
                     from report_store import save_report
-                    save_report(event["run_id"], "it_deals_by_industry", f"{req.industry} · {req.geography}",
+                    await asyncio.to_thread(save_report, event["run_id"], "it_deals_by_industry", f"{req.industry} · {req.geography}",
                                f"{event.get('processed', 0)}/{event.get('total', 0)} companies searched", event.get("usage"),
                                data={"industry": req.industry, "geography": req.geography,
                                      "renewal_timeframe": req.renewal_timeframe, "focus_tech": req.focus_tech,

@@ -460,7 +460,7 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str, run_id: str = "") ->
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             # Set HTTP-level timeout so a hung Gemini server can't block forever
-            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": 180_000})
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,

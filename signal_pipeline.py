@@ -108,7 +108,7 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
             logger.warning(f"Gemini [{label}] total budget exceeded — giving up")
             return []
         try:
-            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": 180_000})
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
@@ -600,75 +600,87 @@ async def run_signal_intelligence(
     yield {"type": "heartbeat", "message": f"🔍 Scanning {n} companies for buying signals…"}
 
     semaphore = asyncio.Semaphore(max_concurrent)
+    # Events are pushed here as work finishes and drained below. Previously a
+    # company's rows were only released once all 5 categories AND the ranking
+    # pass had finished, so the stream sat silent for minutes — and forever if
+    # any single Gemini call hung.
+    queue: asyncio.Queue = asyncio.Queue()
+    _DONE = object()
+    CATEGORY_TIMEOUT = 240  # hard cap per category call, incl. its own retries
+    RANK_TIMEOUT = 120
 
-    async def _process_company(co: dict) -> list:
+    async def _process_company(co: dict) -> None:
         nonlocal total_signals, companies_done
         name = co.get("name", "").strip()
         domain = co.get("domain", "").strip()
         if not name:
-            return []
+            return
 
         async with semaphore:
-            yield_queue = []
-
-            # Run 4 categories in parallel via thread pool
+            await queue.put({"type": "heartbeat", "message": f"🔎 {name}: searching {len(SIGNAL_CATEGORIES)} signal categories…"})
             futures = [
-                asyncio.to_thread(_run_category_sync, name, domain, cat, key_triggers, target_tech, lookback_days, run_id)
+                asyncio.wait_for(
+                    asyncio.to_thread(_run_category_sync, name, domain, cat, key_triggers, target_tech, lookback_days, run_id),
+                    timeout=CATEGORY_TIMEOUT,
+                )
                 for cat in SIGNAL_CATEGORIES
             ]
-            cat_results = await asyncio.gather(*futures, return_exceptions=True)
 
             company_rows = []
-            for cat, result in zip(SIGNAL_CATEGORIES, cat_results):
-                if isinstance(result, Exception):
-                    logger.error(f"Category {cat} error for {name}: {result}")
-                    continue
-                company_rows.extend(result)
+            done_cats = 0
+            for fut in asyncio.as_completed(futures):
+                try:
+                    rows = await fut
+                except Exception as e:
+                    logger.error(f"Signal category failed for {name}: {e!r}")
+                    rows = []
+                done_cats += 1
+                for row in _sort_by_date_desc(rows):
+                    await queue.put({"type": "signal_row", "row": row, "company": name})
+                    total_signals += 1
+                company_rows.extend(rows)
+                await queue.put({"type": "heartbeat", "message": f"📡 {name}: {done_cats}/{len(SIGNAL_CATEGORIES)} categories done — {len(company_rows)} signals"})
 
-            # Sort by date descending before streaming — newest signals first
             company_rows = _sort_by_date_desc(company_rows)
 
-            # Stream raw rows immediately
-            for row in company_rows:
-                yield_queue.append({"type": "signal_row", "row": row, "company": name})
-                total_signals += 1
-
-            # Rank if user company provided
             if user_company and company_rows:
-                ranked = await asyncio.to_thread(
-                    _rank_signals_sync,
-                    name, company_rows,
-                    user_company, user_domain,
-                    key_triggers, target_tech,
-                    run_id,
-                )
-                yield_queue.append({"type": "signals_ranked", "company": name, "rows": ranked})
+                await queue.put({"type": "heartbeat", "message": f"⚖️ {name}: ranking {len(company_rows)} signals for {user_company}…"})
+                try:
+                    ranked = await asyncio.wait_for(
+                        asyncio.to_thread(_rank_signals_sync, name, company_rows, user_company, user_domain, key_triggers, target_tech, run_id),
+                        timeout=RANK_TIMEOUT,
+                    )
+                except Exception as e:
+                    logger.error(f"Signal ranking failed for {name}: {e!r}")
+                    ranked = company_rows
+                await queue.put({"type": "signals_ranked", "company": name, "rows": ranked})
 
             companies_done += 1
-            yield_queue.append({
+            await queue.put({
                 "type": "heartbeat",
                 "message": f"✅ {name}: {len(company_rows)} signals found ({companies_done}/{n} companies done)",
             })
-            return yield_queue
 
-    # Process in batches to avoid flooding, but use semaphore for concurrency control
-    batch_size = min(max_concurrent * 2, 20)
-    for i in range(0, n, batch_size):
-        batch = target_companies[i:i + batch_size]
-        yield {"type": "heartbeat", "message": f"🔄 Processing companies {i+1}–{min(i+len(batch), n)} of {n}…"}
+    async def _run(co: dict) -> None:
+        try:
+            await _process_company(co)
+        except Exception as e:
+            logger.error(f"Company processing error: {e!r}")
+        finally:
+            await queue.put(_DONE)
 
-        tasks = [_process_company(co) for co in batch]
-        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for result in batch_results:
-            if isinstance(result, Exception):
-                logger.error(f"Company processing error: {result}")
-                continue
-            for event in result:
-                yield event
-
-        # Heartbeat to prevent SSE timeout between batches
-        yield {"type": "heartbeat", "message": f"📊 {total_signals} signals found so far…"}
+    tasks = [asyncio.ensure_future(_run(co)) for co in target_companies]
+    remaining = len(tasks)
+    while remaining:
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=20)
+        except asyncio.TimeoutError:
+            yield {"type": "heartbeat", "message": f"⏳ Still scanning — {total_signals} signals so far ({companies_done}/{n} companies done)…"}
+            continue
+        if item is _DONE:
+            remaining -= 1
+            continue
+        yield item
 
     yield {
         "type": "complete",

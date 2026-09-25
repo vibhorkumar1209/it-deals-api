@@ -1416,7 +1416,7 @@ def _gemini_extract_deals_sync(
     response = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": 180_000})
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,

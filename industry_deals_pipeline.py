@@ -130,7 +130,7 @@ def _gemini_sync(prompt: str, label: str = "", run_id: str = "") -> str:
     import time as _t
     for attempt in range(1, 4):
         try:
-            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": 180_000})
             resp = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,

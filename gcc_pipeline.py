@@ -49,9 +49,8 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192, ru
             logger.warning(f"[{label}] budget {TOTAL_BUDGET}s exceeded after {elapsed_so_far:.0f}s")
             return None
         try:
-            # NOTE: Do NOT pass http_options — the SDK interprets timeout as milliseconds,
-            # causing calls to fail in <1s. Let the SDK use its default (no timeout).
-            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            # timeout is in MILLISECONDS. Without one, a hung call pins a worker thread forever.
+            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": 180_000})
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
@@ -892,7 +891,7 @@ def _gemini_text_sync(prompt: str, label: str, max_output_tokens: int = 12288, r
         if _time.time() - call_start > TOTAL_BUDGET:
             return None
         try:
-            client = genai.Client(api_key=GOOGLE_AI_KEY)
+            client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": 180_000})
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,

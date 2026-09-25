@@ -456,7 +456,7 @@ def _gemini_url_fetch_sync(url: str) -> str | None:
         return None
 
     try:
-        client = genai.Client(api_key=GOOGLE_AI_KEY)
+        client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": 180_000})
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=(

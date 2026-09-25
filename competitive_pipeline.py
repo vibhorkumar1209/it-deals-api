@@ -37,7 +37,7 @@ def _gemini_call_sync(prompt: str, use_search: bool = True, max_tokens: int = 81
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=GOOGLE_AI_KEY)
+    client = genai.Client(api_key=GOOGLE_AI_KEY, http_options={"timeout": 180_000})
     config_kwargs: dict = {
         "max_output_tokens": max_tokens,
         "temperature": 0.1,
