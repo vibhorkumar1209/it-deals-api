@@ -236,23 +236,66 @@ third-party wire or news site, ALWAYS cite the company's own press/newsroom/medi
 "source" field, not the third-party republication."""
 
 
-def _exec_leadership_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365) -> str:
+def _split_terms(text: str, limit: int = 6) -> list[str]:
+    return [t.strip() for t in re.split(r"[,;\n]", text or "") if t.strip()][:limit]
+
+
+def _focus_block(company: str, domain: str, key_triggers: str, target_tech: str,
+                 user_company: str = "", user_domain: str = "") -> str:
+    """Priority instructions placed at the TOP of every category prompt, so the
+    seller's context and the user's triggers/tech drive the search itself —
+    not just a soft hint after a generic checklist."""
+    triggers = _split_terms(key_triggers)
+    techs = _split_terms(target_tech)
+    if not (triggers or techs or user_company):
+        return ""
+
+    lines = ["PRIORITY — read before searching:"]
+    if user_company:
+        lines.append(
+            f"These signals are for a sales team at {user_company}"
+            f"{f' ({user_domain})' if user_domain else ''}. Prioritise signals that create a reason for "
+            f"{company} to buy what {user_company} sells — use search to understand {user_company}'s offering if needed."
+        )
+    if triggers or techs:
+        lines.append("The user asked specifically about the following. Run these searches FIRST and return matching signals FIRST:")
+        d = (domain or "").rstrip("/").replace("https://", "").replace("http://", "")
+        for t in triggers:
+            lines.append(f'  • "{company}" "{t}"')
+        for t in techs:
+            lines.append(f'  • "{company}" "{t}"')
+            if d:
+                lines.append(f'  • site:{d} "{t}"')
+        if triggers:
+            lines.append(f"Key triggers: {', '.join(triggers)}")
+        if techs:
+            lines.append(f"Target technology: {', '.join(techs)} — include adoption, evaluation, hiring for, replacing, "
+                         "or partnering around these, and adjacent/competing tools.")
+        lines.append("Still include other strong signals for this category after the matched ones.")
+    return "\n".join(lines) + "\n\n"
+
+
+def _matched_focus_field(key_triggers: str, target_tech: str) -> str:
+    terms = _split_terms(key_triggers) + _split_terms(target_tech)
+    if not terms:
+        return ""
+    return (f'\n- matched_focus: array of which of these the signal directly relates to: {json.dumps(terms)} '
+            f'— [] if none')
+
+
+def _exec_leadership_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365,
+                            user_company: str = "", user_domain: str = "") -> str:
     window = _date_window(lookback_days)
-    extra = ""
-    if key_triggers:
-        extra += f"\nFocus especially on triggers related to: {key_triggers}"
-    if target_tech:
-        extra += f"\nHighlight signals relevant to this technology: {target_tech}"
+    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain)
     return f"""You are a B2B sales intelligence researcher. Find Executive & Leadership Shift signals for {company} ({domain}).
 
-STRICT DATE FILTER: Only include events that occurred between {window}. Discard anything older.
+{extra}STRICT DATE FILTER: Only include events that occurred between {window}. Discard anything older.
 
 Look for:
 1. NEW DECISION-MAKER HIRES — New C-suite, VP, or Director joined within the date window. Include: title, name, start date, previous employer.
 2. INTERNAL PROMOTIONS — A manager or director stepped up to a senior decision-making role within the date window.
 3. PAST CHAMPION MOVES — A power user or champion from a known IT vendor or competitor joins {company} within the date window.
 4. MASS EXECUTIVE EXODUS — Multiple leadership departures from the same team within a short period, within the date window.
-{extra}
 
 {_source_instructions(domain)}
 
@@ -263,29 +306,25 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - person_name: name of executive(s) involved (or "Multiple" for mass exodus)
 - previous_company: where they came from (or "Internal" for promotions)
 - date: exact date or month (e.g. "May 2025") — must be within {window}
-- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.
+- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech)}
 
 Omit any signal whose date falls outside {window}. Return [] if nothing found within the window.
 Return ONLY the JSON array, no commentary."""
 
 
-def _corporate_expansion_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365) -> str:
+def _corporate_expansion_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365,
+                user_company: str = "", user_domain: str = "") -> str:
     window = _date_window(lookback_days)
-    extra = ""
-    if key_triggers:
-        extra += f"\nFocus especially on triggers related to: {key_triggers}"
-    if target_tech:
-        extra += f"\nHighlight signals relevant to this technology: {target_tech}"
+    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain)
     return f"""You are a B2B sales intelligence researcher. Find Corporate Expansion & Growth signals for {company} ({domain}).
 
-STRICT DATE FILTER: Only include events that occurred between {window}. Discard anything older.
+{extra}STRICT DATE FILTER: Only include events that occurred between {window}. Discard anything older.
 
 Look for:
 1. HEADCOUNT SURGE — Employee count or a specific department grew by 20%+ quarter-over-quarter within the date window. Cite the numbers.
 2. JOB POSTINGS — Active job listings published within the date window that reveal pain points, skill gaps, or new tech initiatives.
 3. NEW OFFICE OPENINGS — Physical geographic expansion or new corporate division opened within the date window.
 4. PRODUCT LINE LAUNCHES — New product or market segment entered within the date window.
-{extra}
 
 {_source_instructions(domain)}
 Also search: Glassdoor, Indeed, LinkedIn Jobs, Builtin, Lever/Greenhouse job boards.
@@ -296,28 +335,24 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary including the sales implication
 - magnitude: quantitative detail where available (e.g. "+35% headcount", "15 new roles", "3 new cities")
 - date: month or quarter — must be within {window}
-- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.
+- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech)}
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
 
-def _financial_corporate_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365) -> str:
+def _financial_corporate_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365,
+                user_company: str = "", user_domain: str = "") -> str:
     window = _date_window(lookback_days)
-    extra = ""
-    if key_triggers:
-        extra += f"\nFocus especially on triggers related to: {key_triggers}"
-    if target_tech:
-        extra += f"\nHighlight signals relevant to this technology: {target_tech}"
+    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain)
     return f"""You are a B2B sales intelligence researcher. Find Financial & Corporate Structure signals for {company} ({domain}).
 
-STRICT DATE FILTER: Only include events that occurred between {window}. Discard anything older.
+{extra}STRICT DATE FILTER: Only include events that occurred between {window}. Discard anything older.
 
 Look for:
 1. FUNDING ROUNDS — VC, PE, or debt financing (Series A/B/C, growth equity, IPO) announced within the date window.
 2. M&A ACTIVITY — Mergers, acquisitions, divestitures, or joint ventures announced within the date window.
 3. CORPORATE RELOCATION — HQ move or operations consolidation announced within the date window.
 4. EARNINGS SHIFTS — Publicly reported major profit spike or operational drop (>20% swing) within the date window.
-{extra}
 
 {_source_instructions(domain)}
 Also search: Crunchbase, PitchBook, SEC EDGAR filings, Bloomberg, Reuters, financial news.
@@ -328,28 +363,24 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary including the sales implication
 - financial_detail: amount raised / deal value / revenue change (e.g. "$50M Series B", "Acquired Acme Corp for $200M")
 - date: announcement date — must be within {window}
-- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.
+- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech)}
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
 
-def _tech_legal_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365) -> str:
+def _tech_legal_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365,
+                user_company: str = "", user_domain: str = "") -> str:
     window = _date_window(lookback_days)
-    extra = ""
-    if key_triggers:
-        extra += f"\nFocus especially on triggers related to: {key_triggers}"
-    if target_tech:
-        extra += f"\nHighlight signals relevant to this technology: {target_tech}"
+    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain)
     return f"""You are a B2B sales intelligence researcher. Find Tech Stack & Legal Trigger signals for {company} ({domain}).
 
-STRICT DATE FILTER: Only include events that occurred or were announced between {window}. Discard anything older.
+{extra}STRICT DATE FILTER: Only include events that occurred or were announced between {window}. Discard anything older.
 
 Look for:
 1. CONTRACT RENEWALS — IT/software contracts approaching renewal within the next 12 months, where the original contract was signed ~2–3 years ago (i.e. announced within {window} or inferrable from deal dates in the window).
 2. REGULATORY COMPLIANCE — New legal deadlines or audit requirements facing the company, announced or effective within {window} (GDPR, EU AI Act, SOC2, ISO 27001, SEC rules, HIPAA, etc.)
 3. SYSTEM OUTAGE / PUBLIC FAILURE — Technical outage, data breach, or system failure that became public within {window}.
 4. TECH REFRESH SIGNALS — Legacy system end-of-life or vendor sunset announced within {window}. Do NOT include RFPs/RFIs here — those belong in the RFP & Procurement category.
-{extra}
 
 {_source_instructions(domain)}
 Also search: security breach databases, Gartner, Forrester, industry trade press, regulatory filings.
@@ -360,21 +391,18 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary including the sales implication
 - urgency: "Immediate" | "Within 6 months" | "Within 12 months" | "Watch"
 - date: date or deadline — must be within or triggered within {window}
-- source: MUST be a working direct URL (starting with https://) to the specific article, press release, LinkedIn post, SEC filing, or government procurement portal — e.g. "https://www.reuters.com/..." or "https://sam.gov/...". If you cannot find a direct URL, use the search result URL. Never return a bare publication name.
+- source: MUST be a working direct URL (starting with https://) to the specific article, press release, LinkedIn post, SEC filing, or government procurement portal — e.g. "https://www.reuters.com/..." or "https://sam.gov/...". If you cannot find a direct URL, use the search result URL. Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech)}
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
 
-def _rfp_procurement_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365) -> str:
+def _rfp_procurement_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365,
+                user_company: str = "", user_domain: str = "") -> str:
     window = _date_window(lookback_days)
-    extra = ""
-    if key_triggers:
-        extra += f"\nFocus especially on triggers related to: {key_triggers}"
-    if target_tech:
-        extra += f"\nHighlight signals relevant to this technology: {target_tech}"
+    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain)
     return f"""You are a B2B sales intelligence researcher. Find RFP, RFI, and Procurement signals for {company} ({domain}).
 
-STRICT DATE FILTER: Only include events published or announced between {window}. Discard anything older.
+{extra}STRICT DATE FILTER: Only include events published or announced between {window}. Discard anything older.
 
 Look for:
 1. RFP ISSUED — Request for Proposal published by the company for IT, software, services, or infrastructure. Include scope, budget if available, deadline.
@@ -382,7 +410,6 @@ Look for:
 3. TENDER / PUBLIC BID — Government or corporate tender published on procurement portals (SAM.gov, TED.europa.eu, Jaggaer, Ariba, Bonfire, etc.)
 4. SOLE-SOURCE AWARD — Contract awarded without competitive bid (often signals incumbent renewal risk or budget unlock).
 5. PROCUREMENT OPEN — Budget approved or procurement process formally opened for a major technology purchase.
-{extra}
 
 {_source_instructions(domain)}
 Also search: SAM.gov, TED.europa.eu, BravoSolution, Jaggaer, Ariba, Bonfire, GovWin, Periscope, company's own procurement portal, government procurement databases.
@@ -394,7 +421,7 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - financial_detail: contract value or budget estimate if available (e.g. "$2.5M", "€500K", "Unknown")
 - urgency: "Immediate" | "Within 3 months" | "Within 6 months" | "Watch"
 - date: publication date of the RFP/RFI — must be within {window}
-- source: MUST be a working direct URL (starting with https://) to the RFP document, procurement portal listing, or news article about it — e.g. "https://sam.gov/opp/..." or "https://www.reuters.com/...". Never return a bare publication name.
+- source: MUST be a working direct URL (starting with https://) to the RFP document, procurement portal listing, or news article about it — e.g. "https://sam.gov/opp/..." or "https://www.reuters.com/...". Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech)}
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
@@ -424,7 +451,11 @@ For each signal, assign:
   • High: New C-suite/VP hire, M&A activity, major funding round, earnings decline, tech refresh/sunset, regulatory deadline, champion move
   • Medium: Internal promotion, headcount surge, new job postings, product launch
   • Low: Office opening, relocation
-- importance_rationale: 1-2 sentences explaining WHY this signal matters specifically to {user_company}'s sales motion
+  RELEVANCE OVERRIDE: a signal that directly relates to the key triggers or target technology above
+  (see its "matched_focus" field) moves UP one level (Low→Medium, Medium→High, High→Critical). A
+  signal with no plausible link to what {user_company} sells moves DOWN one level.
+- importance_rationale: 1-2 sentences explaining WHY this signal matters specifically to {user_company}'s sales motion,
+  naming the trigger or technology it relates to when it matches one
 
 Signals to rank:
 {signals_json}
@@ -470,7 +501,8 @@ def _date_sort_key(date_str: str) -> tuple:
     return (0, 0)
 
 def _sort_by_date_desc(rows: list) -> list:
-    return sorted(rows, key=lambda r: _date_sort_key(r.get("date", "")), reverse=True)
+    """Signals matching the user's key triggers / target tech first, then newest first."""
+    return sorted(rows, key=lambda r: (bool(r.get("matched_focus")), _date_sort_key(r.get("date", ""))), reverse=True)
 
 
 # ── Per-company signal runner ─────────────────────────────────────────────────
@@ -483,6 +515,8 @@ def _run_category_sync(
     target_tech: str,
     lookback_days: int = 365,
     run_id: str = "",
+    user_company: str = "",
+    user_domain: str = "",
 ) -> list:
     prompts = {
         "executive_leadership": _exec_leadership_prompt,
@@ -492,7 +526,7 @@ def _run_category_sync(
         "rfp_procurement":      _rfp_procurement_prompt,
     }
     prompt_fn = prompts[category]
-    prompt = prompt_fn(company, domain, key_triggers, target_tech, lookback_days)
+    prompt = prompt_fn(company, domain, key_triggers, target_tech, lookback_days, user_company, user_domain)
     label = f"{company[:20]}|{category}"
     rows = _gemini_call_sync(prompt, use_search=True, label=label, max_output_tokens=8192, run_id=run_id)
 
@@ -537,6 +571,8 @@ def _run_category_sync(
             r["importance"] = _SIGNAL_TYPE_DEFAULT_IMPORTANCE.get(signal_type, "Medium")
         if "importance_rationale" not in r:
             r["importance_rationale"] = ""
+        mf = r.get("matched_focus")
+        r["matched_focus"] = [str(x) for x in mf if str(x).strip()] if isinstance(mf, list) else []
 
         # Validate source field — must be a real URL, else clear it so the
         # frontend renders it as plain text rather than a broken link.
@@ -620,7 +656,7 @@ async def run_signal_intelligence(
             await queue.put({"type": "heartbeat", "message": f"🔎 {name}: searching {len(SIGNAL_CATEGORIES)} signal categories…"})
             futures = [
                 asyncio.wait_for(
-                    asyncio.to_thread(_run_category_sync, name, domain, cat, key_triggers, target_tech, lookback_days, run_id),
+                    asyncio.to_thread(_run_category_sync, name, domain, cat, key_triggers, target_tech, lookback_days, run_id, user_company, user_domain),
                     timeout=CATEGORY_TIMEOUT,
                 )
                 for cat in SIGNAL_CATEGORIES
