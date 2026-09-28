@@ -335,8 +335,10 @@ def _matched_focus_field(key_triggers: str, target_tech: str, user_company: str 
         out += (f'\n- matched_focus: array of which of these the signal directly relates to: {json.dumps(terms)} '
                 f'— [] if none')
     if user_company:
-        out += (f'\n- offering_relevance: 1 sentence on how this signal creates a need for {user_company}\'s offerings '
-                f'— "" if it does not')
+        out += (f'\n- offering_relevance: 1 sentence naming the SPECIFIC {user_company} offering this creates a need for, '
+                f'and why — ONLY if the link is direct (e.g. a new sales leader, a GTM restructuring, an RFP or '
+                f'hiring for that capability). Routine news — product launches, awards, analyst rankings, customer '
+                f'wins, certifications — MUST be "" unless it explicitly involves that capability.')
     return out
 
 
@@ -516,9 +518,10 @@ For each signal, assign:
   • Medium: Internal promotion, headcount surge, new job postings, product launch
   • Low: Office opening, relocation
   RELEVANCE OVERRIDE: a signal that directly relates to the key triggers or target technology above
-  (see its "matched_focus" field) or has a concrete "offering_relevance" moves UP one level
-  (Low→Medium, Medium→High, High→Critical); matching both moves it UP two. A signal with no plausible
-  link to {user_company}'s offerings moves DOWN one level.
+  (see its "matched_focus" field) or has a non-empty "offering_relevance" moves UP one level
+  (Low→Medium, Medium→High, High→Critical) — never more than one level. A signal with no plausible
+  link to {user_company}'s offerings moves DOWN one level. Product launches, awards, analyst
+  rankings and certifications are never Critical.
 - importance_rationale: 1-2 sentences explaining WHY this signal matters specifically to {user_company}'s sales motion,
   naming the trigger or technology it relates to when it matches one
 
@@ -564,6 +567,25 @@ def _date_sort_key(date_str: str) -> tuple:
     if m:
         return (int(m.group(1)), 0)
     return (0, 0)
+
+def _dedupe_signals(rows: list, company: str = "") -> list:
+    """Categories overlap (a partnership shows up as both expansion and tech),
+    so the same event came back twice. Keep the first — rows are pre-sorted so
+    that is the matched/relevant one."""
+    kept, seen_src, seen_words = [], set(), []
+    for r in rows:
+        src = (r.get("source") or "").split("?")[0].rstrip("/").lower()
+        words = set(re.findall(r"[a-z0-9]{3,}", (r.get("signal_title") or "").lower())) - set(re.findall(r"[a-z0-9]{3,}", company.lower())) - {"the", "and", "with", "for"}
+        dup = (src and src in seen_src) or any(
+            words and w and len(words & w) / len(words | w) >= 0.6 for w in seen_words)
+        if dup:
+            continue
+        kept.append(r)
+        if src:
+            seen_src.add(src)
+        seen_words.append(words)
+    return kept
+
 
 def _sort_by_date_desc(rows: list) -> list:
     """Signals matching the user's key triggers / target tech first, then newest first."""
@@ -757,7 +779,9 @@ async def run_signal_intelligence(
                 company_rows.extend(rows)
                 await queue.put({"type": "heartbeat", "message": f"📡 {name}: {done_cats}/{len(SIGNAL_CATEGORIES)} categories done — {len(company_rows)} signals"})
 
-            company_rows = _sort_by_date_desc(company_rows)
+            streamed = len(company_rows)
+            company_rows = _dedupe_signals(_sort_by_date_desc(company_rows), name)
+            total_signals -= streamed - len(company_rows)
 
             if user_company and company_rows:
                 await queue.put({"type": "heartbeat", "message": f"⚖️ {name}: ranking {len(company_rows)} signals for {user_company}…"})
@@ -770,6 +794,9 @@ async def run_signal_intelligence(
                     logger.error(f"Signal ranking failed for {name}: {e!r}")
                     ranked = company_rows
                 await queue.put({"type": "signals_ranked", "company": name, "rows": ranked})
+            elif company_rows and len(company_rows) < streamed:
+                # No ranking pass, but duplicates were streamed — send the clean list.
+                await queue.put({"type": "signals_ranked", "company": name, "rows": company_rows})
 
             companies_done += 1
             await queue.put({
