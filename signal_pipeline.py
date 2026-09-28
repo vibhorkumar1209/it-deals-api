@@ -240,53 +240,110 @@ def _split_terms(text: str, limit: int = 6) -> list[str]:
     return [t.strip() for t in re.split(r"[,;\n]", text or "") if t.strip()][:limit]
 
 
+def _or_group(terms: list[str]) -> str:
+    return "(" + " OR ".join(f'"{t}"' for t in terms) + ")" if terms else ""
+
+
+def _seller_profile_prompt(user_company: str, user_domain: str) -> str:
+    d = (user_domain or "").rstrip("/").replace("https://", "").replace("http://", "")
+    site = f"site:{d} " if d else ""
+    return f"""Research what {user_company}{f' ({d})' if d else ''} sells.
+
+Run these searches:
+  • {site}products OR solutions OR platform OR services
+  • "{user_company}" product OR platform OR "use cases" OR customers
+  • "{user_company}" competitors OR alternatives
+
+Return ONLY a JSON array with ONE object:
+[{{"summary": "<1-2 sentences: what {user_company} sells and to whom>",
+  "offerings": ["<product / service / capability>", ...],
+  "search_keywords": ["<3-8 short phrases a prospect would use when they NEED this offering, e.g. 'sales intelligence', 'account-based marketing'>"],
+  "buyer_roles": ["<job titles that buy it>", ...]}}]"""
+
+
+def _profile_seller_sync(user_company: str, user_domain: str, run_id: str = "") -> dict | None:
+    """One grounded call per scan so every category prompt knows concretely
+    what the seller offers, instead of asking each prompt to guess."""
+    if not user_company:
+        return None
+    rows = _gemini_call_sync(_seller_profile_prompt(user_company, user_domain), use_search=True,
+                             label=f"seller|{user_company[:20]}", max_output_tokens=2048, run_id=run_id)
+    p = rows[0] if rows and isinstance(rows[0], dict) else None
+    if not p:
+        return None
+    return {
+        "summary": str(p.get("summary", ""))[:400],
+        "offerings": [str(x) for x in (p.get("offerings") or [])][:8],
+        "search_keywords": [str(x) for x in (p.get("search_keywords") or [])][:8],
+        "buyer_roles": [str(x) for x in (p.get("buyer_roles") or [])][:6],
+    }
+
+
 def _focus_block(company: str, domain: str, key_triggers: str, target_tech: str,
-                 user_company: str = "", user_domain: str = "") -> str:
+                 user_company: str = "", user_domain: str = "", seller_profile: dict | None = None) -> str:
     """Priority instructions placed at the TOP of every category prompt, so the
-    seller's context and the user's triggers/tech drive the search itself —
-    not just a soft hint after a generic checklist."""
+    seller's offerings and the user's triggers/tech are baked into the actual
+    search queries — not a soft hint after a generic checklist."""
     triggers = _split_terms(key_triggers)
     techs = _split_terms(target_tech)
+    kws = (seller_profile or {}).get("search_keywords") or []
     if not (triggers or techs or user_company):
         return ""
 
     lines = ["PRIORITY — read before searching:"]
     if user_company:
-        lines.append(
-            f"These signals are for a sales team at {user_company}"
-            f"{f' ({user_domain})' if user_domain else ''}. Prioritise signals that create a reason for "
-            f"{company} to buy what {user_company} sells — use search to understand {user_company}'s offering if needed."
-        )
-    if triggers or techs:
-        lines.append("The user asked specifically about the following. Run these searches FIRST and return matching signals FIRST:")
-        d = (domain or "").rstrip("/").replace("https://", "").replace("http://", "")
-        for t in triggers:
-            lines.append(f'  • "{company}" "{t}"')
-        for t in techs:
-            lines.append(f'  • "{company}" "{t}"')
-            if d:
-                lines.append(f'  • site:{d} "{t}"')
-        if triggers:
-            lines.append(f"Key triggers: {', '.join(triggers)}")
-        if techs:
-            lines.append(f"Target technology: {', '.join(techs)} — include adoption, evaluation, hiring for, replacing, "
-                         "or partnering around these, and adjacent/competing tools.")
-        lines.append("Still include other strong signals for this category after the matched ones.")
+        seller = f"{user_company}{f' ({user_domain})' if user_domain else ''}"
+        if seller_profile and seller_profile.get("summary"):
+            lines.append(f"These signals are for the sales team at {seller}. {seller_profile['summary']}")
+            if seller_profile.get("offerings"):
+                lines.append(f"{user_company}'s offerings: {', '.join(seller_profile['offerings'])}")
+            if seller_profile.get("buyer_roles"):
+                lines.append(f"Typical buyers: {', '.join(seller_profile['buyer_roles'])}")
+        else:
+            lines.append(f"These signals are for the sales team at {seller}. First work out what {user_company} sells.")
+        lines.append(f"Only signals that plausibly create a need, budget, or buying moment at {company} for "
+                     f"{user_company}'s offerings are useful — prioritise those.")
+
+    lines.append(f'MANDATORY SEARCH QUERIES — run ALL of these FIRST, before the category checklist below:')
+    # Triggers and tech are searched separately, never AND-ed into one query.
+    if triggers:
+        lines.append(f'  • "{company}" {_or_group(triggers)}')
+    if techs:
+        lines.append(f'  • "{company}" {_or_group(techs)}')
+    if kws:
+        lines.append(f'  • "{company}" {_or_group(kws[:5])}')
+    for t in triggers + techs:
+        lines.append(f'  • "{company}" "{t}" 2025 OR 2026')
+    d = (domain or "").rstrip("/").replace("https://", "").replace("http://", "")
+    if d and (techs or kws):
+        lines.append(f'  • site:{d} {_or_group((techs + kws)[:6])}')
+    lines.append("Also add the key triggers / target technology terms to the category searches listed below.")
+
+    if triggers:
+        lines.append(f"Key triggers: {', '.join(triggers)}")
+    if techs:
+        lines.append(f"Target technology: {', '.join(techs)} — include adopting, evaluating, hiring for, replacing, "
+                     "or partnering around these, and adjacent/competing tools.")
+    lines.append("Return signals matching the triggers / technology / offerings FIRST; other strong signals for this category after.")
     return "\n".join(lines) + "\n\n"
 
 
-def _matched_focus_field(key_triggers: str, target_tech: str) -> str:
+def _matched_focus_field(key_triggers: str, target_tech: str, user_company: str = "") -> str:
     terms = _split_terms(key_triggers) + _split_terms(target_tech)
-    if not terms:
-        return ""
-    return (f'\n- matched_focus: array of which of these the signal directly relates to: {json.dumps(terms)} '
-            f'— [] if none')
+    out = ""
+    if terms:
+        out += (f'\n- matched_focus: array of which of these the signal directly relates to: {json.dumps(terms)} '
+                f'— [] if none')
+    if user_company:
+        out += (f'\n- offering_relevance: 1 sentence on how this signal creates a need for {user_company}\'s offerings '
+                f'— "" if it does not')
+    return out
 
 
 def _exec_leadership_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365,
-                            user_company: str = "", user_domain: str = "") -> str:
+                            user_company: str = "", user_domain: str = "", seller_profile: dict | None = None) -> str:
     window = _date_window(lookback_days)
-    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain)
+    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain, seller_profile)
     return f"""You are a B2B sales intelligence researcher. Find Executive & Leadership Shift signals for {company} ({domain}).
 
 {extra}STRICT DATE FILTER: Only include events that occurred between {window}. Discard anything older.
@@ -306,16 +363,16 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - person_name: name of executive(s) involved (or "Multiple" for mass exodus)
 - previous_company: where they came from (or "Internal" for promotions)
 - date: exact date or month (e.g. "May 2025") — must be within {window}
-- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech)}
+- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech, user_company)}
 
 Omit any signal whose date falls outside {window}. Return [] if nothing found within the window.
 Return ONLY the JSON array, no commentary."""
 
 
 def _corporate_expansion_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365,
-                user_company: str = "", user_domain: str = "") -> str:
+                user_company: str = "", user_domain: str = "", seller_profile: dict | None = None) -> str:
     window = _date_window(lookback_days)
-    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain)
+    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain, seller_profile)
     return f"""You are a B2B sales intelligence researcher. Find Corporate Expansion & Growth signals for {company} ({domain}).
 
 {extra}STRICT DATE FILTER: Only include events that occurred between {window}. Discard anything older.
@@ -335,15 +392,15 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary including the sales implication
 - magnitude: quantitative detail where available (e.g. "+35% headcount", "15 new roles", "3 new cities")
 - date: month or quarter — must be within {window}
-- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech)}
+- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech, user_company)}
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
 
 def _financial_corporate_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365,
-                user_company: str = "", user_domain: str = "") -> str:
+                user_company: str = "", user_domain: str = "", seller_profile: dict | None = None) -> str:
     window = _date_window(lookback_days)
-    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain)
+    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain, seller_profile)
     return f"""You are a B2B sales intelligence researcher. Find Financial & Corporate Structure signals for {company} ({domain}).
 
 {extra}STRICT DATE FILTER: Only include events that occurred between {window}. Discard anything older.
@@ -363,15 +420,15 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary including the sales implication
 - financial_detail: amount raised / deal value / revenue change (e.g. "$50M Series B", "Acquired Acme Corp for $200M")
 - date: announcement date — must be within {window}
-- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech)}
+- source: MUST be a working direct URL (starting with https://) to the specific press release, news article, LinkedIn post, or filing — e.g. "https://www.reuters.com/..." or "https://www.linkedin.com/...". Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech, user_company)}
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
 
 def _tech_legal_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365,
-                user_company: str = "", user_domain: str = "") -> str:
+                user_company: str = "", user_domain: str = "", seller_profile: dict | None = None) -> str:
     window = _date_window(lookback_days)
-    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain)
+    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain, seller_profile)
     return f"""You are a B2B sales intelligence researcher. Find Tech Stack & Legal Trigger signals for {company} ({domain}).
 
 {extra}STRICT DATE FILTER: Only include events that occurred or were announced between {window}. Discard anything older.
@@ -391,15 +448,15 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - summary: 2–3 sentence summary including the sales implication
 - urgency: "Immediate" | "Within 6 months" | "Within 12 months" | "Watch"
 - date: date or deadline — must be within or triggered within {window}
-- source: MUST be a working direct URL (starting with https://) to the specific article, press release, LinkedIn post, SEC filing, or government procurement portal — e.g. "https://www.reuters.com/..." or "https://sam.gov/...". If you cannot find a direct URL, use the search result URL. Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech)}
+- source: MUST be a working direct URL (starting with https://) to the specific article, press release, LinkedIn post, SEC filing, or government procurement portal — e.g. "https://www.reuters.com/..." or "https://sam.gov/...". If you cannot find a direct URL, use the search result URL. Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech, user_company)}
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
 
 def _rfp_procurement_prompt(company: str, domain: str, key_triggers: str, target_tech: str, lookback_days: int = 365,
-                user_company: str = "", user_domain: str = "") -> str:
+                user_company: str = "", user_domain: str = "", seller_profile: dict | None = None) -> str:
     window = _date_window(lookback_days)
-    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain)
+    extra = _focus_block(company, domain, key_triggers, target_tech, user_company, user_domain, seller_profile)
     return f"""You are a B2B sales intelligence researcher. Find RFP, RFI, and Procurement signals for {company} ({domain}).
 
 {extra}STRICT DATE FILTER: Only include events published or announced between {window}. Discard anything older.
@@ -421,7 +478,7 @@ Return ONLY a JSON array. Each object must have exactly these fields:
 - financial_detail: contract value or budget estimate if available (e.g. "$2.5M", "€500K", "Unknown")
 - urgency: "Immediate" | "Within 3 months" | "Within 6 months" | "Watch"
 - date: publication date of the RFP/RFI — must be within {window}
-- source: MUST be a working direct URL (starting with https://) to the RFP document, procurement portal listing, or news article about it — e.g. "https://sam.gov/opp/..." or "https://www.reuters.com/...". Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech)}
+- source: MUST be a working direct URL (starting with https://) to the RFP document, procurement portal listing, or news article about it — e.g. "https://sam.gov/opp/..." or "https://www.reuters.com/...". Never return a bare publication name.{_matched_focus_field(key_triggers, target_tech, user_company)}
 
 Omit any signal outside {window}. Return [] if nothing found. Return ONLY the JSON array."""
 
@@ -433,11 +490,18 @@ def _ranking_prompt(
     user_domain: str,
     key_triggers: str,
     target_tech: str,
+    seller_profile: dict | None = None,
 ) -> str:
     trigger_ctx = f"Key buyer triggers to watch for: {key_triggers}" if key_triggers else ""
-    tech_ctx = f"Target technology being sold: {target_tech}" if target_tech else ""
+    tech_ctx = f"Target technology: {target_tech}" if target_tech else ""
+    offer_ctx = ""
+    if seller_profile:
+        offer_ctx = f"What {user_company} sells: {seller_profile.get('summary', '')}"
+        if seller_profile.get("offerings"):
+            offer_ctx += f"\nOfferings: {', '.join(seller_profile['offerings'])}"
     signals_json = json.dumps(signals, indent=2)
     return f"""You are a senior sales strategist at {user_company} ({user_domain}).
+{offer_ctx}
 
 You sell to companies like {company}. Rank the following buying signals by importance to YOUR sales effort.
 
@@ -452,8 +516,9 @@ For each signal, assign:
   • Medium: Internal promotion, headcount surge, new job postings, product launch
   • Low: Office opening, relocation
   RELEVANCE OVERRIDE: a signal that directly relates to the key triggers or target technology above
-  (see its "matched_focus" field) moves UP one level (Low→Medium, Medium→High, High→Critical). A
-  signal with no plausible link to what {user_company} sells moves DOWN one level.
+  (see its "matched_focus" field) or has a concrete "offering_relevance" moves UP one level
+  (Low→Medium, Medium→High, High→Critical); matching both moves it UP two. A signal with no plausible
+  link to {user_company}'s offerings moves DOWN one level.
 - importance_rationale: 1-2 sentences explaining WHY this signal matters specifically to {user_company}'s sales motion,
   naming the trigger or technology it relates to when it matches one
 
@@ -502,7 +567,8 @@ def _date_sort_key(date_str: str) -> tuple:
 
 def _sort_by_date_desc(rows: list) -> list:
     """Signals matching the user's key triggers / target tech first, then newest first."""
-    return sorted(rows, key=lambda r: (bool(r.get("matched_focus")), _date_sort_key(r.get("date", ""))), reverse=True)
+    return sorted(rows, key=lambda r: (bool(r.get("matched_focus")), bool(r.get("offering_relevance")),
+                                       _date_sort_key(r.get("date", ""))), reverse=True)
 
 
 # ── Per-company signal runner ─────────────────────────────────────────────────
@@ -517,6 +583,7 @@ def _run_category_sync(
     run_id: str = "",
     user_company: str = "",
     user_domain: str = "",
+    seller_profile: dict | None = None,
 ) -> list:
     prompts = {
         "executive_leadership": _exec_leadership_prompt,
@@ -526,7 +593,7 @@ def _run_category_sync(
         "rfp_procurement":      _rfp_procurement_prompt,
     }
     prompt_fn = prompts[category]
-    prompt = prompt_fn(company, domain, key_triggers, target_tech, lookback_days, user_company, user_domain)
+    prompt = prompt_fn(company, domain, key_triggers, target_tech, lookback_days, user_company, user_domain, seller_profile)
     label = f"{company[:20]}|{category}"
     rows = _gemini_call_sync(prompt, use_search=True, label=label, max_output_tokens=8192, run_id=run_id)
 
@@ -573,6 +640,7 @@ def _run_category_sync(
             r["importance_rationale"] = ""
         mf = r.get("matched_focus")
         r["matched_focus"] = [str(x) for x in mf if str(x).strip()] if isinstance(mf, list) else []
+        r["offering_relevance"] = str(r.get("offering_relevance") or "").strip()
 
         # Validate source field — must be a real URL, else clear it so the
         # frontend renders it as plain text rather than a broken link.
@@ -592,10 +660,11 @@ def _rank_signals_sync(
     key_triggers: str,
     target_tech: str,
     run_id: str = "",
+    seller_profile: dict | None = None,
 ) -> list:
     if not signals:
         return signals
-    prompt = _ranking_prompt(company, signals, user_company, user_domain, key_triggers, target_tech)
+    prompt = _ranking_prompt(company, signals, user_company, user_domain, key_triggers, target_tech, seller_profile)
     label = f"rank|{company[:20]}"
     ranked = _gemini_call_sync(prompt, use_search=False, label=label, max_output_tokens=8192, run_id=run_id)
     if not ranked or len(ranked) != len(signals):
@@ -633,6 +702,17 @@ async def run_signal_intelligence(
     companies_done = 0
     n = len(target_companies)
 
+    seller_profile = None
+    if user_company:
+        yield {"type": "heartbeat", "message": f"🏷️ Learning what {user_company} sells…"}
+        try:
+            seller_profile = await asyncio.wait_for(
+                asyncio.to_thread(_profile_seller_sync, user_company, user_domain, run_id), timeout=90)
+        except Exception as e:
+            logger.warning(f"Seller profile failed for {user_company}: {e!r}")
+        if seller_profile and seller_profile.get("offerings"):
+            yield {"type": "heartbeat", "message": f"🏷️ {user_company}: {', '.join(seller_profile['offerings'][:4])}"}
+
     yield {"type": "heartbeat", "message": f"🔍 Scanning {n} companies for buying signals…"}
 
     semaphore = asyncio.Semaphore(max_concurrent)
@@ -656,7 +736,7 @@ async def run_signal_intelligence(
             await queue.put({"type": "heartbeat", "message": f"🔎 {name}: searching {len(SIGNAL_CATEGORIES)} signal categories…"})
             futures = [
                 asyncio.wait_for(
-                    asyncio.to_thread(_run_category_sync, name, domain, cat, key_triggers, target_tech, lookback_days, run_id, user_company, user_domain),
+                    asyncio.to_thread(_run_category_sync, name, domain, cat, key_triggers, target_tech, lookback_days, run_id, user_company, user_domain, seller_profile),
                     timeout=CATEGORY_TIMEOUT,
                 )
                 for cat in SIGNAL_CATEGORIES
@@ -683,7 +763,7 @@ async def run_signal_intelligence(
                 await queue.put({"type": "heartbeat", "message": f"⚖️ {name}: ranking {len(company_rows)} signals for {user_company}…"})
                 try:
                     ranked = await asyncio.wait_for(
-                        asyncio.to_thread(_rank_signals_sync, name, company_rows, user_company, user_domain, key_triggers, target_tech, run_id),
+                        asyncio.to_thread(_rank_signals_sync, name, company_rows, user_company, user_domain, key_triggers, target_tech, run_id, seller_profile),
                         timeout=RANK_TIMEOUT,
                     )
                 except Exception as e:
