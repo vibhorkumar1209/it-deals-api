@@ -423,6 +423,22 @@ _DEFAULT_MODEL_RANGE = (2.0, 30.0)   # mid + unknown type
 _TIER_PCT = {0: 0.30, 1: 0.45, 2: 0.60, 3: 0.75, 4: 0.90}
 
 
+_ACQUISITION_RE = re.compile(
+    r"\bacqui(?:re[sd]?|sition|re-hire|-hire)\b|\bacqui-?hire\b|\bbuys?\b|\bbought\b|"
+    r"\btakeover\b|\basset purchase\b|\bmerger\b|\bacquired\b",
+    re.IGNORECASE,
+)
+
+
+def _is_acquisition_deal(description: str, signal_title: str = "") -> bool:
+    """Deal category 4 ('IT Acquisitions') and the sector-specific acquisition
+    deal types (AgTech Acquisitions, etc.) are explicitly searched for and do
+    get returned, but deal_focus is a free-text tag list the model doesn't
+    reliably apply — so detect acquisitions deterministically from the
+    description instead of trusting the model to self-tag every time."""
+    return bool(_ACQUISITION_RE.search(f"{description} {signal_title}"))
+
+
 def _detect_deal_type(description: str, tech_level2: str) -> str:
     """Classify deal as outsourcing | saas | consulting | implementation."""
     text = f"{description} {tech_level2}"
@@ -765,8 +781,10 @@ FIELD RULES:
 - end_date: contract expiry or renewal date if known
 - duration_months: contract length in months; derive from start+end if not stated; outsourcing≈60, SaaS≈36
 - last_detected: date of press release / article (YYYY-MM-DD or YYYY-MM or YYYY)
-- deal_focus: 1-3 tags from: AI | ML | Cloud | Big Data | Analytics | Cybersecurity | IoT |
+- deal_focus: 1-3 tags from: Acquisition | AI | ML | Cloud | Big Data | Analytics | Cybersecurity | IoT |
   Automation | ERP | Digital Transformation | Payments | Open Banking | DevOps | Data Platform | Other
+  — ALWAYS include "Acquisition" as one of the tags for any deal under category 4 (IT Acquisitions)
+  or any other acquisition/acqui-hire/asset-purchase/merger deal, in addition to its tech tag(s).
 - description: UP TO 100-200 WORDS — scope, platforms, data volumes, team size, business rationale.
   Short sentence only if source has genuinely little detail.
 - source: direct URL to press release, article, or filing
@@ -1232,8 +1250,9 @@ Description & Scope | Deal Value | Start Date | End Date)
 - end_date: contract expiration, framework refresh cycle, or production/milestone target — plain
   text if not a strict date (e.g. "Framework is rolling; next refresh 2027").
 - source: verifiable source URL for the deal announcement if available, else empty string.
-- deal_focus: 1-3 tags from: AI | Automation | Robotics | ER&D | Co-Development | Embedded Systems |
+- deal_focus: 1-3 tags from: Acquisition | AI | Automation | Robotics | ER&D | Co-Development | Embedded Systems |
   Semiconductor | Compliance | Digital Twin | GCC | Other
+  — ALWAYS include "Acquisition" for any acquisition/acqui-hire/asset-purchase/merger deal.
 
 Return ONLY the raw JSON array. No prose. No markdown fences (except the bolded terms inside the
 description field itself, which should use markdown ** syntax).
@@ -1577,6 +1596,12 @@ def _gemini_extract_deals_sync(
             row["source"] = _match_grounding_source(
                 row.get("vendor", ""), row.get("description", ""), grounding_sources
             )
+            # Tag acquisitions in Deal Focus even when the model forgets to —
+            # deterministic, not dependent on the model following the prompt.
+            if _is_acquisition_deal(row.get("description", "")):
+                existing = [t.strip() for t in row.get("deal_focus", "").split(",") if t.strip()]
+                if "Acquisition" not in existing:
+                    row["deal_focus"] = ", ".join(["Acquisition"] + existing) if existing else "Acquisition"
             out.append(row)
 
         logger.info(f"Parsed {len(out)} deals for {company_name}")
