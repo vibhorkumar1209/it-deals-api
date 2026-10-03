@@ -1143,25 +1143,45 @@ def _has_erd_trigger(focus_tech: list[str]) -> bool:
     return False
 
 
-# 12 Level-1 ER&D categories — every deal returned must be tagged with exactly one
-# of these, and both prompt halves together must attempt exhaustive coverage of all 12.
-_ERD_CATEGORIES = [
-    "Product Engineering", "Platform Engineering", "Design & Simulation",
-    "Prototyping & Testing", "Software Engineering", "AI/ML & Data Engineering",
-    "Digital Engineering & IoT", "Compliance & Certification", "Sustenance Engineering",
-    "Mechanical & Hardware Design", "Systems Engineering", "Program Management & PMO",
+# 3-level ER&D classification taxonomy. Every deal returned must be tagged with
+# exactly one Level-3 category via erd_category; erd_l1/erd_l2 are then derived
+# deterministically from this table (never asked of the model — same pattern as
+# classify_tech's tech_level1/2/3 derivation above).
+_ERD_TAXONOMY = [
+    ("Integrated Lifecycle Development", "New Product Introduction (NPI)", "Product Engineering"),
+    ("Integrated Lifecycle Development", "New Product Introduction (NPI)", "Systems Engineering"),
+    ("Integrated Lifecycle Development", "Legacy & Lifecycle Support", "Sustenance Engineering"),
+    ("Physical & Hardware Discipline", "Hardware Design & Engineering", "Mechanical & Hardware Design"),
+    ("Physical & Hardware Discipline", "Simulation & Prototyping", "Design & Simulation"),
+    ("Physical & Hardware Discipline", "Simulation & Prototyping", "Prototyping & Testing"),
+    ("Software & Digital Discipline", "Core Software Infrastructure", "Software Engineering"),
+    ("Software & Digital Discipline", "Core Software Infrastructure", "Platform Engineering"),
+    ("Software & Digital Discipline", "Next-Gen & Data Analytics", "AI/ML & Data Engineering"),
+    ("Software & Digital Discipline", "Next-Gen & Data Analytics", "Digital Engineering & IoT"),
+    ("Governance & Quality Assurance", "Quality, Risk & Compliance", "Compliance & Certification"),
+    ("Governance & Quality Assurance", "Operational PMO & Support", "Program Management & PMO"),
+    ("Governance & Quality Assurance", "Operational PMO & Support", "Technical Documentation"),
+    ("Governance & Quality Assurance", "Corporate Overhead", "Others"),
 ]
+_ERD_CATEGORIES = [l3 for _l1, _l2, l3 in _ERD_TAXONOMY]
+_ERD_L1L2_BY_L3 = {l3: (l1, l2) for l1, l2, l3 in _ERD_TAXONOMY}
 
 ERD_SCHEMA_FIELDS = SCHEMA_FIELDS + [
     {"key": "erd_category", "label": "ER&D Category", "type": "string",
-     "description": f"COMPULSORY — exactly one of these 12 Level-1 categories: "
-                     f"{', '.join(_ERD_CATEGORIES)}. Never leave blank for an ER&D deal."},
+     "description": f"COMPULSORY — exactly one of these {len(_ERD_CATEGORIES)} Level-3 categories: "
+                     f"{', '.join(_ERD_CATEGORIES)}. Never leave blank for an ER&D deal. "
+                     f"If none fit, use \"Others\"."},
+    {"key": "erd_l1", "label": "ER&D Level 1", "type": "string",
+     "description": "DO NOT FILL — derived automatically from erd_category."},
+    {"key": "erd_l2", "label": "ER&D Level 2", "type": "string",
+     "description": "DO NOT FILL — derived automatically from erd_category."},
 ]
 
 
 def _build_erd_prompt(company_name: str, domain: str, linkedin_block: str,
                        focus_vendor: list[str] | None = None, variant: int = 1) -> str:
-    categories = _ERD_CATEGORIES[:6] if variant == 1 else _ERD_CATEGORIES[6:]
+    _half = (len(_ERD_CATEGORIES) + 1) // 2
+    categories = _ERD_CATEGORIES[:_half] if variant == 1 else _ERD_CATEGORIES[_half:]
     cat_block = "\n".join(f"{i}. {c}" for i, c in enumerate(categories, 1))
 
     vendor_searches = ""
@@ -1186,7 +1206,7 @@ Your objective is to comprehensively map, identify, and categorize EVERY known e
 outsourcing deal, Master Service Agreement (MSA), Global Capability Center (GCC) expansion,
 joint venture, tech partnership, or R&D acquisition involving {company_name}{f" | {domain}" if domain else ""}{linkedin_block}.
 
-## CRITICAL STRUCTURAL ARCHITECTURE (LEVEL 1 CATEGORIES — THIS CALL COVERS {len(categories)} OF 12)
+## CRITICAL STRUCTURAL ARCHITECTURE (LEVEL 3 CATEGORIES — THIS CALL COVERS {len(categories)} OF {len(_ERD_CATEGORIES)})
 Every deal you return MUST be tagged with exactly one of these categories via the erd_category
 field:
 {cat_block}
@@ -1602,6 +1622,17 @@ def _gemini_extract_deals_sync(
                 existing = [t.strip() for t in row.get("deal_focus", "").split(",") if t.strip()]
                 if "Acquisition" not in existing:
                     row["deal_focus"] = ", ".join(["Acquisition"] + existing) if existing else "Acquisition"
+            # ER&D rows only: derive erd_l1/erd_l2 from erd_category — never
+            # trust the model for the parent levels, same as tech_level1/2.
+            if "erd_category" in row:
+                l1, l2 = _ERD_L1L2_BY_L3.get(row.get("erd_category", "").strip(),
+                                              _ERD_L1L2_BY_L3["Others"])
+                row["erd_category"] = row.get("erd_category", "").strip() or "Others"
+                if row["erd_category"] not in _ERD_L1L2_BY_L3:
+                    row["erd_category"] = "Others"
+                    l1, l2 = _ERD_L1L2_BY_L3["Others"]
+                row["erd_l1"] = l1
+                row["erd_l2"] = l2
             out.append(row)
 
         logger.info(f"Parsed {len(out)} deals for {company_name}")
