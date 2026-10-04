@@ -143,6 +143,34 @@ def log_gemini_usage(module: str, label: str, response, grounded: bool = True,
         return None
 
 
+_CLAUDE_RATES = {"claude-sonnet-5": (2.00 / 1_000_000, 10.00 / 1_000_000)}
+
+
+def log_claude_usage(module: str, label: str, response, run_id: str = "") -> None:
+    """Record a Claude Messages API call in the same ledger as Gemini calls, so
+    get_usage_by_run() covers both. Never raises."""
+    try:
+        u = response.usage
+        in_tok, out_tok = u.input_tokens or 0, u.output_tokens or 0
+        in_rate, out_rate = _CLAUDE_RATES.get(response.model, (2.00 / 1_000_000, 10.00 / 1_000_000))
+        cost = in_tok * in_rate + out_tok * out_rate
+        conn = _get_conn()
+        try:
+            def _insert():
+                conn.execute(
+                    "INSERT INTO usage (ts, module, label, model, grounded, input_tokens, "
+                    "output_tokens, total_tokens, cost_usd, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (time.time(), module, label, response.model, 0, in_tok, out_tok,
+                     in_tok + out_tok, round(cost, 6), run_id),
+                )
+                conn.commit()
+            _retrying(_insert)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[usage] claude logging failed for {module}/{label}: {e}")
+
+
 def new_run_id() -> str:
     """Generate one id per report, to pass as `run_id` into every log_gemini_usage()
     call made while producing that report."""
