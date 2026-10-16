@@ -412,6 +412,11 @@ Fields (EXACT keys required):
 {fields_desc}
 
 Field rules:
+- vendor ("Tech"): the SPECIFIC named product and its vendor, e.g. "Salesforce Sales Cloud",
+  "SAP S/4HANA", "Microsoft Azure", "Snowflake", "ServiceNow ITSM", "Workday HCM". NEVER a generic
+  category such as "CRM", "ERP", "Cloud", "Data Warehouse", "BI tool", "AI platform" or
+  "HR system". If a source only shows that {company_name} uses a category without naming the
+  product, do NOT return a row for it. One row per named product.
 - tech_level3: COMPULSORY — never leave blank or "-". Exact name from this taxonomy
   (pick the closest match if not a perfect fit):
 {TECH_L3_LIST}
@@ -437,6 +442,43 @@ Field rules:
 Return ONLY a raw JSON array, no markdown:
 [{json.dumps(fields_example)}]
 """
+
+
+_GENERIC_TECH_WORDS = {
+    "crm", "erp", "hcm", "hrms", "hris", "scm", "plm", "mes", "cms", "lms", "ecm", "itsm", "itom",
+    "cloud", "saas", "paas", "iaas", "platform", "platforms", "software", "system", "systems",
+    "tool", "tools", "solution", "solutions", "suite", "application", "applications", "app", "apps",
+    "database", "databases", "data", "warehouse", "warehousing", "lake", "lakehouse", "analytics",
+    "bi", "business", "intelligence", "reporting", "dashboard", "dashboards", "ai", "ml", "genai",
+    "machine", "learning", "artificial", "iot", "security", "cybersecurity", "devops", "ci", "cd",
+    "api", "apis", "integration", "etl", "elt", "middleware", "hr", "payroll", "finance",
+    "financial", "accounting", "marketing", "automation", "sales", "helpdesk", "help", "desk",
+    "service", "services", "support", "ticketing", "collaboration", "productivity", "email",
+    "messaging", "chat", "video", "conferencing", "in-house", "inhouse", "custom", "proprietary",
+    "legacy", "on-premise", "on-prem", "premise", "hybrid", "multi", "public", "private",
+    "management", "network", "networking", "vpn", "firewall", "monitoring", "observability", "apm",
+    "siem", "edr", "xdr", "iam", "identity", "access", "mobile", "web", "portal", "website",
+    "enterprise", "core", "banking", "payment", "payments", "gateway", "infrastructure", "storage",
+    "server", "servers", "hosting", "container", "containers", "orchestration", "streaming",
+    "pipeline", "pipelines", "version", "control", "source", "code", "repository", "project",
+    "knowledge", "billing", "subscription", "compliance", "grc", "risk", "customer", "relationship",
+    "resource", "planning", "human", "capital", "supply", "chain", "content", "document",
+    "documents", "workflow", "low-code", "no-code", "rpa", "bpm", "edge", "computing", "digital",
+    "transformation", "modern", "modernization", "stack", "technology", "technologies", "tech",
+    "and", "&", "/", "-", "for", "of", "the", "a", "an", "based", "driven", "native", "managed",
+}
+
+
+def _is_generic_tech(name: str) -> bool:
+    """True when the Tech value names only a category ("CRM", "Cloud ERP
+    platform") rather than a specific product — those rows are dropped."""
+    n = (name or "").strip().lower()
+    if not n or n == "-":
+        return True
+    if n.startswith("internal captive"):
+        return False
+    tokens = [t for t in re.split(r"[\s/,()&+]+", n) if t]
+    return all(t.strip(".-") in _GENERIC_TECH_WORDS for t in tokens)
 
 
 def _gemini_tech_stack_sync(prompt: str, company_name: str, run_id: str = "") -> list[dict]:
@@ -602,6 +644,9 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str, run_id: str = "") ->
             dv, est = estimate_deal_value(row)
             row["deal_value"] = dv
             row["deal_estimated"] = est
+            if _is_generic_tech(row.get("vendor", "")):
+                logger.info(f"Tech stack: dropped generic entry {row.get('vendor')!r} for {company_name}")
+                continue
             # Skip rows with fewer than 2 real values (likely parsing artifacts)
             real_vals = sum(1 for v in row.values() if v and v != "-")
             if real_vals < 2:

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+from datetime import date
 from typing import AsyncGenerator
 
 logger = logging.getLogger(__name__)
@@ -423,20 +424,35 @@ _DEFAULT_MODEL_RANGE = (2.0, 30.0)   # mid + unknown type
 _TIER_PCT = {0: 0.30, 1: 0.45, 2: 0.60, 3: 0.75, 4: 0.90}
 
 
-_ACQUISITION_RE = re.compile(
-    r"\bacqui(?:re[sd]?|sition|re-hire|-hire)\b|\bacqui-?hire\b|\bbuys?\b|\bbought\b|"
-    r"\btakeover\b|\basset purchase\b|\bmerger\b|\bacquired\b",
+# Corporate M&A language. Purchases of licences, capacity or equipment use the
+# same verbs ("acquired 5,000 licences"), so a row is only treated as M&A when
+# it also has no IT-contract language — see _is_corporate_transaction.
+_CORP_TXN_RE = re.compile(
+    r"\b(?:acquires|acquired|acquisition of|to acquire|completed (?:the|its) acquisition|"
+    r"acqui-?hire|takeover|merger|merges with|majority stake|controlling stake|equity stake|"
+    r"stake in|divest(?:s|ed|iture)|spin-?off|spun off|carve-?out|sold (?:its|the) .{0,40}?business)\b",
+    re.IGNORECASE,
+)
+_M_AND_A_AGREEMENT_RE = re.compile(
+    r"\b(?:definitive |merger |purchase |share purchase |stock purchase )?agreement to (?:acquire|merge|sell)\b",
+    re.IGNORECASE,
+)
+_IT_CONTRACT_RE = re.compile(
+    r"\b(?:contract|agreement|MSA|outsourc\w*|managed services?|implement\w*|deploy\w*|"
+    r"licen[cs]\w*|subscription|SaaS|selected|awarded|engag\w*|supply|leas\w*|renew\w*|"
+    r"migrat\w*|TSA|transition services)\b",
     re.IGNORECASE,
 )
 
 
-def _is_acquisition_deal(description: str, signal_title: str = "") -> bool:
-    """Deal category 4 ('IT Acquisitions') and the sector-specific acquisition
-    deal types (AgTech Acquisitions, etc.) are explicitly searched for and do
-    get returned, but deal_focus is a free-text tag list the model doesn't
-    reliably apply — so detect acquisitions deterministically from the
-    description instead of trusting the model to self-tag every time."""
-    return bool(_ACQUISITION_RE.search(f"{description} {signal_title}"))
+def _is_corporate_transaction(description: str) -> bool:
+    """True for company acquisitions/mergers/stakes/divestitures — which the
+    IT Deal Finder must not report — as opposed to IT purchasing contracts.
+    Backstop for the prompt's exclusion rule, which the model doesn't always obey."""
+    if not _CORP_TXN_RE.search(description or ""):
+        return False
+    rest = _M_AND_A_AGREEMENT_RE.sub(" ", description)
+    return not _IT_CONTRACT_RE.search(rest)
 
 
 def _detect_deal_type(description: str, tech_level2: str) -> str:
@@ -726,23 +742,28 @@ DEAL CATEGORIES TO CAPTURE (find ALL of these):
 1. IT Outsourcing & Managed Services — SI contracts, BPO, ITO, MSP, infrastructure managed services
 2. Cloud & Digital Transformation — cloud migration, SaaS rollouts, digital programmes
 3. ERP / CRM / HCM / SCM — enterprise application implementations and upgrades
-4. IT Acquisitions — tech company acquisitions, acqui-hires, asset purchases with IT angle
-   (acquirer must actually integrate/operate the technology — not a passive financial stake)
-5. Strategic Joint Ventures & Technology Partnerships — JVs with tech firms to jointly build
-   or operate a technology platform (NOT capital/equity investments — see exclusion below)
+4. IT Hardware & Infrastructure — servers, storage, network, end-user devices, data-centre
+   equipment and telecom infrastructure supply, lease or refresh contracts
+5. Technology Partnerships — commercial agreements with tech firms to jointly build or operate a
+   technology platform (a services/licensing relationship, NOT an equity JV or investment)
 6. Enterprise Operations Partnerships — long-term IT ops partnerships, co-innovation agreements
-7. Technology Disinvestments — IT asset sales, carve-outs, spin-offs, divestitures of tech units
-8. Cybersecurity & Compliance — security platform contracts, SOC outsourcing, compliance tools
-9. Analytics, AI & Data — AI/ML platform deals, data lake, BI, advanced analytics contracts
+7. Cybersecurity & Compliance — security platform contracts, SOC outsourcing, compliance tools
+8. Analytics, AI & Data — AI/ML platform deals, data lake, BI, advanced analytics contracts
 {sector_block}
 
 CAPTIVE / GCC AWARENESS: If {company_name} operates internal Captive/GCC centres or has been
 insourcing IT work that was previously outsourced, document it explicitly — internal GCC footprints
 are market-competing entities. Note any "lift and shift" from vendor to captive.
 
+SCOPE: only contracts where {company_name} BUYS (or renews) IT hardware, software, cloud, or
+IT/technology services from a vendor or partner. Every row must name the supplying vendor.
+
 EXCLUDE (do NOT return):
-- Funding rounds, equity investments, CVC, seed/Series A-Z, or purely financial transactions
-- IPOs, SPAC mergers, minority stakes without operational IT delivery component
+- Company acquisitions, mergers, acqui-hires, takeovers, asset purchases of a business, or stake
+  purchases — by {company_name} or of {company_name} — even when the target is a tech company
+- Divestitures, carve-outs, spin-offs and IT asset sales (the IT services contracts that follow a
+  separation, e.g. a new outsourcing or TSA agreement, ARE in scope)
+- Funding rounds, equity investments, CVC, seed/Series A-Z, IPOs, SPACs, or purely financial deals
 
 SEARCHES TO RUN:
 {search_focus}
@@ -781,10 +802,8 @@ FIELD RULES:
 - end_date: contract expiry or renewal date if known
 - duration_months: contract length in months; derive from start+end if not stated; outsourcing≈60, SaaS≈36
 - last_detected: date of press release / article (YYYY-MM-DD or YYYY-MM or YYYY)
-- deal_focus: 1-3 tags from: Acquisition | AI | ML | Cloud | Big Data | Analytics | Cybersecurity | IoT |
-  Automation | ERP | Digital Transformation | Payments | Open Banking | DevOps | Data Platform | Other
-  — ALWAYS include "Acquisition" as one of the tags for any deal under category 4 (IT Acquisitions)
-  or any other acquisition/acqui-hire/asset-purchase/merger deal, in addition to its tech tag(s).
+- deal_focus: 1-3 tags from: AI | ML | Cloud | Big Data | Analytics | Cybersecurity | IoT | Hardware |
+  Infrastructure | Automation | ERP | Digital Transformation | Payments | Open Banking | DevOps | Data Platform | Other
 - description: UP TO 100-200 WORDS — scope, platforms, data volumes, team size, business rationale.
   Short sentence only if source has genuinely little detail.
 - source: direct URL to press release, article, or filing
@@ -801,7 +820,7 @@ _SECTOR_KEYWORDS = {
                      "precision ag", "agtech", "farm", "agriculture", "agricultural",
                      "crop", "harvest", "livestock", "grain"],
         "deal_types": [
-            "10. AgTech Acquisitions — precision ag, farm management software, autonomous machinery startups",
+            "10. AgTech Software Contracts — farm management software licensing, implementation and SaaS deals",
             "11. Precision Agriculture Platform — FMIS, guidance, telematics, yield monitoring deals",
             "12. Autonomous Farming Tech — autonomous tractor, robotics, AI harvesting JVs",
             "13. Farm Data & Analytics — farm data platforms, satellite/sensor analytics deals",
@@ -812,10 +831,9 @@ _SECTOR_KEYWORDS = {
             "AGCO Fendt, Hexagon Agriculture, Farmers Edge, Granular, Proagrica"
         ),
         "extra_searches": [
-            "precision agriculture technology acquisition",
-            "farm management software deal acquisition",
-            "autonomous farming startup acquisition",
-            "agtech acquisition startup buy",
+            "precision agriculture technology contract",
+            "farm management software licence implementation",
+            "autonomous farming technology supply agreement",
             "precision ag platform partnership",
             "farm data analytics deal",
             "autonomous tractor robotics technology",
@@ -864,7 +882,7 @@ _SECTOR_KEYWORDS = {
             "core banking platform deal",
             "digital banking transformation",
             "payment technology partnership",
-            "fintech acquisition technology integration",
+            "fintech platform contract integration",
         ],
     },
     "telecom": {
@@ -1114,7 +1132,7 @@ def _conditional_search_block(company_name: str, focus_tech: list[str], focus_ve
         lines.append(f'    - "{company_name}" captive GCC internal technology centre insourcing')
         lines.append(f'    - "{company_name}" managed services BPO ITO infrastructure 2020 2021 2022 2023 2024')
         lines.append(f'    - "{company_name}" digital transformation ERP CRM cloud AI deal 2020 2021 2022 2023 2024')
-        lines.append(f'    - "{company_name}" technology partnership joint venture co-innovation')
+        lines.append(f'    - "{company_name}" technology partnership co-innovation agreement')
 
     lines.append("\n[STRICT INTELLIGENCE RULES]")
     lines.append('  - Do NOT omit a deal because the value is "Undisclosed". Label its size via an')
@@ -1194,7 +1212,7 @@ def _build_erd_prompt(company_name: str, domain: str, linkedin_block: str,
     fields_desc = "\n".join(f'  "{f["key"]}": "{f["description"]}"' for f in ERD_SCHEMA_FIELDS)
 
     cat_searches = "\n".join(
-        f'  - "{company_name}" {c} outsourcing OR MSA OR partnership OR GCC OR joint venture OR acquisition'
+        f'  - "{company_name}" {c} outsourcing OR MSA OR partnership OR GCC OR services contract'
         for c in categories
     )
 
@@ -1204,7 +1222,7 @@ relevant to {company_name}'s industry.
 
 Your objective is to comprehensively map, identify, and categorize EVERY known engineering
 outsourcing deal, Master Service Agreement (MSA), Global Capability Center (GCC) expansion,
-joint venture, tech partnership, or R&D acquisition involving {company_name}{f" | {domain}" if domain else ""}{linkedin_block}.
+tech partnership or engineering services contract involving {company_name}{f" | {domain}" if domain else ""}{linkedin_block}.
 
 ## CRITICAL STRUCTURAL ARCHITECTURE (LEVEL 3 CATEGORIES — THIS CALL COVERS {len(categories)} OF {len(_ERD_CATEGORIES)})
 Every deal you return MUST be tagged with exactly one of these categories via the erd_category
@@ -1237,7 +1255,7 @@ over recall.
 {cat_searches}
   - "{company_name}" R&D partnership OR "research and development" collaboration agreement
   - "{company_name}" Global Capability Center OR GCC expansion engineering
-  - "{company_name}" acquires OR "joint venture" engineering firm OR design studio OR IP acquisition
+  - "{company_name}" engineering services contract OR design services agreement OR test lab outsourcing
   - "{company_name}" 10-K OR 10-Q "research and development" spending engineering partnership
   - site:linkedin.com "{company_name}" engineering partnership OR joint product development{vendor_searches}
 
@@ -1270,9 +1288,8 @@ Description & Scope | Deal Value | Start Date | End Date)
 - end_date: contract expiration, framework refresh cycle, or production/milestone target — plain
   text if not a strict date (e.g. "Framework is rolling; next refresh 2027").
 - source: verifiable source URL for the deal announcement if available, else empty string.
-- deal_focus: 1-3 tags from: Acquisition | AI | Automation | Robotics | ER&D | Co-Development | Embedded Systems |
+- deal_focus: 1-3 tags from: AI | Automation | Robotics | ER&D | Co-Development | Embedded Systems |
   Semiconductor | Compliance | Digital Twin | GCC | Other
-  — ALWAYS include "Acquisition" for any acquisition/acqui-hire/asset-purchase/merger deal.
 
 Return ONLY the raw JSON array. No prose. No markdown fences (except the bolded terms inside the
 description field itself, which should use markdown ** syntax).
@@ -1289,7 +1306,7 @@ def _build_prompts(
 ) -> list[str]:
     """
     Return 2 focused prompts.
-    Call 1: broad IT + acquisitions/JVs/disinvestments + top SI vendors.
+    Call 1: broad IT contracts + hardware/infrastructure + top SI vendors.
     Call 2: year sweep + sector-specific + user focus.
     Each targets ~60s completion.
     """
@@ -1310,7 +1327,7 @@ def _build_prompts(
     sector_block = _detect_sector_block(company_name)
     sector_vendors, sector_searches = _detect_sector_extra(company_name)
 
-    # ── Prompt 1: broad sweep + acquisitions/JVs/disinvestments + top vendors ─
+    # ── Prompt 1: broad sweep + hardware/infrastructure + top vendors ─────────
     # LinkedIn/SI-partner searches are listed FIRST — these surface deals that never get
     # a press release (implementation partner case studies, employee announcement posts)
     # and are otherwise the most likely to be skipped if buried at the end of a long list.
@@ -1321,9 +1338,8 @@ def _build_prompts(
   - "{company_name}" implementation partner case study cloud OR data OR AI
   - "{company_name}" Google Cloud OR AWS OR Azure migration "implementation partner"
   - "{company_name}" IT outsourcing contract deal signed
-  - "{company_name}" technology acquisition acqui-hire
-  - "{company_name}" joint venture technology partner
-  - "{company_name}" IT disinvestment carve-out spin-off asset sale
+  - "{company_name}" technology partnership agreement platform
+  - "{company_name}" servers OR storage OR network OR laptops hardware supply contract
   - "{company_name}" digital transformation program cloud migration
   - "{company_name}" managed services ERP SAP Oracle implementation
   - "{company_name}" cybersecurity infrastructure data center contract
@@ -1332,10 +1348,10 @@ def _build_prompts(
   - "{company_name}" IT outsourcing restructuring nine-figure billion
   - "{company_name}" independent digital architecture enterprise systems
   - "{company_name}" demerger IT separation standalone systems
-  - "{company_name}" acquires technology company startup
-  - "{company_name}" acquisition technology software hardware
-  - "{company_name}" bought acquired tech firm stake joint venture
-  - site:businesswire.com OR site:prnewswire.com "{company_name}" acquires
+  - "{company_name}" selects OR awards OR signs technology services agreement
+  - "{company_name}" data center OR network infrastructure refresh contract
+  - "{company_name}" software licence OR enterprise agreement renewal
+  - site:businesswire.com OR site:prnewswire.com "{company_name}" selects OR contract
   - site:businesswire.com OR site:prnewswire.com "{company_name}" technology deal
 
 IMPORTANT: Run ALL of the searches above — do not stop early just because you found a few
@@ -1353,9 +1369,9 @@ have NO press release anywhere else, so skipping them means missing real deals."
                            fields_desc, fields_json_keys, sector_block)
 
     # ── Prompt 2: year sweep + sector vendors + user focus ────────────────────
-    # Combine IT deal + acquisition into one query per year to halve search count
     year_searches = "\n".join(
-        f'  - "{company_name}" IT deal OR technology acquisition OR tech contract {y}' for y in range(2016, 2026)
+        f'  - "{company_name}" IT contract OR technology services agreement OR hardware supply {y}'
+        for y in range(2016, date.today().year + 1)
     )
 
     p2_vendors = "Dell Technologies, HPE, Atos, NTT DATA, Unisys, Fujitsu, T-Systems, CGI, Snowflake, CrowdStrike, Palo Alto Networks"
@@ -1616,12 +1632,9 @@ def _gemini_extract_deals_sync(
             row["source"] = _match_grounding_source(
                 row.get("vendor", ""), row.get("description", ""), grounding_sources
             )
-            # Tag acquisitions in Deal Focus even when the model forgets to —
-            # deterministic, not dependent on the model following the prompt.
-            if _is_acquisition_deal(row.get("description", "")):
-                existing = [t.strip() for t in row.get("deal_focus", "").split(",") if t.strip()]
-                if "Acquisition" not in existing:
-                    row["deal_focus"] = ", ".join(["Acquisition"] + existing) if existing else "Acquisition"
+            if _is_corporate_transaction(row.get("description", "")):
+                logger.info(f"Dropped corporate transaction for {company_name}: {row.get('vendor', '')}")
+                continue
             # ER&D rows only: derive erd_l1/erd_l2 from erd_category — never
             # trust the model for the parent levels, same as tech_level1/2.
             if "erd_category" in row:

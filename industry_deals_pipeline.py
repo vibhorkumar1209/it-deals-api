@@ -86,13 +86,13 @@ def _deals_prompt(
     focus_tech: str = "",
 ) -> str:
     tech_line = (
-        f'\n- "{company_name}" {focus_tech} deal contract implementation 2019 2020 2021 2022 2023 2024 2025'
+        f'\n- "{company_name}" {focus_tech} deal contract implementation 2020 2021 2022 2023 2024 2025 2026'
         if focus_tech else ""
     )
     return f"""You are an IT deal researcher. Find all significant IT contracts, technology deals, and outsourcing agreements for {company_name}{f' ({domain})' if domain else ''} in the {industry} industry.
 
 Run these searches:
-- "{company_name}" IT contract deal signed 2019 2020 2021 2022 2023 2024 2025
+- "{company_name}" IT contract deal signed 2020 2021 2022 2023 2024 2025 2026
 - "{company_name}" outsourcing technology vendor implementation agreement
 - "{company_name}" ERP CRM cloud digital transformation contract announcement
 - "{company_name}" technology partnership vendor deal press release{tech_line}
@@ -110,6 +110,10 @@ For each deal return EXACTLY this JSON object:
   "source_url": "https://... or ''",
   "source_label": "Press Release | News Article | Annual Report | Vendor Case Study | LinkedIn"
 }}
+
+Only contracts where {company_name} BUYS IT hardware, software, cloud or IT/technology services from a
+vendor. Do NOT return company acquisitions, mergers, acqui-hires, stake purchases, divestitures,
+spin-offs or funding rounds — those are corporate transactions, not IT contracts.
 
 Return ONLY a raw JSON array. Include deals from 2018 onwards. Return [] if none found."""
 
