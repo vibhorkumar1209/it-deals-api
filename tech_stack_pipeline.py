@@ -416,7 +416,8 @@ Field rules:
   "SAP S/4HANA", "Microsoft Azure", "Snowflake", "ServiceNow ITSM", "Workday HCM". NEVER a generic
   category such as "CRM", "ERP", "Cloud", "Data Warehouse", "BI tool", "AI platform" or
   "HR system". If a source only shows that {company_name} uses a category without naming the
-  product, do NOT return a row for it. One row per named product.
+  product, do NOT return a row for it. Practices, protocols and standards (SRE, Agile, REST APIs,
+  OAuth, JWT, microservices) are not products — skip them. One row per named product.
 - tech_level3: COMPULSORY — never leave blank or "-". Exact name from this taxonomy
   (pick the closest match if not a perfect fit):
 {TECH_L3_LIST}
@@ -466,6 +467,10 @@ _GENERIC_TECH_WORDS = {
     "documents", "workflow", "low-code", "no-code", "rpa", "bpm", "edge", "computing", "digital",
     "transformation", "modern", "modernization", "stack", "technology", "technologies", "tech",
     "and", "&", "/", "-", "for", "of", "the", "a", "an", "based", "driven", "native", "managed",
+    # practices, protocols and standards — not products
+    "rest", "restful", "soap", "graphql", "oauth", "oidc", "saml", "sso", "jwt", "json", "xml",
+    "token", "tokens", "web", "2.0", "protocol", "protocols", "standard", "sre", "site",
+    "reliability", "engineering", "agile", "scrum", "kanban", "microservices", "serverless",
 }
 
 
