@@ -507,6 +507,26 @@ def _tool_key(vendor: str) -> str:
     return {"reactjs": "react", "vuejs": "vue", "nodejs": "node", "nextjs": "next"}.get(v.replace(" ", ""), v)
 
 
+def _salvage_objects(text: str) -> list[dict]:
+    """Decode complete JSON objects one by one from a truncated array."""
+    dec, out = json.JSONDecoder(), []
+    i = text.find("[")
+    if i == -1:
+        return out
+    i += 1
+    while True:
+        while i < len(text) and text[i] in " \t\r\n,":
+            i += 1
+        if i >= len(text) or text[i] != "{":
+            return out
+        try:
+            obj, i = dec.raw_decode(text, i)
+        except json.JSONDecodeError:
+            return out
+        if isinstance(obj, dict):
+            out.append(obj)
+
+
 def _gemini_tech_stack_sync(prompt: str, company_name: str, run_id: str = "") -> list[dict]:
     """Blocking Gemini call. Runs inside run_in_executor."""
     try:
@@ -535,7 +555,7 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str, run_id: str = "") ->
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
                     temperature=0.1,
-                    max_output_tokens=16384,
+                    max_output_tokens=32768,
                 ),
             )
             from usage_logger import log_gemini_usage
@@ -591,6 +611,12 @@ def _gemini_tech_stack_sync(prompt: str, company_name: str, run_id: str = "") ->
         try:
             parsed = json.loads(clean)
         except json.JSONDecodeError:
+            parsed = None
+        if parsed is None and "MAX_TOKENS" in finish:
+            # Cut off mid-array: keep every complete object instead of losing the call.
+            parsed = _salvage_objects(clean)
+            logger.info(f"Tech stack: salvaged {len(parsed)} tools from truncated reply for {company_name}")
+        if parsed is None:
             array_match = re.search(r"\[.*\]", clean, re.DOTALL)
             if not array_match:
                 # Attempt recovery from truncated response
