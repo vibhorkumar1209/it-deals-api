@@ -14,6 +14,8 @@ import re
 import time
 from typing import AsyncGenerator
 
+from enrich_pipeline import _is_corporate_transaction, _is_non_it_service, _is_self_supplied
+
 logger = logging.getLogger(__name__)
 
 GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
@@ -111,9 +113,11 @@ For each deal return EXACTLY this JSON object:
   "source_label": "Press Release | News Article | Annual Report | Vendor Case Study | LinkedIn"
 }}
 
-Only contracts where {company_name} BUYS IT hardware, software, cloud or IT/technology services from a
-vendor. Do NOT return company acquisitions, mergers, acqui-hires, stake purchases, divestitures,
-spin-offs or funding rounds — those are corporate transactions, not IT contracts.
+BUYER SIDE ONLY: contracts where {company_name} is the CUSTOMER buying IT hardware, software, cloud
+or IT/technology services from a vendor for its own use. Do NOT return: work {company_name} delivers
+to its own clients; go-to-market, reseller or co-sell alliances; company acquisitions, mergers,
+stake purchases, divestitures, spin-offs or funding rounds; or non-IT professional services (audit,
+tax, legal, forensic investigations, executive search).
 
 Return ONLY a raw JSON array. Include deals from 2018 onwards. Return [] if none found."""
 
@@ -357,6 +361,10 @@ async def search_industry_deals(
         deals = []
         for item in parsed:
             if not isinstance(item, dict):
+                continue
+            desc = str(item.get("description", ""))
+            if (_is_self_supplied(str(item.get("vendor", "")), cname)
+                    or _is_corporate_transaction(desc) or _is_non_it_service(desc)):
                 continue
             # Always recompute renewal date server-side for consistency
             announced  = item.get("announced_date", "")

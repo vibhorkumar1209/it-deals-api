@@ -455,6 +455,40 @@ def _is_corporate_transaction(description: str) -> bool:
     return not _IT_CONTRACT_RE.search(rest)
 
 
+_NON_IT_SERVICE_RE = re.compile(
+    r"\b(?:whistle-?blower\w*|forensic|investigat\w*|statutory audit|audit(?:or|ors)? of (?:its|the) "
+    r"(?:accounts|financial)|tax (?:advis\w*|services|compliance)|legal (?:counsel|advis\w*)|law firm|"
+    r"litigation|executive search|headhunt\w*)\b",
+    re.IGNORECASE,
+)
+_TECH_SCOPE_RE = re.compile(
+    r"\b(?:cyber\w*|breach|ransomware|security|software|cloud|platform|IT|technology|system|systems|"
+    r"data|digital|ERP|SAP|Oracle|network|infrastructure|application|implement\w*|migrat\w*)\b",
+)
+
+
+def _is_non_it_service(description: str) -> bool:
+    """Audit/legal/forensic-style engagements with no technology scope. A
+    forensic investigation of a cyber breach is IT work and is kept."""
+    d = description or ""
+    return bool(_NON_IT_SERVICE_RE.search(d)) and not _TECH_SCOPE_RE.search(_NON_IT_SERVICE_RE.sub(" ", d))
+
+
+def _norm_org(name: str) -> str:
+    n = re.sub(r"\(.*?\)", " ", (name or "").lower())
+    n = re.sub(r"\b(inc|ltd|limited|llc|plc|corp|corporation|co|group|holdings|technologies|gmbh|ag|sa)\b\.?", " ", n)
+    return re.sub(r"[^a-z0-9]+", " ", n).strip()
+
+
+def _is_self_supplied(vendor: str, company_name: str) -> bool:
+    """Vendor is the company itself — i.e. the company is the supplier, not the
+    buyer. The company's own captive/GCC (ER&D insourcing) is allowed."""
+    v, c = _norm_org(vendor), _norm_org(company_name)
+    if not v or not c or re.search(r"gcc|captive|global capability", v):
+        return False
+    return v == c or v.startswith(c + " ") or c.startswith(v + " ")
+
+
 def _detect_deal_type(description: str, tech_level2: str) -> str:
     """Classify deal as outsourcing | saas | consulting | implementation."""
     text = f"{description} {tech_level2}"
@@ -755,8 +789,9 @@ CAPTIVE / GCC AWARENESS: If {company_name} operates internal Captive/GCC centres
 insourcing IT work that was previously outsourced, document it explicitly — internal GCC footprints
 are market-competing entities. Note any "lift and shift" from vendor to captive.
 
-SCOPE: only contracts where {company_name} BUYS (or renews) IT hardware, software, cloud, or
-IT/technology services from a vendor or partner. Every row must name the supplying vendor.
+SCOPE — BUYER SIDE ONLY: only contracts where {company_name} is the CUSTOMER that buys (or
+renews) IT hardware, software, cloud, or IT/technology services from a vendor, for its own use.
+Every row must name the supplying vendor, and the vendor must not be {company_name} itself.
 
 EXCLUDE (do NOT return):
 - Company acquisitions, mergers, acqui-hires, takeovers, asset purchases of a business, or stake
@@ -764,6 +799,12 @@ EXCLUDE (do NOT return):
 - Divestitures, carve-outs, spin-offs and IT asset sales (the IT services contracts that follow a
   separation, e.g. a new outsourcing or TSA agreement, ARE in scope)
 - Funding rounds, equity investments, CVC, seed/Series A-Z, IPOs, SPACs, or purely financial deals
+- Deals where {company_name} is the SUPPLIER: work it delivers to its own clients, client case
+  studies, and go-to-market / reseller / co-sell / alliance agreements aimed at selling jointly
+  to third parties (keep an alliance only if {company_name} itself deploys the technology)
+- Non-IT professional services: statutory audit, tax, legal counsel, litigation, forensic or
+  whistle-blower investigations, M&A advisory, executive search, HR or management consulting
+  with no technology scope
 
 SEARCHES TO RUN:
 {search_focus}
@@ -1361,7 +1402,7 @@ have NO press release anywhere else, so skipping them means missing real deals."
     p1_vendors = (
         "Accenture, Infosys, TCS, Wipro, HCLTech, Cognizant, Capgemini, DXC Technology, "
         "IBM, SAP, Oracle, Microsoft, AWS, Google Cloud, ServiceNow, Salesforce, Workday, "
-        "Baker McKenzie, EY, Deloitte, KPMG, PwC"   # advisory/legal for large IT restructurings
+        "EY, Deloitte, KPMG, PwC"   # their IT consulting / implementation practices
     )
 
     prompt1 = _make_prompt(company_name, domain, linkedin_block,
@@ -1632,8 +1673,12 @@ def _gemini_extract_deals_sync(
             row["source"] = _match_grounding_source(
                 row.get("vendor", ""), row.get("description", ""), grounding_sources
             )
-            if _is_corporate_transaction(row.get("description", "")):
-                logger.info(f"Dropped corporate transaction for {company_name}: {row.get('vendor', '')}")
+            desc = row.get("description", "")
+            drop = ("corporate transaction" if _is_corporate_transaction(desc)
+                    else "company is supplier" if _is_self_supplied(row.get("vendor", ""), company_name)
+                    else "non-IT service" if _is_non_it_service(desc) else "")
+            if drop:
+                logger.info(f"Dropped {drop} for {company_name}: {row.get('vendor', '')}")
                 continue
             # ER&D rows only: derive erd_l1/erd_l2 from erd_category — never
             # trust the model for the parent levels, same as tech_level1/2.

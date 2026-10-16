@@ -486,6 +486,27 @@ def _is_generic_tech(name: str) -> bool:
     return all(t.strip(".-") in _GENERIC_TECH_WORDS for t in tokens)
 
 
+_TOOL_ALIASES = {
+    "amazon web services": "aws", "amazon": "aws", "golang": "go", "gsuite": "google workspace",
+    "g suite": "google workspace", "gsuite account": "google workspace",
+    "google cloud platform": "google cloud", "gcp": "google cloud", "google cloud services": "google cloud",
+    "microsoft azure": "azure", "azure ad": "microsoft entra id", "reactjs": "react", "vuejs": "vue",
+    "nodejs": "node", "nextjs": "next",
+}
+
+
+def _tool_key(vendor: str) -> str:
+    """One row per product: "Amazon S3" = "AWS S3", "React.js" = "React",
+    regardless of which category the model filed it under."""
+    v = re.sub(r"\(.*?\)", " ", (vendor or "").lower())
+    v = re.sub(r"\.js\b", "js", v)
+    v = re.sub(r"[^a-z0-9+#]+", " ", v).strip()
+    for long, short in sorted(_TOOL_ALIASES.items(), key=lambda kv: -len(kv[0])):
+        v = re.sub(rf"^{re.escape(long)}\b", short, v)
+    v = re.sub(r"\bjs$", "", v).strip()
+    return {"reactjs": "react", "vuejs": "vue", "nodejs": "node", "nextjs": "next"}.get(v.replace(" ", ""), v)
+
+
 def _gemini_tech_stack_sync(prompt: str, company_name: str, run_id: str = "") -> list[dict]:
     """Blocking Gemini call. Runs inside run_in_executor."""
     try:
@@ -747,7 +768,7 @@ async def find_tech_stack(
 
         new_tools = 0
         for tool in call_tools:
-            dedup_key = f"{tool.get('vendor','').lower()}|{tool.get('tech_level3','').lower()}"
+            dedup_key = _tool_key(tool.get("vendor", ""))
             if dedup_key in seen_keys:
                 continue
             seen_keys.add(dedup_key)
@@ -795,7 +816,7 @@ async def find_tech_stack(
 
             new_tools = 0
             for tool in call_tools:
-                dedup_key = f"{tool.get('vendor','').lower()}|{tool.get('tech_level3','').lower()}"
+                dedup_key = _tool_key(tool.get("vendor", ""))
                 if dedup_key in seen_keys:
                     continue
                 seen_keys.add(dedup_key)
@@ -836,7 +857,7 @@ async def find_tech_stack(
             future.cancel()
 
         for tool in fallback_tools:
-            dedup_key = f"{tool.get('vendor','').lower()}|{tool.get('tech_level3','').lower()}"
+            dedup_key = _tool_key(tool.get("vendor", ""))
             if dedup_key in seen_keys:
                 continue
             seen_keys.add(dedup_key)
