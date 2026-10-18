@@ -157,12 +157,41 @@ Return ONLY a JSON object, no prose, no code fences:
 Never invent a signal, quote, URL or date. Fewer real signals beat more fabricated ones."""
 
 
+def _salvage_signals(text: str) -> list[dict]:
+    """Decode complete signal objects one by one from a truncated "signals" array."""
+    dec, out = json.JSONDecoder(), []
+    i = text.find("[")
+    if i == -1:
+        return out
+    i += 1
+    while True:
+        while i < len(text) and text[i] in " \t\r\n,":
+            i += 1
+        if i >= len(text) or text[i] != "{":
+            return out
+        try:
+            obj, i = dec.raw_decode(text, i)
+        except json.JSONDecodeError:
+            return out
+        if isinstance(obj, dict):
+            out.append(obj)
+
+
 def _parse_json_object(text: str) -> dict:
     text = re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.M).strip()
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end == -1:
         raise ValueError("Gemini returned no JSON object")
-    return json.loads(re.sub(r",\s*([\]}])", r"\1", text[start:end + 1]))
+    try:
+        return json.loads(re.sub(r",\s*([\]}])", r"\1", text[start:end + 1]))
+    except json.JSONDecodeError:
+        # Reply cut off mid-array (output cap) or one malformed object:
+        # keep every complete signal rather than failing the account.
+        signals = _salvage_signals(text[start:])
+        if not signals:
+            raise
+        logger.info(f"Intent Map: salvaged {len(signals)} signals from malformed reply")
+        return {"signals": signals}
 
 
 def gemini_research(account: dict, terms: list[str], run_id: str) -> dict:
@@ -179,7 +208,7 @@ def gemini_research(account: dict, terms: list[str], run_id: str) -> dict:
             contents=_gemini_prompt(account, terms, paraphrase),
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
-                max_output_tokens=16384,
+                max_output_tokens=32768,
             ),
         )
         log_gemini_usage(MODULE, f"research|{account['company_name'][:20]}", resp, run_id=run_id)
