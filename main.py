@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="IT Deals Intelligence API", version="1.0.0")
 
+from api_health import ApiIssueMiddleware, install_gemini_hook
+install_gemini_hook()
+app.add_middleware(ApiIssueMiddleware)
+
 
 @app.on_event("startup")
 async def _size_thread_pool():
