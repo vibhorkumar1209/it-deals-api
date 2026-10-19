@@ -1119,21 +1119,24 @@ class IntentAccount(BaseModel):
     company_linkedin_url: str = Field(default="")
     prospective_buyers: list[IntentBuyer] = Field(default_factory=list, max_length=50)
 
-class IntentWeight(BaseModel):
-    term: str = Field(..., min_length=1)
-    weight: float = Field(..., gt=0, le=10)
+class IntentParameter(BaseModel):
+    name: str = Field(..., min_length=1)
+    weight: float = Field(..., gt=0, le=100)
+    description: str = Field(default="")
 
 class IntentMapRequest(BaseModel):
     accounts: list[IntentAccount] = Field(..., min_length=1, max_length=50)
-    weights: list[IntentWeight] = Field(..., min_length=1, max_length=30)
-    half_life_days: float = Field(default=180, ge=30, le=730)
+    parameters: list[IntentParameter] = Field(default_factory=list, max_length=10)  # empty = default five
+    focus_area: str = Field(default="Digital Workplace", min_length=1)
+    seller_company: str = Field(default="")
+    region: str = Field(default="")
     force_refresh: bool = False
 
 
 @app.post("/api/intent-map")
 async def intent_map(req: IntentMapRequest):
     """SSE stream: score accounts against weighted intent terms and route buyers."""
-    from intent_map_pipeline import norm_domain, run_intent_map
+    from intent_map_pipeline import norm_domain, resolve_parameters, run_intent_map
 
     async def _generate():
         def _sse(obj: dict) -> str:
@@ -1152,11 +1155,16 @@ async def intent_map(req: IntentMapRequest):
             accounts.append({"company_name": a.company_name.strip(), "domain": norm_domain(a.domain),
                              "company_linkedin_url": a.company_linkedin_url,
                              "prospective_buyers": [b.model_dump() for b in a.prospective_buyers]})
-        weights = {w.term.strip(): w.weight for w in req.weights if w.term.strip()}
+        focus = req.focus_area.strip()
+        params = resolve_parameters([p.model_dump() for p in req.parameters], focus)
+        if not params:
+            yield _sse({"type": "error", "message": "Add at least one parameter with a weight above 0."})
+            return
 
         run_id, results, usage = "", [], None
         try:
-            async for event in run_intent_map(accounts, weights, req.half_life_days, req.force_refresh):
+            async for event in run_intent_map(accounts, params, focus, req.region.strip(),
+                                              req.seller_company.strip(), req.force_refresh):
                 if event["type"] == "run_started":
                     run_id = event["run_id"]
                 elif event["type"] == "account_result":
@@ -1178,8 +1186,8 @@ async def intent_map(req: IntentMapRequest):
                             f"{len(results)} accounts · top {top['company_name']} {top['composite_score']}",
                             usage or get_usage_by_run(run_id),
                             data={"companies": ", ".join(a["company_name"] for a in accounts),
-                                  "weights": [w.model_dump() for w in req.weights],
-                                  "half_life_days": req.half_life_days,
+                                  "parameters": params, "focus_area": focus,
+                                  "seller_company": req.seller_company.strip(), "region": req.region.strip(),
                                   "results": results})
 
     return StreamingResponse(
