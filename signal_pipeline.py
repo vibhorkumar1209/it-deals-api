@@ -14,6 +14,8 @@ Optional: if user_company is provided, runs a 6th ranking pass per company
 
 import asyncio
 import json
+
+from json_salvage import parse_lenient
 import logging
 import os
 import re
@@ -161,16 +163,12 @@ def _gemini_call_sync(prompt: str, use_search: bool, label: str, max_output_toke
         return []
 
     def _try_parse(raw: str):
-        try:
-            clean = re.sub(r"```(?:json)?\s*", "", raw.strip())
-            clean = re.sub(r"```\s*$", "", clean, flags=re.MULTILINE).strip()
-            parsed = json.loads(clean)
-            if isinstance(parsed, list):
-                return parsed
-            if isinstance(parsed, dict):
-                return [parsed]
-        except Exception:
-            pass
+        # Strict, then repaired truncation / per-object salvage (output cap, bad comma).
+        parsed = parse_lenient(raw)
+        if isinstance(parsed, list) and parsed:
+            return parsed
+        if isinstance(parsed, dict) and parsed:
+            return [parsed]
         try:
             m = re.search(r"\[.*\]", raw, re.DOTALL)
             if m:
@@ -617,7 +615,7 @@ def _run_category_sync(
     prompt_fn = prompts[category]
     prompt = prompt_fn(company, domain, key_triggers, target_tech, lookback_days, user_company, user_domain, seller_profile)
     label = f"{company[:20]}|{category}"
-    rows = _gemini_call_sync(prompt, use_search=True, label=label, max_output_tokens=8192, run_id=run_id)
+    rows = _gemini_call_sync(prompt, use_search=True, label=label, max_output_tokens=16384, run_id=run_id)
 
     # signal_type → category map. Each prompt asks the model for a signal_type
     # from a fixed, category-specific enum (see prompt functions above) — that
@@ -688,7 +686,7 @@ def _rank_signals_sync(
         return signals
     prompt = _ranking_prompt(company, signals, user_company, user_domain, key_triggers, target_tech, seller_profile)
     label = f"rank|{company[:20]}"
-    ranked = _gemini_call_sync(prompt, use_search=False, label=label, max_output_tokens=8192, run_id=run_id)
+    ranked = _gemini_call_sync(prompt, use_search=False, label=label, max_output_tokens=16384, run_id=run_id)
     if not ranked or len(ranked) != len(signals):
         return signals
     # Merge importance fields back into original signal objects

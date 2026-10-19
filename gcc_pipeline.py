@@ -10,6 +10,8 @@ Discovery: industry + location → find companies with GCCs
 
 import asyncio
 import json
+
+from json_salvage import parse_lenient
 import logging
 import os
 import re
@@ -22,7 +24,7 @@ GOOGLE_AI_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
 
 # ── Shared Gemini caller ──────────────────────────────────────────────────────
 
-def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192, run_id: str = ""):
+def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 16384, run_id: str = ""):
     try:
         from google import genai
         from google.genai import types
@@ -104,13 +106,16 @@ def _gemini_call_sync(prompt: str, label: str, max_output_tokens: int = 8192, ru
     clean = re.sub(r"```(?:json)?\s*", "", raw.strip())
     clean = re.sub(r"```\s*$", "", clean, flags=re.MULTILINE).strip()
 
-    # Try parsing cleaned text directly first
-    try:
-        parsed = json.loads(clean)
-        if isinstance(parsed, (list, dict)):
-            return parsed
-    except Exception:
-        pass
+    # Strict parse, then repair a reply cut off at the output cap or broken by
+    # one malformed element. Runs before the regex fallbacks below, which on a
+    # truncated reply would grab the first small inner list instead.
+    parsed = parse_lenient(clean)
+    if isinstance(parsed, (list, dict)) and parsed:
+        try:
+            json.loads(clean)
+        except Exception:
+            logger.info(f"[{label}] salvaged JSON from malformed/truncated reply ({len(raw)} chars)")
+        return parsed
 
     # Then try extracting JSON array or object via regex
     for pattern in [r"\[[\s\S]*?\]", r"\{[\s\S]*?\}"]:
@@ -583,7 +588,7 @@ async def run_gcc_discovery(
     loop = asyncio.get_event_loop()
     result = await _collect(
         loop,
-        (_discovery_prompt(industry, location), "gcc_discovery", 8192),
+        (_discovery_prompt(industry, location), "gcc_discovery", 16384),
         "gcc_discovery",
         timeout=180,
     )
@@ -628,11 +633,11 @@ async def _enrich_one_location(
     gcc_name     = location_info.get("gcc_name", "")
     label = f"{company_name[:20]}@{gcc_location[:15]}"
 
-    caps_task  = _collect(loop, (_capabilities_prompt(company_name, gcc_location, gcc_name), f"cap_{label}",  6144, run_id), f"cap_{label}",  160)
-    proj_task  = _collect(loop, (_projects_prompt(company_name, gcc_location, gcc_name),     f"proj_{label}", 6144, run_id), f"proj_{label}", 160)
-    tal_task   = _collect(loop, (_talent_prompt(company_name, gcc_location, gcc_name),        f"tal_{label}",  6144, run_id), f"tal_{label}",  160)
-    fin_task   = _collect(loop, (_financials_prompt(company_name, gcc_location, gcc_name),    f"fin_{label}",  4096, run_id), f"fin_{label}",  160)
-    tech_task  = _collect(loop, (_techstack_prompt(company_name, gcc_location, gcc_name),     f"tech_{label}", 4096, run_id), f"tech_{label}", 160)
+    caps_task  = _collect(loop, (_capabilities_prompt(company_name, gcc_location, gcc_name), f"cap_{label}",  12288, run_id), f"cap_{label}",  160)
+    proj_task  = _collect(loop, (_projects_prompt(company_name, gcc_location, gcc_name),     f"proj_{label}", 12288, run_id), f"proj_{label}", 160)
+    tal_task   = _collect(loop, (_talent_prompt(company_name, gcc_location, gcc_name),        f"tal_{label}",  12288, run_id), f"tal_{label}",  160)
+    fin_task   = _collect(loop, (_financials_prompt(company_name, gcc_location, gcc_name),    f"fin_{label}",  8192, run_id), f"fin_{label}",  160)
+    tech_task  = _collect(loop, (_techstack_prompt(company_name, gcc_location, gcc_name),     f"tech_{label}", 8192, run_id), f"tech_{label}", 160)
 
     caps, projs, talent, fin, tech = await asyncio.gather(
         caps_task, proj_task, tal_task, fin_task, tech_task,
@@ -650,11 +655,11 @@ async def _enrich_one_location(
 
     # Retry any sections that returned empty — one additional attempt each
     retry_tasks = {}
-    if caps_v  is None: retry_tasks["caps"]  = _collect(loop, (_capabilities_prompt(company_name, gcc_location, gcc_name), f"cap2_{label}",  6144, run_id), f"cap2_{label}",  120)
-    if projs_v is None: retry_tasks["projs"] = _collect(loop, (_projects_prompt(company_name, gcc_location, gcc_name),     f"proj2_{label}", 6144, run_id), f"proj2_{label}", 120)
-    if tal_v   is None: retry_tasks["tal"]   = _collect(loop, (_talent_prompt(company_name, gcc_location, gcc_name),        f"tal2_{label}",  6144, run_id), f"tal2_{label}",  120)
-    if fin_v   is None: retry_tasks["fin"]   = _collect(loop, (_financials_prompt(company_name, gcc_location, gcc_name),    f"fin2_{label}",  4096, run_id), f"fin2_{label}",  120)
-    if tech_v  is None: retry_tasks["tech"]  = _collect(loop, (_techstack_prompt(company_name, gcc_location, gcc_name),     f"tech2_{label}", 4096, run_id), f"tech2_{label}", 120)
+    if caps_v  is None: retry_tasks["caps"]  = _collect(loop, (_capabilities_prompt(company_name, gcc_location, gcc_name), f"cap2_{label}",  12288, run_id), f"cap2_{label}",  120)
+    if projs_v is None: retry_tasks["projs"] = _collect(loop, (_projects_prompt(company_name, gcc_location, gcc_name),     f"proj2_{label}", 12288, run_id), f"proj2_{label}", 120)
+    if tal_v   is None: retry_tasks["tal"]   = _collect(loop, (_talent_prompt(company_name, gcc_location, gcc_name),        f"tal2_{label}",  12288, run_id), f"tal2_{label}",  120)
+    if fin_v   is None: retry_tasks["fin"]   = _collect(loop, (_financials_prompt(company_name, gcc_location, gcc_name),    f"fin2_{label}",  8192, run_id), f"fin2_{label}",  120)
+    if tech_v  is None: retry_tasks["tech"]  = _collect(loop, (_techstack_prompt(company_name, gcc_location, gcc_name),     f"tech2_{label}", 8192, run_id), f"tech2_{label}", 120)
 
     if retry_tasks:
         logger.info(f"[{label}] retrying empty sections: {list(retry_tasks.keys())}")
@@ -747,7 +752,7 @@ async def run_gcc_enrichment(
             loc_result = None
             async for ev in _collect_with_heartbeats(
                 loop,
-                (_location_discovery_prompt(cname, domain, loc_filter), f"locs_{cname[:20]}", 8192, run_id),
+                (_location_discovery_prompt(cname, domain, loc_filter), f"locs_{cname[:20]}", 16384, run_id),
                 f"locs_{cname[:20]}",
                 timeout=160,
                 ping_message_fn=lambda e, c=cname: f"⏳ {c}: still searching for GCC locations… ({e}s)",
@@ -766,7 +771,7 @@ async def run_gcc_enrichment(
                 loc_result2 = None
                 async for ev in _collect_with_heartbeats(
                     loop,
-                    (_location_discovery_prompt_simple(cname, loc_filter), f"locs2_{cname[:20]}", 4096, run_id),
+                    (_location_discovery_prompt_simple(cname, loc_filter), f"locs2_{cname[:20]}", 8192, run_id),
                     f"locs2_{cname[:20]}",
                     timeout=120,
                     ping_message_fn=lambda e, c=cname: f"⏳ {c}: still retrying location search… ({e}s)",
@@ -1136,7 +1141,7 @@ async def run_gcc_intelligence(
     loop = asyncio.get_event_loop()
     result = await _collect(
         loop,
-        (_gcc_search_prompt_legacy(company_name, domain, location), "gcc_legacy", 8192),
+        (_gcc_search_prompt_legacy(company_name, domain, location), "gcc_legacy", 16384),
         "gcc_legacy",
         timeout=150,
     )
