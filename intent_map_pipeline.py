@@ -476,11 +476,52 @@ def assemble(account: dict, research: dict, analysis: dict, params: list[dict], 
     }
 
 
+_REDIRECT_HOST = "vertexaisearch.cloud.google.com"
+
+
+def _resolve_redirect(url: str) -> str:
+    """Grounding links are short-lived Google redirects; read the real URL from
+    the redirect's Location header (the target page itself is not fetched)."""
+    import urllib.error
+    import urllib.request
+
+    class _NoFollow(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    try:
+        opener = urllib.request.build_opener(_NoFollow)
+        opener.open(urllib.request.Request(url, method="HEAD"), timeout=6)
+    except urllib.error.HTTPError as e:
+        loc = e.headers.get("Location", "")
+        if 300 <= e.code < 400 and loc.startswith("http"):
+            return loc
+    except Exception:
+        pass
+    return url
+
+
+def resolve_source_links(result: dict) -> dict:
+    from concurrent.futures import ThreadPoolExecutor
+
+    urls = {e["source_url"] for p in result["parameters"] for e in p["evidence"]
+            if _REDIRECT_HOST in (e.get("source_url") or "")}
+    if not urls:
+        return result
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        resolved = dict(zip(urls, pool.map(_resolve_redirect, urls)))
+    for p in result["parameters"]:
+        for e in p["evidence"]:
+            e["source_url"] = resolved.get(e["source_url"], e["source_url"])
+    result["sources"] = list(dict.fromkeys(resolved.get(u, u) for u in result["sources"]))
+    return result
+
+
 # ── Runner ───────────────────────────────────────────────────────────────────
 def _process_account_sync(account, params, focus, region, seller, force_refresh, run_id, store, status_cb):
     domain = account["domain"]
     research_hash = _hash({"p": [[p["name"], p["description"]] for p in params], "f": focus, "r": region})
-    config_hash = _hash({"p": params, "f": focus, "r": region, "s": seller,
+    config_hash = _hash({"v": 2, "p": params, "f": focus, "r": region, "s": seller,
                          "b": sorted(_buyer_key(b) for b in account["prospective_buyers"])})
     if not force_refresh and (hit := store.get_processed(domain, config_hash)):
         return hit
@@ -495,7 +536,7 @@ def _process_account_sync(account, params, focus, region, seller, force_refresh,
     else:
         analysis = {"sector": "", "parameters": [], "departments": [], "stakeholders": [],
                     "account_summary": "No web signals found."}
-    result = assemble(account, research, analysis, params, seller)
+    result = resolve_source_links(assemble(account, research, analysis, params, seller))
     store.put_processed(domain, config_hash, result)
     return result
 
