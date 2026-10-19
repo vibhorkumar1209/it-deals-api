@@ -7,6 +7,8 @@ import json
 import re
 
 _TRAILING_COMMA = re.compile(r",\s*([\]}])")
+# Grounded Gemini replies can carry citation markers like "[cite: 3]" or "[1]".
+_CITATION = re.compile(r"\[(?:cite[^\]]*|\d+(?:\s*,\s*\d+)*)\]")
 
 
 def _first_container(text: str) -> int:
@@ -14,10 +16,11 @@ def _first_container(text: str) -> int:
     return min(idx) if idx else -1
 
 
-def repair_truncated(text: str):
-    """Parse the first JSON container in text. If it never closes (truncated),
-    cut back to the last complete element and close the open brackets."""
-    start = _first_container(text)
+def repair_truncated(text: str, start: int | None = None):
+    """Parse the JSON container starting at `start` (default: first one). If it
+    never closes (truncated), cut back to the last complete element and close
+    the open brackets."""
+    start = _first_container(text) if start is None else start
     if start == -1:
         return None
     stack, in_str, esc = [], False, False
@@ -56,13 +59,13 @@ def repair_truncated(text: str):
 
 
 def salvage_objects(text: str) -> list[dict]:
-    """Decode complete objects one by one from the first array in text —
-    survives truncation and missing commas between objects."""
+    """Decode complete objects one by one from the first array of objects in
+    text — survives truncation and missing commas between objects."""
     dec, out = json.JSONDecoder(), []
-    i = text.find("[")
-    if i == -1:
+    m = re.search(r"\[\s*\{", text)
+    if not m:
         return out
-    i += 1
+    i = m.start() + 1
     while True:
         while i < len(text) and text[i] in " \t\r\n,":
             i += 1
@@ -85,8 +88,17 @@ def parse_lenient(text: str):
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    repaired = repair_truncated(text)
-    if repaired is not None:
+    text = _CITATION.sub("", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Skip prose brackets: the JSON starts at the first "[{", '[ "', '{"' etc.
+    m = re.search(r'\[\s*[{\["\d\-tfn\]]|\{\s*["}]', text)
+    if not m:
+        return None
+    repaired = repair_truncated(text, m.start())
+    if isinstance(repaired, (list, dict)) and repaired:
         return repaired
-    objs = salvage_objects(text)
+    objs = salvage_objects(text[m.start():])
     return objs or None

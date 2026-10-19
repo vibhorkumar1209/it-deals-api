@@ -13,6 +13,8 @@ import logging
 import os
 import re
 from datetime import date
+
+from json_salvage import parse_lenient
 from typing import AsyncGenerator
 
 logger = logging.getLogger(__name__)
@@ -1519,7 +1521,7 @@ def _gemini_extract_deals_sync(
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
                     temperature=0.1,
-                    max_output_tokens=24576,  # raised for longer (100-200 word) deal descriptions
+                    max_output_tokens=32768,  # long (100-200 word) deal descriptions
                 ),
             )
             from usage_logger import log_gemini_usage
@@ -1602,47 +1604,16 @@ def _gemini_extract_deals_sync(
         clean = re.sub(r"```(?:json)?\s*", "", raw_text.strip())
         clean = re.sub(r"```\s*$", "", clean, flags=re.MULTILINE).strip()
 
-        # Try direct parse first
+        # Strict parse, then recover a reply cut off at the output cap or broken
+        # by a missing comma / citation marker — keeps every complete deal.
+        parsed = parse_lenient(clean)
+        if parsed is None:
+            logger.error(f"No usable JSON for {company_name}. Preview: {clean[:400]}")
+            return []
         try:
-            parsed = json.loads(clean)
+            json.loads(clean)
         except json.JSONDecodeError:
-            # Find the outermost [ ... ] array
-            array_match = re.search(r"\[.*\]", clean, re.DOTALL)
-            if not array_match:
-                # Response might be truncated — try to recover partial objects
-                logger.warning(f"No complete JSON array for {company_name}. Attempting recovery. Preview: {clean[:400]}")
-                # Find start of array, close it after last complete object
-                start = clean.find("[")
-                if start == -1:
-                    return []
-                fragment = clean[start:]
-                # Find last complete '}' and close array there
-                last_brace = fragment.rfind("}")
-                if last_brace == -1:
-                    return []
-                fragment = fragment[:last_brace + 1].rstrip().rstrip(",") + "\n]"
-                try:
-                    parsed = json.loads(fragment)
-                except json.JSONDecodeError:
-                    logger.error(f"Recovery failed for {company_name}")
-                    return []
-            else:
-                candidate_text = array_match.group(0)
-                try:
-                    parsed = json.loads(candidate_text)
-                except json.JSONDecodeError:
-                    # Fix trailing commas + try again
-                    candidate_text = re.sub(r",\s*([\]}])", r"\1", candidate_text)
-                    try:
-                        parsed = json.loads(candidate_text)
-                    except json.JSONDecodeError:
-                        # Truncated: recover last complete object
-                        last_brace = candidate_text.rfind("}")
-                        if last_brace == -1:
-                            return []
-                        fragment = candidate_text[:last_brace + 1].rstrip().rstrip(",") + "\n]"
-                        fragment = "[" + fragment.lstrip("[")
-                        parsed = json.loads(fragment)
+            logger.info(f"Salvaged JSON from malformed/truncated reply for {company_name}")
 
         if isinstance(parsed, dict):
             parsed = [parsed]

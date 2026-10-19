@@ -14,6 +14,7 @@ import re
 import time
 from typing import AsyncGenerator
 
+from json_salvage import parse_lenient
 from enrich_pipeline import _is_corporate_transaction, _is_non_it_service, _is_self_supplied
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ def _gemini_sync(prompt: str, label: str = "", run_id: str = "") -> str:
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
                     temperature=0.1,
-                    max_output_tokens=8192,
+                    max_output_tokens=16384,
                 ),
             )
             from usage_logger import log_gemini_usage
@@ -209,6 +210,16 @@ def _parse_json(text: str) -> list | dict | None:
         return None
 
     text = _sanitize(text)
+
+    # Strict → truncation repair → per-object salvage; old heuristics below as fallback.
+    lenient = parse_lenient(text)
+    if isinstance(lenient, list) and lenient:
+        return lenient
+    if isinstance(lenient, dict) and lenient:
+        for key in ("companies", "results", "data", "list", "items"):
+            if isinstance(lenient.get(key), list):
+                return lenient[key]
+        return lenient
 
     # 1. Find first '[' and walk to its TRUE matching ']' (ignores '[cite: ...]' etc.)
     start = text.find("[")
