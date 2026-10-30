@@ -25,6 +25,10 @@ app = FastAPI(title="IT Deals Intelligence API", version="1.0.0")
 from api_health import ApiIssueMiddleware, install_gemini_hook
 install_gemini_hook()
 app.add_middleware(ApiIssueMiddleware)
+# Outside callers (MCP, scripts) get output only; added after ApiIssue so it
+# wraps that middleware's appended events too.
+from external_redaction import ExternalRedactionMiddleware
+app.add_middleware(ExternalRedactionMiddleware)
 
 
 @app.on_event("startup")
