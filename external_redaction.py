@@ -68,6 +68,12 @@ def is_internal(headers: dict[str, str]) -> bool:
     return False
 
 
+def _mcp_key_ok(headers: dict[str, str]) -> bool:
+    keys = {k.strip() for k in os.getenv("MCP_API_KEYS", "").split(",") if k.strip()}
+    sent = headers.get("x-api-key") or headers.get("authorization", "").removeprefix("Bearer ").strip()
+    return bool(keys) and sent in keys
+
+
 def clean_text(text: str) -> str:
     for rx in _INLINE_CITATIONS:
         text = rx.sub("", text)
@@ -105,6 +111,12 @@ def _redact_sse(text: str) -> str:
     return re.sub(r"^data: (.*)$", sub, text, flags=re.M)
 
 
+async def _send_json(send, status: int, body: bytes):
+    await send({"type": "http.response.start", "status": status,
+                "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
+    await send({"type": "http.response.body", "body": body})
+
+
 class ExternalRedactionMiddleware:
     def __init__(self, app):
         self.app = app
@@ -115,12 +127,13 @@ class ExternalRedactionMiddleware:
         headers = {k.decode().lower(): v.decode(errors="ignore") for k, v in scope.get("headers", [])}
         if is_internal(headers):
             return await self.app(scope, receive, send)
-        if _INTERNAL_ONLY.match(scope.get("path", "")):
-            body = b'{"detail":"Not Found"}'
-            await send({"type": "http.response.start", "status": 404,
-                        "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
-            await send({"type": "http.response.body", "body": body})
-            return
+        path = scope.get("path", "")
+        # Outside callers (MCP, scripts) need a key from MCP_API_KEYS; /health stays open
+        # for Render's checks. Unset MCP_API_KEYS keeps the API open (output-only).
+        if path != "/health" and os.getenv("MCP_API_KEYS") and not _mcp_key_ok(headers):
+            return await _send_json(send, 401, b'{"detail":"Missing or invalid API key"}')
+        if _INTERNAL_ONLY.match(path):
+            return await _send_json(send, 404, b'{"detail":"Not Found"}')
 
         state = {"kind": None, "start": None, "buf": b""}
 
