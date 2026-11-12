@@ -432,7 +432,8 @@ def rank(t: dict, signals: list[dict], people: list[dict], run_id: str) -> dict:
 # ── Assembly (deterministic re-checks) ───────────────────────────────────────
 def _timeframe(cited: list[dict]) -> str:
     dated = sorted((s["_date"] for s in cited if s["_date"]), reverse=True)
-    if dated:
+    # An active programme that started before the window reads as live, not stale.
+    if dated and dated[0] >= date.today() - timedelta(days=WINDOW_DAYS):
         return dated[0].strftime("%Y-%m")
     return "Ongoing"
 
