@@ -1201,6 +1201,127 @@ async def intent_map(req: IntentMapRequest):
     )
 
 
+# ── Intent Engine (Top-5 triggers; COMPANY_BASED / EXEC_BASED) ────────────────
+# Field names match the engine spec's {{variables}} so callers such as the
+# outlook-campaigns app can post a lead straight through.
+
+class IntentEngineTarget(BaseModel):
+    intent_mode: str = Field(default="COMPANY_BASED")
+    company_name: str = Field(..., min_length=1)
+    company_domain: str = Field(..., min_length=1)
+    company_linkedin_url: str = Field(default="")
+    focus_department: str | list[str] = Field(default="")
+    focus_technologies: str | list[str] = Field(default_factory=list)
+    predefined_intents: str | list[str] = Field(default_factory=list)
+    custom_intent_notes: str = Field(default="")
+    executive_name: str = Field(default="")
+    executive_designation: str = Field(default="")
+    executive_linkedin_url: str = Field(default="")
+
+
+class IntentEngineRunRequest(IntentEngineTarget):
+    force_refresh: bool = False
+
+
+class IntentEngineBatchRequest(BaseModel):
+    # Shared settings apply to every target; a target's own non-empty value wins.
+    intent_mode: str = Field(default="COMPANY_BASED")
+    focus_department: str | list[str] = Field(default="")
+    focus_technologies: str | list[str] = Field(default_factory=list)
+    predefined_intents: str | list[str] = Field(default_factory=list)
+    custom_intent_notes: str = Field(default="")
+    targets: list[dict] = Field(..., min_length=1, max_length=50)
+    force_refresh: bool = False
+
+
+def _intent_targets(req: IntentEngineBatchRequest) -> list[dict]:
+    from intent_engine import normalize_target
+    shared = req.model_dump(exclude={"targets", "force_refresh"})
+    out, seen = [], set()
+    for raw in req.targets:
+        t = normalize_target({**shared, **{k: v for k, v in raw.items() if v not in ("", [], None)}})
+        key = (t["company_domain"], t["executive_name"].lower())
+        if key not in seen:
+            seen.add(key)
+            out.append(t)
+    return out
+
+
+@app.post("/api/intent-engine/run")
+async def intent_engine_run(req: IntentEngineRunRequest):
+    """One target → the spec's Schema A/B JSON plus campaign_leads. Blocking (~1–2 min)."""
+    from intent_engine import normalize_target, run_target_sync
+    from report_store import save_report
+    from usage_logger import get_usage_by_run, new_run_id
+
+    try:
+        t = normalize_target(req.model_dump(exclude={"force_refresh"}))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    missing = [k for k in ("GOOGLE_AI_API_KEY", "ANTHROPIC_API_KEY") if not os.getenv(k)]
+    if missing:
+        raise HTTPException(status_code=503, detail="API issue - run again in some time")
+    run_id = new_run_id()
+    try:
+        result = await asyncio.to_thread(run_target_sync, t, run_id, req.force_refresh)
+    except Exception as e:
+        logger.error(f"Intent Engine run failed: {e!r}")
+        raise HTTPException(status_code=502, detail="API issue - run again in some time")
+    await asyncio.to_thread(save_report, run_id, "intent_map", t["company_name"],
+                            f"{t['intent_mode']} · {t['company_name']}", get_usage_by_run(run_id),
+                            data={"engine_version": 2, "companies": t["company_name"], "results": [result]})
+    return result
+
+
+@app.post("/api/intent-engine")
+async def intent_engine_batch(req: IntentEngineBatchRequest):
+    """SSE stream: run the Intent Engine over several targets."""
+    from intent_engine import run_targets
+
+    async def _generate():
+        def _sse(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        missing = [k for k in ("GOOGLE_AI_API_KEY", "ANTHROPIC_API_KEY") if not os.getenv(k)]
+        if missing:
+            yield _sse({"type": "error", "message": f"{', '.join(missing)} not set."})
+            return
+        try:
+            targets = _intent_targets(req)
+        except ValueError as e:
+            yield _sse({"type": "error", "message": str(e)})
+            return
+
+        run_id, results, usage = "", [], None
+        try:
+            async for event in run_targets(targets, req.force_refresh):
+                if event["type"] == "run_started":
+                    run_id = event["run_id"]
+                elif event["type"] == "target_result":
+                    results.append(event["result"])
+                elif event["type"] == "complete":
+                    usage = event["usage"]
+                yield _sse(event)
+        except Exception as e:
+            logger.error(f"Intent Engine error: {e}", exc_info=True)
+            yield _sse({"type": "error", "message": str(e)})
+        finally:
+            if run_id and results:
+                from report_store import save_report
+                from usage_logger import get_usage_by_run
+                names = ", ".join(dict.fromkeys(t["company_name"] for t in targets))
+                save_report(run_id, "intent_map", names, f"{req.intent_mode.upper()} · {len(results)} targets",
+                            usage or get_usage_by_run(run_id),
+                            data={"engine_version": 2, "companies": names, "intent_mode": req.intent_mode.upper(),
+                                  "results": results})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
 # ── Competitive Intelligence ──────────────────────────────────────────────────
 
 class CompetitiveDiscoverRequest(BaseModel):
