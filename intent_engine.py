@@ -57,8 +57,8 @@ COMPANY_CATEGORIES = ["Executive Activity", "Hiring Surge", "Tech Stack Shift", 
                       "Product Launch"]
 EXEC_TIERS = ["Tier 1: Direct Exec Activity", "Tier 2: Dept & Tech Shift", "Tier 3: Macro Trigger"]
 SOURCE_TYPES = {
-    "COMPANY_BASED": ["LinkedIn Post", "Earnings Call", "Careers Page", "News/PR", "Engineering Blog"],
-    "EXEC_BASED": ["LinkedIn Post", "Earnings Call", "Careers Page", "News/PR", "Podcast/Interview"],
+    "COMPANY_BASED": ["LinkedIn Post", "Social Post", "Earnings Call", "Careers Page", "News/PR", "Engineering Blog"],
+    "EXEC_BASED": ["LinkedIn Post", "Social Post", "Earnings Call", "Careers Page", "News/PR", "Podcast/Interview"],
 }
 
 
@@ -67,6 +67,41 @@ def _as_list(v) -> list[str]:
     if isinstance(v, str):
         v = re.split(r"[,;\n]", v)
     return [x.strip() for x in (v or []) if str(x).strip()]
+
+
+_SOCIAL_TEXT = ("text", "content", "post", "body", "caption", "message", "description", "title", "summary")
+_SOCIAL_DATE = ("date", "posted_at", "created_at", "published_at", "timestamp", "time", "posted_on")
+_SOCIAL_URL = ("url", "link", "post_url", "permalink", "source_url")
+
+
+def normalize_social(v) -> list[dict]:
+    """Optional social-media activity (past 3–6 months) as any JSON: a list of
+    posts, {"posts": [...]}, or a JSON string of either. Unknown shapes are kept
+    as text so nothing the user pasted is silently dropped."""
+    if v in (None, "", [], {}):
+        return []
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            raise ValueError("social_activity must be valid JSON")
+    if isinstance(v, dict):
+        lists = [x for x in v.values() if isinstance(x, list)]
+        v = [i for l in lists for i in l] if lists else [v]
+    if not isinstance(v, list):
+        v = [v]
+    out = []
+    for item in v[:100]:
+        if isinstance(item, dict):
+            pick = lambda keys: next((str(item[k]).strip() for k in keys if item.get(k)), "")
+            text = pick(_SOCIAL_TEXT) or json.dumps(item, ensure_ascii=False)
+            kind = " ".join(str(item.get(k, "")) for k in ("type", "action", "activity_type")).strip()
+            out.append({"text": text[:1500], "date": pick(_SOCIAL_DATE)[:10], "url": pick(_SOCIAL_URL),
+                        "platform": str(item.get("platform") or item.get("network") or "").strip(),
+                        "kind": kind})
+        elif str(item).strip():
+            out.append({"text": str(item)[:1500], "date": "", "url": "", "platform": "", "kind": ""})
+    return out
 
 
 def normalize_target(raw: dict) -> dict:
@@ -86,6 +121,12 @@ def normalize_target(raw: dict) -> dict:
         "executive_name": str(raw.get("executive_name", "")).strip(),
         "executive_designation": str(raw.get("executive_designation", "")).strip(),
         "executive_linkedin_url": str(raw.get("executive_linkedin_url", "")).strip(),
+        # Positioning: outreach pitches only this seller and these offerings.
+        "seller_company": str(raw.get("seller_company", "")).strip(),
+        "seller_offerings": _as_list(raw.get("seller_offerings")),
+        # Former names / parent the caller already knows; the engine adds what it finds.
+        "alternate_names": _as_list(raw.get("alternate_names")),
+        "social_activity": normalize_social(raw.get("social_activity")),
     }
     if not t["company_name"] or not t["company_domain"]:
         raise ValueError("company_name and company_domain are required")
@@ -125,13 +166,66 @@ def _now() -> str:
 
 
 def _cache_key(t: dict) -> str:
-    return hashlib.sha256(json.dumps({"v": 1, **t}, sort_keys=True).encode()).hexdigest()[:24]
+    return hashlib.sha256(json.dumps({"v": 2, **t}, sort_keys=True).encode()).hexdigest()[:24]
 
 
 # ── Gemini research ──────────────────────────────────────────────────────────
+def _gemini_json(prompt: str, tag: str, run_id: str) -> dict:
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=os.environ["GOOGLE_AI_API_KEY"], http_options={"timeout": 180_000})
+    resp = client.models.generate_content(
+        model=GEMINI_MODEL, contents=prompt,
+        config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())],
+                                           max_output_tokens=4096))
+    log_gemini_usage(MODULE, tag, resp, run_id=run_id)
+    payload = parse_lenient(resp.text or "") if resp.text and "{" in resp.text else {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def resolve_identity(t: dict, run_id: str) -> dict:
+    """Acquisitions and renames (esp. the last year): older signals and
+    leaders sit under the former name or the parent, so research covers them too."""
+    since = (date.today() - timedelta(days=540)).isoformat()
+    prompt = f"""Today is {date.today().isoformat()}. Check the live web: since {since}, has the company
+"{t['company_name']}" ({t['company_domain']}) been acquired, merged, or renamed / rebranded?
+
+Return ONLY JSON, no prose:
+{{"event": "acquired | merged | renamed | none",
+  "event_date": "YYYY-MM or empty",
+  "former_names": ["previous names of this same company, if renamed"],
+  "current_name": "new name if this company now trades under another name, else empty",
+  "parent_company": "acquirer / new parent, if acquired or merged, else empty",
+  "parent_domain": "parent's web domain, else empty",
+  "source_url": "page URL that states it"}}
+Only report an event a source states. Never guess. If nothing happened, return event "none"."""
+    try:
+        d = _gemini_json(prompt, f"engine|identity|{t['company_name'][:20]}", run_id)
+    except Exception as e:
+        logger.warning(f"Intent Engine identity check failed for {t['company_name']}: {e!r}")
+        d = {}
+    found = str(d.get("event", "none")).lower() in ("acquired", "merged", "renamed") and \
+        str(d.get("source_url", "")).startswith("http")
+    own = t["company_name"].lower()
+    names = [n for n in _as_list((d.get("former_names") or []) + [d.get("current_name") or ""]) if found] + t["alternate_names"]
+    names = list(dict.fromkeys(n for n in names if n.lower() != own))
+    parent = str(d.get("parent_company") or "").strip() if found else ""
+    return {"event": str(d.get("event")).lower() if found else "none", "event_date": str(d.get("event_date") or "") if found else "",
+            "alternate_names": [n for n in names if n.lower() != parent.lower()], "parent_company": parent,
+            "parent_domain": norm_domain(d.get("parent_domain") or "") if parent else "",
+            "source_url": d.get("source_url", "") if found else ""}
+
+
+def _names(t: dict) -> str:
+    ids = t.get("_identity") or {}
+    all_names = [t["company_name"], *ids.get("alternate_names", []), *([ids["parent_company"]] if ids.get("parent_company") else [])]
+    return "(" + " OR ".join(f'"{n}"' for n in all_names) + ")" if len(all_names) > 1 else f'"{t["company_name"]}"'
+
+
 def _channels(t: dict) -> list[dict]:
-    name, dom, dept = f'"{t["company_name"]}"', t["company_domain"], t["focus_department"]
-    tech = " OR ".join(f'"{x}"' for x in t["focus_technologies"]) or f'"{dept}"'
+    name, dom, dept = _names(t), t["company_domain"], t["focus_department"]
+    tech = f'"{dept}"'
     intents = ", ".join(t["predefined_intents"])
     chans = []
     if t["intent_mode"] == "EXEC_BASED":
@@ -148,11 +242,11 @@ def _channels(t: dict) -> list[dict]:
                       "what": f"Posts, interviews, keynotes, appointments or promotions by {dept} leaders "
                               "and the executive team.",
                       "searches": [f'{name} appoints OR appointed OR "joins as" {dept}',
-                                   f'site:linkedin.com/posts {name} {dept} ({tech})',
+                                   f'site:linkedin.com/posts {name} {dept}',
                                    f'{name} CIO OR CTO OR "Head of" interview OR keynote OR podcast']})
     chans += [
         {"key": "talent", "label": "Department & talent",
-         "what": f"Open or recent job postings inside {dept} that mention {', '.join(t['focus_technologies']) or dept}"
+         "what": f"Open or recent job postings and team build-outs inside {dept}"
                  + (f" or these initiatives: {t['custom_intent_notes']}" if t["custom_intent_notes"] else "")
                  + ". Note team build-outs and hiring surges.",
          "searches": [f'site:linkedin.com/jobs {name} ({tech})',
@@ -160,15 +254,15 @@ def _channels(t: dict) -> list[dict]:
                       f'{name} careers {dept} ({tech})']},
         {"key": "tech", "label": "Technographic & product",
          "what": "Vendor selections or switches, platform migrations, cloud moves, engineering-blog posts, "
-                 f"RFPs/tenders or product launches involving {', '.join(t['focus_technologies']) or dept}.",
-         "searches": [f'{name} ({tech}) selects OR migrates OR deploys OR partnership OR rollout',
-                      f'{name} tender OR RFP OR contract ({tech})',
-                      f'site:{dom} ({tech}) OR "{dept}"']},
+                 f"RFPs/tenders or product launches affecting {dept}.",
+         "searches": [f'{name} {tech} selects OR migrates OR deploys OR partnership OR rollout',
+                      f'{name} tender OR RFP OR contract {tech}',
+                      f'site:{dom} {tech}']},
         {"key": "corp", "label": "Corporate & financial",
          "what": "Earnings-call priorities, annual report / 10-K / 10-Q technology priorities, M&A, "
                  f"funding, budget expansion or cost-cutting mandates that affect {dept}.",
          "searches": [f'{name} earnings call technology priorities {dept}',
-                      f'{name} annual report OR 10-K strategy investment ({tech})',
+                      f'{name} annual report OR 10-K strategy investment {tech}',
                       f'{name} acquisition OR funding OR "cost reduction" OR "budget" 2026']},
     ]
     if t["intent_mode"] == "COMPANY_BASED":
@@ -177,6 +271,15 @@ def _channels(t: dict) -> list[dict]:
                               f"in {dept} (C-level, VP, Head of, Director) plus the relevant executive team.",
                       "searches": [f'site:linkedin.com/in {name} {dept}',
                                    f'{name} leadership team', f'{name} "Head of" OR "VP" OR "Director" {dept}']})
+    if t["focus_technologies"]:
+        techs = " OR ".join(f'"{x}"' for x in t["focus_technologies"])
+        chans.append({"key": "usage", "label": "Technology usage check", "usage": True,
+                      "what": f"Evidence that {t['company_name']} USES any of these technologies today: "
+                              f"{', '.join(t['focus_technologies'])}. Good evidence: job postings requiring it, "
+                              "vendor case studies / customer lists, engineering blogs, tech-stack disclosures, "
+                              "staff profiles describing their work with it at this company.",
+                      "searches": [f'{name} ({techs})', f'site:linkedin.com/jobs {name} ({techs})',
+                                   f'({techs}) customer OR "case study" {name}']})
     for c in chans:
         c["intents"] = intents
     return chans
@@ -189,11 +292,27 @@ def _gemini_prompt(t: dict, ch: dict, paraphrase: bool) -> str:
           if paraphrase else "a SHORT verbatim excerpt (max 25 words) from the page")
     anchor = (f"Company: {t['company_name']}\nDomain: {t['company_domain']} (primary anchor)\n"
               f"LinkedIn: {t['company_linkedin_url'] or '-'}\n")
+    ids = t.get("_identity") or {}
+    if ids.get("alternate_names"):
+        anchor += f"Also known as / former name: {', '.join(ids['alternate_names'])} — items under these names count.\n"
+    if ids.get("parent_company"):
+        anchor += (f"Parent / acquirer ({ids.get('event') or 'acquired'} {ids.get('event_date') or ''}): {ids['parent_company']}"
+                   f" {('(' + ids['parent_domain'] + ')') if ids.get('parent_domain') else ''} — include parent items that "
+                   "concern this business or group-wide decisions covering it"
+                   + (", and parent-level leaders who now own this function for it" if ch.get("people") else "") + ".\n")
     if t["intent_mode"] == "EXEC_BASED":
         anchor += (f"Executive: {t['executive_name']}, {t['executive_designation']}\n"
                    f"Executive LinkedIn: {t['executive_linkedin_url'] or '-'}\n")
     searches = "\n".join(f"  - {q}" for q in ch["searches"])
-    if ch.get("people"):
+    if ch.get("usage"):
+        shape = f'''{{"usage": [{{
+  "technology": "one of the listed technologies, exactly as written",
+  "evidence": "{ev} that shows the company uses it",
+  "source_url": "page URL",
+  "date": "YYYY-MM-DD or YYYY-MM; empty if none shown"
+}}]}}'''
+        rules = "At most 2 items per technology. Omit a technology with no evidence. A vendor merely pitching it is not evidence."
+    elif ch.get("people"):
         shape = f'''{{"people": [{{
   "name": "full name",
   "title": "exact current title",
@@ -222,7 +341,6 @@ an out-of-scope subsidiary, or a different person who shares the executive's nam
 
 CHANNEL — {ch['label']}: {ch['what']}
 Focus department(s): {t['focus_department']}
-Focus technologies: {', '.join(t['focus_technologies']) or '-'}
 Intent triggers of interest: {ch['intents']}
 Custom intent criteria: {t['custom_intent_notes'] or '-'}
 
@@ -269,7 +387,7 @@ def research(t: dict, run_id: str) -> tuple[list[dict], list[dict]]:
     if all(o is None for _, o in outcomes):
         raise RuntimeError("All research calls failed")
 
-    signals, people, seen = [], [], set()
+    signals, people, usage, seen = [], [], [], set()
     for ch, o in outcomes:
         for s in (o or {}).get("signals", []) or []:
             if not isinstance(s, dict) or not s.get("evidence"):
@@ -281,7 +399,10 @@ def research(t: dict, run_id: str) -> tuple[list[dict], list[dict]]:
         for p in (o or {}).get("people", []) or []:
             if isinstance(p, dict) and p.get("name") and p.get("title"):
                 people.append(p)
-    return signals, people
+        for u in (o or {}).get("usage", []) or []:
+            if isinstance(u, dict):
+                usage.append(u)
+    return signals, people, usage
 
 
 # ── Gate 2 (deterministic): source + recency ─────────────────────────────────
@@ -303,6 +424,9 @@ def gate_signals(signals: list[dict]) -> list[dict]:
     cutoff = date.today() - timedelta(days=WINDOW_DAYS)
     kept = []
     for s in signals:
+        if s.get("user_provided"):
+            kept.append(s)
+            continue
         if not str(s.get("source_url", "")).startswith("http"):
             continue
         d = _parse_date(s.get("date", ""))
@@ -315,6 +439,39 @@ def gate_signals(signals: list[dict]) -> list[dict]:
     for i, s in enumerate(kept, 1):
         s["id"] = f"S{i}"
     return kept
+
+
+def social_signals(t: dict) -> list[dict]:
+    """User-supplied social activity, as signals. No URL needed (the user is the
+    source); dated items still have to fall inside the window."""
+    out, cutoff = [], date.today() - timedelta(days=WINDOW_DAYS)
+    who = t["executive_name"] if t["intent_mode"] == "EXEC_BASED" else t["company_name"]
+    for a in t["social_activity"]:
+        d = _parse_date(a["date"])
+        if d and (d < cutoff or d > date.today() + timedelta(days=1)):
+            continue
+        plat = a["platform"] or "social media"
+        out.append({"title": f"{who} {a['kind'] or 'activity'} on {plat}".strip(), "evidence": a["text"],
+                    "source_url": a["url"] if a["url"].startswith("http") else "",
+                    "source_type": "LinkedIn Post" if "linkedin" in plat.lower() else "Social Post",
+                    "date": a["date"], "_date": d, "ongoing": False, "people": [who], "channel": "social",
+                    "user_provided": True})
+    return out
+
+
+def gate_usage(t: dict, usage: list[dict]) -> list[dict]:
+    """One row per focus technology: evidence the target uses it, or none found.
+    Evidence must come with a source and actually name the technology."""
+    rows = []
+    for tech in t["focus_technologies"]:
+        hit = next((u for u in usage
+                    if str(u.get("source_url", "")).startswith("http")
+                    and tech.lower() in f"{u.get('technology', '')} {u.get('evidence', '')}".lower()
+                    and tech.lower() in str(u.get("evidence", "")).lower()), None)
+        rows.append({"technology": tech, "evidence_found": bool(hit),
+                     "evidence": (hit or {}).get("evidence", ""), "source_url": (hit or {}).get("source_url", ""),
+                     "date": (hit or {}).get("date", "")})
+    return rows
 
 
 def gate_people(people: list[dict]) -> list[dict]:
@@ -362,13 +519,32 @@ def _schema(t: dict) -> dict:
                            "triggers": {"type": "array", "items": trigger}}}
 
 
-def _system(t: dict) -> str:
-    tech = ", ".join(t["focus_technologies"]) or "the seller's offering"
-    common = f"""You are a B2B sales-intelligence analyst. You receive pre-verified, dated, sourced signals
-(ids S1..) about {t['company_name']} ({t['company_domain']}). Rank the Top {TOP_N} buying triggers, best first.
+def _offer(t: dict) -> str:
+    seller = t["seller_company"] or "the seller"
+    return f"{seller}'s {', '.join(t['seller_offerings'])}" if t["seller_offerings"] else f"{seller}'s offering"
 
-GATE 1 — RELEVANCE: keep a signal only if it directly affects {t['focus_department']}, involves {tech},
-or satisfies a listed intent trigger or the custom criteria. Drop awards, generic PR, unrelated regional news.
+
+def _system(t: dict) -> str:
+    tech = _offer(t)
+    ids = t.get("_identity") or {}
+    alias = ""
+    if ids.get("alternate_names") or ids.get("parent_company"):
+        alias = (f"\nThe company is also known as / was formerly {', '.join(ids.get('alternate_names') or []) or '-'}; "
+                 f"parent/acquirer: {ids.get('parent_company') or '-'}. Signals under those names count for this account.")
+    common = f"""You are a B2B sales-intelligence analyst. You receive pre-verified, dated, sourced signals
+(ids S1..) about {t['company_name']} ({t['company_domain']}). Rank the Top {TOP_N} buying triggers, best first.{alias}
+
+POSITIONING: every outreach angle positions ONLY {tech}. Do not pitch any other product, vendor or
+technology, and do not invent capabilities beyond the offering names given. The "technology_usage" list says
+which focus technologies the target is known to use; use it only as context (e.g. "since you run X"),
+never as the thing being sold.
+SOCIAL ACTIVITY: signals with channel "social" are the target's own recent social-media activity, supplied
+by the user. Weigh every one of them; when one is relevant, prefer it as evidence, and use it to sharpen
+the outreach angle.
+
+GATE 1 — RELEVANCE: keep a signal only if it directly affects {t['focus_department']}, creates a need that
+{tech} addresses, or satisfies a listed intent trigger or the custom criteria. Drop awards, generic PR,
+unrelated regional news.
 GATE 2 — FACTS: cite only the given signal ids (1–3 per trigger; merge signals about the same event).
 Every evidence bullet must be supported by the cited signals: never add a number, date, name or claim
 that is not in them. Fewer than {TOP_N} good triggers is fine; return only those. Zero is fine.
@@ -386,15 +562,15 @@ category: Executive Activity | Hiring Surge | Tech Stack Shift | Strategic/Finan
 executives: 1–3 per trigger, chosen ONLY from the given people (person ids P1..) who own budget,
 architecture or KPIs for that trigger. If no listed person fits, return an empty list — never invent one.
 ownership_rationale: 1 sentence on why that person owns it. outreach_angle per executive: 1 sentence
-pitching {tech} tied to the trigger. Leave the trigger-level outreach_angle as an empty string.
+positioning {tech}, tied to the trigger. Leave the trigger-level outreach_angle as an empty string.
 strategic_narrative: the account's main technical and business priorities right now."""
     return common + f"""
 
 GATE 3 — EXEC_BASED: judge every signal by "does this directly affect {t['executive_name']}'s KPIs as
 {t['executive_designation']}?" Drop it if not. Rank strictly by tier, then by impact:
   Tier 1: Direct Exec Activity — {t['executive_name']}'s own words, posts, interviews or role change
-          (only when the cited signal names {t['executive_name']}).
-  Tier 2: Dept & Tech Shift — hiring, {tech} stack shifts or projects in {t['focus_department']}.
+          (only when the cited signal names {t['executive_name']}, or is their own social activity).
+  Tier 2: Dept & Tech Shift — hiring, tech-stack shifts or projects in {t['focus_department']}.
   Tier 3: Macro Trigger — company-level priorities (earnings, M&A, cost mandates) explicitly tied to their domain.
 outreach_angle: 1 hyper-personalised sentence showing {t['executive_name']} how {tech} solves the priority
 in that trigger. Second evidence bullet: the direct impact on {t['executive_name']}'s KPIs.
@@ -402,14 +578,17 @@ Leave executives as an empty list.
 strategic_narrative: what {t['executive_name']} is prioritising and measured on right now."""
 
 
-def rank(t: dict, signals: list[dict], people: list[dict], run_id: str) -> dict:
+def rank(t: dict, signals: list[dict], people: list[dict], usage: list[dict], run_id: str) -> dict:
     import anthropic
 
     user = json.dumps({
         "today": date.today().isoformat(),
         "inputs": {k: t[k] for k in ("intent_mode", "company_name", "company_domain", "focus_department",
                                      "focus_technologies", "predefined_intents", "custom_intent_notes",
-                                     "executive_name", "executive_designation")},
+                                     "executive_name", "executive_designation", "seller_company",
+                                     "seller_offerings")},
+        "company_identity": t.get("_identity") or {},
+        "technology_usage": [{k: u[k] for k in ("technology", "evidence_found", "evidence")} for u in usage],
         "signals": [{"id": s["id"], "channel": s["channel"], "title": s.get("title", ""), "evidence": s["evidence"],
                      "source_type": s.get("source_type", ""), "date": s.get("date", ""), "ongoing": s["ongoing"],
                      "people": s.get("people", [])} for s in signals],
@@ -438,7 +617,7 @@ def _timeframe(cited: list[dict]) -> str:
     return "Ongoing"
 
 
-def assemble(t: dict, signals: list[dict], people: list[dict], ranked: dict) -> dict:
+def assemble(t: dict, signals: list[dict], people: list[dict], ranked: dict, usage: list[dict] | None = None) -> dict:
     company = t["intent_mode"] == "COMPANY_BASED"
     by_sig = {s["id"]: s for s in signals}
     by_person = {p["id"]: p for p in people}
@@ -458,8 +637,10 @@ def assemble(t: dict, signals: list[dict], people: list[dict], ranked: dict) -> 
             "confidence_score": tr["confidence_score"],
             "evidence_bullets": [b for b in tr.get("evidence_bullets", []) if b.strip()][:3],
             "source_type": tr["source_type"],
-            "source_url": cited[0]["source_url"],
+            "source_url": next((s["source_url"] for s in cited if s["source_url"]), ""),
         }
+        if any(s.get("user_provided") for s in cited):
+            item["from_social_activity"] = True
         if company:
             execs, seen = [], set()
             for e in tr.get("executives", []):
@@ -473,7 +654,7 @@ def assemble(t: dict, signals: list[dict], people: list[dict], ranked: dict) -> 
         else:
             # Tier 1 needs a cited source that actually names the executive.
             if tr["category"] == EXEC_TIERS[0] and not any(
-                    last and last in json.dumps([s.get("evidence"), s.get("title"), s.get("people")]).lower()
+                    s.get("user_provided") or last and last in json.dumps([s.get("evidence"), s.get("title"), s.get("people")]).lower()
                     for s in cited):
                 item["signal_tier"] = EXEC_TIERS[1]
             item["outreach_angle"] = tr.get("outreach_angle", "")
@@ -494,6 +675,7 @@ def assemble(t: dict, signals: list[dict], people: list[dict], ranked: dict) -> 
                                       "focus_department": t["focus_department"], "overall_intent_score": score,
                                       "strategic_narrative": narrative},
                   "top_5_triggers": out}
+        summary = result["account_summary"]
     else:
         result = {"intent_mode": "EXEC_BASED",
                   "executive_summary": {"company_name": t["company_name"], "company_domain": t["company_domain"],
@@ -501,16 +683,24 @@ def assemble(t: dict, signals: list[dict], people: list[dict], ranked: dict) -> 
                                         "executive_designation": t["executive_designation"],
                                         "overall_intent_score": score, "strategic_narrative": narrative},
                   "top_5_mapped_signals": out}
+        summary = result["executive_summary"]
+    ids = t.get("_identity") or {}
+    summary["positioning"] = {"seller_company": t["seller_company"], "seller_offerings": t["seller_offerings"]}
+    summary["company_identity"] = {k: ids.get(k, "") for k in ("event", "event_date", "alternate_names", "parent_company",
+                                                              "parent_domain", "source_url")} if ids else {}
+    summary["technology_usage"] = usage or []
+    summary["social_activity_items"] = len(t["social_activity"])
     return result
 
 
 def _resolve_links(result: dict) -> dict:
     items = result.get("top_5_triggers") or result.get("top_5_mapped_signals") or []
-    urls = {x["source_url"] for x in items if _REDIRECT_HOST in x["source_url"]}
+    tech = (result.get("account_summary") or result.get("executive_summary") or {}).get("technology_usage") or []
+    urls = {x["source_url"] for x in [*items, *tech] if _REDIRECT_HOST in (x.get("source_url") or "")}
     if urls:
         with ThreadPoolExecutor(max_workers=8) as pool:
             resolved = dict(zip(urls, pool.map(_resolve_redirect, urls)))
-        for x in items:
+        for x in [*items, *tech]:
             x["source_url"] = resolved.get(x["source_url"], x["source_url"])
     return result
 
@@ -560,12 +750,15 @@ def run_target_sync(t: dict, run_id: str, force_refresh: bool = False, status_cb
     key = _cache_key(t)
     if not force_refresh and (hit := cache.get(key)):
         return hit
+    status_cb("checking identity")
+    t = {**t, "_identity": resolve_identity(t, run_id)}
     status_cb("researching")
-    raw_signals, raw_people = research(t, run_id)
-    signals, people = gate_signals(raw_signals), gate_people(raw_people)
+    raw_signals, raw_people, raw_usage = research(t, run_id)
+    signals, people = gate_signals(raw_signals + social_signals(t)), gate_people(raw_people)
+    usage = gate_usage(t, raw_usage)
     status_cb("ranking")
-    ranked = rank(t, signals, people, run_id) if signals else {}
-    result = _resolve_links(assemble(t, signals, people, ranked))
+    ranked = rank(t, signals, people, usage, run_id) if signals else {}
+    result = _resolve_links(assemble(t, signals, people, ranked, usage))
     result["campaign_leads"] = campaign_leads(t, result)
     result["generated_at"] = _now()
     cache.put(key, result)

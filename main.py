@@ -1217,6 +1217,13 @@ class IntentEngineTarget(BaseModel):
     executive_name: str = Field(default="")
     executive_designation: str = Field(default="")
     executive_linkedin_url: str = Field(default="")
+    # Outreach positions only this seller and its offerings.
+    seller_company: str = Field(default="")
+    seller_offerings: str | list[str] = Field(default_factory=list)
+    # Known former names / parent; the engine also looks up acquisitions and renames.
+    alternate_names: str | list[str] = Field(default_factory=list)
+    # Optional JSON of the company's or executive's social activity (past 3–6 months).
+    social_activity: Any = None
 
 
 class IntentEngineRunRequest(IntentEngineTarget):
@@ -1230,6 +1237,8 @@ class IntentEngineBatchRequest(BaseModel):
     focus_technologies: str | list[str] = Field(default_factory=list)
     predefined_intents: str | list[str] = Field(default_factory=list)
     custom_intent_notes: str = Field(default="")
+    seller_company: str = Field(default="")
+    seller_offerings: str | list[str] = Field(default_factory=list)
     targets: list[dict] = Field(..., min_length=1, max_length=50)
     force_refresh: bool = False
 
