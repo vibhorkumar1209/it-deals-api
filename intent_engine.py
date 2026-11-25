@@ -636,6 +636,9 @@ def assemble(t: dict, signals: list[dict], people: list[dict], ranked: dict, usa
         cited = [by_sig[i] for i in dict.fromkeys(tr.get("signal_ids", [])) if i in by_sig]
         if not cited:
             continue  # no verified source behind it
+        if company and tr["category"] == "Executive Activity" and not any(
+                s["ongoing"] or (s["_date"] and s["_date"] >= date.today() - timedelta(days=EXEC_WINDOW_DAYS)) for s in cited):
+            continue  # executive intent older than 3 months is stale
         item = {
             "rank": 0,
             "signal_title": tr["signal_title"],
@@ -813,7 +816,7 @@ def add_email_sequences(t: dict, result: dict, leads: list[dict], run_id: str) -
 For each lead write exactly {EMAILS_PER_LEAD} emails, in order, each built ONLY on the trigger given for that
 email number (email 1 = the most recent trigger; follow-ups = older triggers). When an email's trigger is
 null, write a 2–3 sentence polite close-the-loop note that references nothing new.
-Rules: plain text; start "Hi <first_name>,"; 50–110 words; one concrete reference to the trigger using only
+Rules: plain text; start "Hi <first_name>," on its own line, then a blank line; 2–3 short paragraphs separated by blank lines; 50–110 words; one concrete reference to the trigger using only
 facts in its evidence; position only {_offer(t)}; one soft call to action; no signature, no placeholders,
 no links, no invented facts, numbers or names. Follow-ups are replies in the same thread: don't re-introduce
 yourself, open with a fresh angle. subject: only for email 1 (max 7 words, no clickbait); empty for others."""
@@ -844,6 +847,8 @@ yourself, open with a fresh angle. subject: only for email 1 (max 7 words, no cl
             item = trig[k] if k < len(trig) else None
             fb = _fallback_email(lead, item, k + 1, t)
             w = got[k] if k < len(got) and got[k].get("body", "").strip() else None
+            if w:  # greeting on its own line, even if the model ran it into the first sentence
+                w = {**w, "body": re.sub(r"^(Hi [^,\n]{1,40},)[ \t]+", r"\1\n\n", w["body"].strip())}
             subject = ((w or {}).get("subject") or "").strip() or fb["subject"] if k == 0 else ""
             seq.append({"subject": subject or f"{t['company_name']} — quick idea", "body": (w or fb)["body"].strip(),
                         "trigger": fb["trigger"]} if k == 0 else
