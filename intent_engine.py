@@ -42,7 +42,9 @@ logger = logging.getLogger("intent_engine")
 GEMINI_MODEL = "gemini-2.5-flash"
 CLAUDE_MODEL = "claude-sonnet-5"
 MODULE = "intent_map"
-WINDOW_DAYS = 180
+WINDOW_DAYS = 180          # company-level signals: past 3–6 months
+EXEC_WINDOW_DAYS = 90      # executive-level intent: past 1–3 months only
+EMAILS_PER_LEAD = 3        # email 1 from the most recent trigger, follow-ups from older ones
 CACHE_DAYS = 30
 MAX_CONCURRENT = 3
 TARGET_TIMEOUT = 600
@@ -166,7 +168,7 @@ def _now() -> str:
 
 
 def _cache_key(t: dict) -> str:
-    return hashlib.sha256(json.dumps({"v": 2, **t}, sort_keys=True).encode()).hexdigest()[:24]
+    return hashlib.sha256(json.dumps({"v": 3, **t}, sort_keys=True).encode()).hexdigest()[:24]
 
 
 # ── Gemini research ──────────────────────────────────────────────────────────
@@ -287,7 +289,7 @@ def _channels(t: dict) -> list[dict]:
 
 def _gemini_prompt(t: dict, ch: dict, paraphrase: bool) -> str:
     today = date.today()
-    since = (today - timedelta(days=WINDOW_DAYS)).isoformat()
+    since = (today - timedelta(days=_window(t, ch["key"]))).isoformat()
     ev = ("one-sentence factual summary in your own words, keeping names, numbers, dates and technologies exact"
           if paraphrase else "a SHORT verbatim excerpt (max 25 words) from the page")
     anchor = (f"Company: {t['company_name']}\nDomain: {t['company_domain']} (primary anchor)\n"
@@ -420,8 +422,13 @@ def _truthy(v) -> bool:
     return v is True or str(v).strip().lower() == "true"
 
 
-def gate_signals(signals: list[dict]) -> list[dict]:
-    cutoff = date.today() - timedelta(days=WINDOW_DAYS)
+def _window(t: dict, channel: str) -> int:
+    """Executive intent goes stale fast: the exec's own activity (and everything
+    in EXEC_BASED mode) must be from the last 90 days; company signals 180."""
+    return EXEC_WINDOW_DAYS if t["intent_mode"] == "EXEC_BASED" or channel == "exec" else WINDOW_DAYS
+
+
+def gate_signals(signals: list[dict], t: dict) -> list[dict]:
     kept = []
     for s in signals:
         if s.get("user_provided"):
@@ -433,6 +440,7 @@ def gate_signals(signals: list[dict]) -> list[dict]:
         ongoing = _truthy(s.get("ongoing"))
         if d and d > date.today() + timedelta(days=1):
             continue  # a future date is a misread
+        cutoff = date.today() - timedelta(days=_window(t, s.get("channel", "")))
         if not ongoing and (d is None or d < cutoff):
             continue
         kept.append(dict(s, _date=d, ongoing=ongoing))
@@ -444,7 +452,7 @@ def gate_signals(signals: list[dict]) -> list[dict]:
 def social_signals(t: dict) -> list[dict]:
     """User-supplied social activity, as signals. No URL needed (the user is the
     source); dated items still have to fall inside the window."""
-    out, cutoff = [], date.today() - timedelta(days=WINDOW_DAYS)
+    out, cutoff = [], date.today() - timedelta(days=_window(t, "exec" if t["intent_mode"] == "EXEC_BASED" else "social"))
     who = t["executive_name"] if t["intent_mode"] == "EXEC_BASED" else t["company_name"]
     for a in t["social_activity"]:
         d = _parse_date(a["date"])
@@ -744,6 +752,110 @@ def campaign_leads(t: dict, result: dict) -> list[dict]:
              "title": t["executive_designation"], "linkedin_url": t["executive_linkedin_url"], "data": data}]
 
 
+# ── Email sequences ──────────────────────────────────────────────────────────
+def _recency(item: dict) -> tuple:
+    """Newest first. A live programme counts as recent but after anything dated
+    in the last two months; rank breaks ties."""
+    d = _parse_date(item["date_or_timeframe"])
+    if d is None:
+        d = date.today() - timedelta(days=60)
+    return (-d.toordinal(), item["rank"])
+
+
+def _lead_triggers(result: dict, lead: dict) -> list[dict]:
+    items = result.get("top_5_triggers") or result.get("top_5_mapped_signals") or []
+    name = f"{lead['first_name']} {lead['last_name']}".strip().lower()
+    if result["intent_mode"] == "COMPANY_BASED":
+        own = [x for x in items if any(e["executive_name"].lower() == name for e in x["recommended_executives"])]
+        # Their own triggers first (newest first), then other account triggers as extra follow-ups.
+        return (sorted(own, key=_recency) + sorted([x for x in items if x not in own], key=_recency))[:EMAILS_PER_LEAD]
+    return sorted(items, key=_recency)[:EMAILS_PER_LEAD]
+
+
+def _angle(item: dict, name: str) -> str:
+    for e in item.get("recommended_executives") or []:
+        if e["executive_name"].lower() == name:
+            return e["outreach_angle"]
+    return item.get("outreach_angle") or (item.get("evidence_bullets") or [""])[0]
+
+
+def _fallback_email(lead: dict, item: dict | None, k: int, t: dict) -> dict:
+    first = lead["first_name"] or "there"
+    offer = _offer(t)
+    if item is None:
+        body = (f"Hi {first},\n\nLast note from me. If {offer} isn't a priority for {t['company_name']} right now, "
+                "just reply \"not now\" and I'll close the loop.")
+        return {"subject": "", "body": body, "trigger": ""}
+    angle = _angle(item, f"{lead['first_name']} {lead['last_name']}".strip().lower())
+    lead_in = "I noticed" if k == 1 else "Following up — I also saw"
+    body = f"Hi {first},\n\n{lead_in}: {item['signal_title']}.\n\n{angle}\n\nWorth a 15-minute call?"
+    return {"subject": item["signal_title"][:70] if k == 1 else "", "body": body, "trigger": item["signal_title"]}
+
+
+def add_email_sequences(t: dict, result: dict, leads: list[dict], run_id: str) -> list[dict]:
+    """Writes EMAILS_PER_LEAD emails per lead. Email 1 is built on the lead's most
+    recent trigger; each follow-up on the next older one; with fewer triggers
+    the last email is a short close-the-loop note. Stored in lead.data as
+    intent_email_{k}_subject / _body / _trigger for the campaign templates."""
+    import anthropic
+
+    plans = []
+    for i, lead in enumerate(leads):
+        trig = _lead_triggers(result, lead)
+        name = f"{lead['first_name']} {lead['last_name']}".strip().lower()
+        plans.append({"lead_id": f"L{i + 1}", "first_name": lead["first_name"], "title": lead["title"],
+                      "emails": [{"email": k + 1, "trigger": x["signal_title"], "date": x["date_or_timeframe"],
+                                  "evidence": x["evidence_bullets"], "angle": _angle(x, name)}
+                                 if k < len(trig) else {"email": k + 1, "trigger": None}
+                                 for k, x in enumerate(trig + [None] * (EMAILS_PER_LEAD - len(trig)))],
+                      "_trig": trig})
+    system = f"""You write cold B2B email sequences for {_offer(t)}, to people at {t['company_name']}.
+For each lead write exactly {EMAILS_PER_LEAD} emails, in order, each built ONLY on the trigger given for that
+email number (email 1 = the most recent trigger; follow-ups = older triggers). When an email's trigger is
+null, write a 2–3 sentence polite close-the-loop note that references nothing new.
+Rules: plain text; start "Hi <first_name>,"; 50–110 words; one concrete reference to the trigger using only
+facts in its evidence; position only {_offer(t)}; one soft call to action; no signature, no placeholders,
+no links, no invented facts, numbers or names. Follow-ups are replies in the same thread: don't re-introduce
+yourself, open with a fresh angle. subject: only for email 1 (max 7 words, no clickbait); empty for others."""
+    schema = {"type": "object", "additionalProperties": False, "required": ["leads"], "properties": {"leads": {
+        "type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["lead_id", "emails"],
+                                   "properties": {"lead_id": {"type": "string"}, "emails": {"type": "array", "items": {
+                                       "type": "object", "additionalProperties": False, "required": ["subject", "body"],
+                                       "properties": {"subject": {"type": "string"}, "body": {"type": "string"}}}}}}}}}
+    written = {}
+    try:
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], timeout=180.0)
+        resp = client.messages.create(
+            model=CLAUDE_MODEL, max_tokens=8000, system=system,
+            messages=[{"role": "user", "content": json.dumps([{k: v for k, v in p.items() if k != "_trig"} for p in plans], indent=1)}],
+            output_config={"format": {"type": "json_schema", "schema": schema}})
+        log_claude_usage(MODULE, f"engine|emails|{t['company_name'][:20]}", resp, run_id=run_id)
+        if resp.stop_reason == "end_turn":
+            payload = json.loads(next(b.text for b in resp.content if b.type == "text"))
+            written = {x["lead_id"]: x["emails"] for x in payload.get("leads", [])}
+    except Exception as e:
+        logger.warning(f"Intent Engine email writing failed for {t['company_name']}: {e!r}")
+
+    for p, lead in zip(plans, leads):
+        trig = p["_trig"]
+        got = written.get(p["lead_id"]) or []
+        seq = []
+        for k in range(EMAILS_PER_LEAD):
+            item = trig[k] if k < len(trig) else None
+            fb = _fallback_email(lead, item, k + 1, t)
+            w = got[k] if k < len(got) and got[k].get("body", "").strip() else None
+            subject = ((w or {}).get("subject") or "").strip() or fb["subject"] if k == 0 else ""
+            seq.append({"subject": subject or f"{t['company_name']} — quick idea", "body": (w or fb)["body"].strip(),
+                        "trigger": fb["trigger"]} if k == 0 else
+                       {"subject": "", "body": (w or fb)["body"].strip(), "trigger": fb["trigger"]})
+        lead["email_sequence"] = seq
+        for k, e in enumerate(seq, 1):
+            lead["data"][f"intent_email_{k}_body"] = e["body"]
+            lead["data"][f"intent_email_{k}_trigger"] = e["trigger"]
+        lead["data"]["intent_email_1_subject"] = seq[0]["subject"]
+    return leads
+
+
 # ── Runner ───────────────────────────────────────────────────────────────────
 def run_target_sync(t: dict, run_id: str, force_refresh: bool = False, status_cb=lambda s: None) -> dict:
     cache = _Cache()
@@ -754,12 +866,16 @@ def run_target_sync(t: dict, run_id: str, force_refresh: bool = False, status_cb
     t = {**t, "_identity": resolve_identity(t, run_id)}
     status_cb("researching")
     raw_signals, raw_people, raw_usage = research(t, run_id)
-    signals, people = gate_signals(raw_signals + social_signals(t)), gate_people(raw_people)
+    signals, people = gate_signals(raw_signals + social_signals(t), t), gate_people(raw_people)
     usage = gate_usage(t, raw_usage)
     status_cb("ranking")
     ranked = rank(t, signals, people, usage, run_id) if signals else {}
     result = _resolve_links(assemble(t, signals, people, ranked, usage))
-    result["campaign_leads"] = campaign_leads(t, result)
+    leads = campaign_leads(t, result)
+    if leads:
+        status_cb("writing emails")
+        leads = add_email_sequences(t, result, leads, run_id)
+    result["campaign_leads"] = leads
     result["generated_at"] = _now()
     cache.put(key, result)
     return result
