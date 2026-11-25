@@ -9,9 +9,9 @@ from typing import Any
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from config_loader import ScraperConfig
@@ -1254,6 +1254,38 @@ def _intent_targets(req: IntentEngineBatchRequest) -> list[dict]:
             seen.add(key)
             out.append(t)
     return out
+
+
+@app.post("/api/intent-engine/outbox")
+async def intent_outbox_put(request: Request):
+    """Queue leads (with their email sequences) for the Outlook campaign app."""
+    from intent_engine import Outbox
+    body = await request.json()
+    leads = body.get("leads") or []
+    if not isinstance(leads, list) or not leads:
+        return JSONResponse({"detail": "no leads"}, status_code=422)
+    return Outbox().put({"campaign_name": str(body.get("campaign_name") or "")[:200], "leads": leads})
+
+
+@app.get("/api/intent-engine/outbox")
+async def intent_outbox_pending():
+    from intent_engine import Outbox
+    return {"items": Outbox().pending()}
+
+
+@app.get("/api/intent-engine/outbox/{oid}")
+async def intent_outbox_get(oid: str):
+    from intent_engine import Outbox
+    item = Outbox().get(oid, with_payload=False)
+    return item or JSONResponse({"detail": "not found"}, status_code=404)
+
+
+@app.post("/api/intent-engine/outbox/{oid}/ack")
+async def intent_outbox_ack(oid: str, request: Request):
+    from intent_engine import Outbox
+    body = await request.json()
+    item = Outbox().ack(oid, bool(body.get("ok")), body.get("result") or {})
+    return item or JSONResponse({"detail": "not found"}, status_code=404)
 
 
 @app.post("/api/intent-engine/run")

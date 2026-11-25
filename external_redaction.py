@@ -134,6 +134,9 @@ class ExternalRedactionMiddleware:
             return await _send_json(send, 401, b'{"detail":"Missing or invalid API key"}')
         if _INTERNAL_ONLY.match(path):
             return await _send_json(send, 404, b'{"detail":"Not Found"}')
+        # The campaign outbox carries the user's own leads and emails, not sources: pass through as is.
+        if path.startswith("/api/intent-engine/outbox"):
+            return await self.app(scope, receive, send)
 
         state = {"kind": None, "start": None, "buf": b""}
 

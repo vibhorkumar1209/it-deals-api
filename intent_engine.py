@@ -44,7 +44,7 @@ CLAUDE_MODEL = "claude-sonnet-5"
 MODULE = "intent_map"
 WINDOW_DAYS = 180          # company-level signals: past 3–6 months
 EXEC_WINDOW_DAYS = 90      # executive-level intent: past 1–3 months only
-EMAILS_PER_LEAD = 3        # email 1 from the most recent trigger, follow-ups from older ones
+EMAILS_PER_LEAD = 5        # email 1 from the most recent trigger, follow-ups from older ones
 CACHE_DAYS = 30
 MAX_CONCURRENT = 3
 TARGET_TIMEOUT = 600
@@ -168,7 +168,7 @@ def _now() -> str:
 
 
 def _cache_key(t: dict) -> str:
-    return hashlib.sha256(json.dumps({"v": 3, **t}, sort_keys=True).encode()).hexdigest()[:24]
+    return hashlib.sha256(json.dumps({"v": 4, **t}, sort_keys=True).encode()).hexdigest()[:24]
 
 
 # ── Gemini research ──────────────────────────────────────────────────────────
@@ -790,9 +790,23 @@ def _fallback_email(lead: dict, item: dict | None, k: int, t: dict) -> dict:
                 "just reply \"not now\" and I'll close the loop.")
         return {"subject": "", "body": body, "trigger": ""}
     angle = _angle(item, f"{lead['first_name']} {lead['last_name']}".strip().lower())
-    lead_in = "I noticed" if k == 1 else "Following up — I also saw"
+    lead_in = "I noticed" if k == 1 else "Following up on"
     body = f"Hi {first},\n\n{lead_in}: {item['signal_title']}.\n\n{angle}\n\nWorth a 15-minute call?"
     return {"subject": item["signal_title"][:70] if k == 1 else "", "body": body, "trigger": item["signal_title"]}
+
+
+def _slots(trig: list[dict]) -> list[tuple[dict | None, bool]]:
+    """(trigger, is_reuse) per email. Five triggers → one each, newest first.
+    Fewer → the newest ones again from a new angle, and the last email is a
+    short close-the-loop note."""
+    if len(trig) >= EMAILS_PER_LEAD:
+        return [(x, False) for x in trig[:EMAILS_PER_LEAD]]
+    out = [(x, False) for x in trig]
+    i = 0
+    while len(out) < EMAILS_PER_LEAD - 1:
+        out.append((trig[i % len(trig)], True))
+        i += 1
+    return out + [(None, False)]
 
 
 def add_email_sequences(t: dict, result: dict, leads: list[dict], run_id: str) -> list[dict]:
@@ -806,16 +820,19 @@ def add_email_sequences(t: dict, result: dict, leads: list[dict], run_id: str) -
     for i, lead in enumerate(leads):
         trig = _lead_triggers(result, lead)
         name = f"{lead['first_name']} {lead['last_name']}".strip().lower()
+        slots = _slots(trig)
         plans.append({"lead_id": f"L{i + 1}", "first_name": lead["first_name"], "title": lead["title"],
                       "emails": [{"email": k + 1, "trigger": x["signal_title"], "date": x["date_or_timeframe"],
-                                  "evidence": x["evidence_bullets"], "angle": _angle(x, name)}
-                                 if k < len(trig) else {"email": k + 1, "trigger": None}
-                                 for k, x in enumerate(trig + [None] * (EMAILS_PER_LEAD - len(trig)))],
-                      "_trig": trig})
+                                  "evidence": x["evidence_bullets"], "angle": _angle(x, name), "revisit": reuse}
+                                 if x else {"email": k + 1, "trigger": None}
+                                 for k, (x, reuse) in enumerate(slots)],
+                      "_slots": slots})
     system = f"""You write cold B2B email sequences for {_offer(t)}, to people at {t['company_name']}.
 For each lead write exactly {EMAILS_PER_LEAD} emails, in order, each built ONLY on the trigger given for that
-email number (email 1 = the most recent trigger; follow-ups = older triggers). When an email's trigger is
-null, write a 2–3 sentence polite close-the-loop note that references nothing new.
+email number (email 1 = the most recent trigger; follow-ups = older triggers). "revisit": true means that
+trigger was already used in an earlier email: take a clearly different angle (business outcome, risk of
+waiting, how peers handle it) and don't repeat earlier wording. When an email's trigger is null, write a
+2–3 sentence polite close-the-loop note that references nothing new.
 Rules: plain text; start "Hi <first_name>," on its own line, then a blank line; 2–3 short paragraphs separated by blank lines; 50–110 words; one concrete reference to the trigger using only
 facts in its evidence; position only {_offer(t)}; one soft call to action; no signature, no placeholders,
 no links, no invented facts, numbers or names. Follow-ups are replies in the same thread: don't re-introduce
@@ -829,8 +846,8 @@ yourself, open with a fresh angle. subject: only for email 1 (max 7 words, no cl
     try:
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], timeout=180.0)
         resp = client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=8000, system=system,
-            messages=[{"role": "user", "content": json.dumps([{k: v for k, v in p.items() if k != "_trig"} for p in plans], indent=1)}],
+            model=CLAUDE_MODEL, max_tokens=16000, system=system,
+            messages=[{"role": "user", "content": json.dumps([{k: v for k, v in p.items() if k != "_slots"} for p in plans], indent=1)}],
             output_config={"format": {"type": "json_schema", "schema": schema}})
         log_claude_usage(MODULE, f"engine|emails|{t['company_name'][:20]}", resp, run_id=run_id)
         if resp.stop_reason == "end_turn":
@@ -840,11 +857,11 @@ yourself, open with a fresh angle. subject: only for email 1 (max 7 words, no cl
         logger.warning(f"Intent Engine email writing failed for {t['company_name']}: {e!r}")
 
     for p, lead in zip(plans, leads):
-        trig = p["_trig"]
+        slots = p["_slots"]
         got = written.get(p["lead_id"]) or []
         seq = []
         for k in range(EMAILS_PER_LEAD):
-            item = trig[k] if k < len(trig) else None
+            item = slots[k][0]
             fb = _fallback_email(lead, item, k + 1, t)
             w = got[k] if k < len(got) and got[k].get("body", "").strip() else None
             if w:  # greeting on its own line, even if the model ran it into the first sentence
@@ -932,3 +949,50 @@ async def run_targets(targets: list[dict], force_refresh: bool = False):
 
     usage = await asyncio.to_thread(get_usage_by_run, run_id)
     yield {"type": "complete", "run_id": run_id, "usage": usage, "total": len(results)}
+
+
+# ── Campaign outbox ──────────────────────────────────────────────────────────
+# The page can't post to the campaign app on the user's computer (browsers block
+# public https → 127.0.0.1), so it queues here and the campaign app collects
+# pending items with its API key, then reports back what it created.
+class Outbox:
+    def __init__(self, path: str = _DB_PATH):
+        self.path = path
+        with self._conn() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, created_at TEXT, status TEXT, "
+                      "payload TEXT, result TEXT, done_at TEXT)")
+
+    def _conn(self):
+        c = sqlite3.connect(self.path, timeout=30)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def put(self, payload: dict) -> dict:
+        oid = hashlib.sha256(f"{time.time_ns()}{json.dumps(payload)[:200]}".encode()).hexdigest()[:16]
+        with self._conn() as c:
+            c.execute("INSERT INTO outbox VALUES (?,?,?,?,?,?)", (oid, _now(), "pending", json.dumps(payload), None, None))
+        return self.get(oid, with_payload=False)
+
+    def get(self, oid: str, with_payload: bool = True) -> dict | None:
+        with self._conn() as c:
+            r = c.execute("SELECT * FROM outbox WHERE id=?", (oid,)).fetchone()
+        return self._row(r, with_payload) if r else None
+
+    def pending(self) -> list[dict]:
+        with self._conn() as c:
+            rs = c.execute("SELECT * FROM outbox WHERE status='pending' ORDER BY created_at").fetchall()
+        return [self._row(r, True) for r in rs]
+
+    def ack(self, oid: str, ok: bool, result: dict) -> dict | None:
+        with self._conn() as c:
+            c.execute("UPDATE outbox SET status=?, result=?, done_at=? WHERE id=? AND status='pending'",
+                      ("done" if ok else "error", json.dumps(result), _now(), oid))
+        return self.get(oid, with_payload=False)
+
+    @staticmethod
+    def _row(r, with_payload: bool) -> dict:
+        d = {"id": r["id"], "created_at": r["created_at"], "status": r["status"],
+             "result": json.loads(r["result"]) if r["result"] else None, "done_at": r["done_at"]}
+        if with_payload:
+            d["payload"] = json.loads(r["payload"])
+        return d
