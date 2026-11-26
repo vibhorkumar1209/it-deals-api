@@ -57,7 +57,9 @@ DEFAULT_INTENTS = ["Leadership Change", "Tech Stack Adoption", "Hiring Surge", "
 CUSTOM_INTENT = "Custom Intent"
 BUYING_ROLES = ["Economic Buyer", "Decision Maker", "Champion", "Influencer", "Evaluator"]
 SENIORITY = ["C-Suite", "SVP/VP", "Head/Director"]
-MAX_BUYING_CENTER = 15
+INVOLVEMENT = ["Owns", "Sponsors/Approves", "Executes", "Influenced"]
+IMPACT = ["High", "Medium", "Low"]
+MAX_BUYING_CENTER = 20
 COMPANY_CATEGORIES = ["Executive Activity", "Hiring Surge", "Tech Stack Shift", "Strategic/Financial",
                       "Product Launch"]
 EXEC_TIERS = ["Tier 1: Direct Exec Activity", "Tier 2: Dept & Tech Shift", "Tier 3: Macro Trigger"]
@@ -173,7 +175,7 @@ def _now() -> str:
 
 
 def _cache_key(t: dict) -> str:
-    return hashlib.sha256(json.dumps({"v": 5, **t}, sort_keys=True).encode()).hexdigest()[:24]
+    return hashlib.sha256(json.dumps({"v": 6, **t}, sort_keys=True).encode()).hexdigest()[:24]
 
 
 # ── Gemini research ──────────────────────────────────────────────────────────
@@ -276,12 +278,18 @@ def _channels(t: dict) -> list[dict]:
         bu = t["target_business_unit"]
         scope = f"{dept}" + (f" in the {bu} business unit" if bu else "")
         bu_q = f' "{bu}"' if bu else ""
-        # Two passes so Directors aren't crowded out by the C-suite.
-        chans.append({"key": "people", "label": "Leadership — C-suite & VP", "people": True,
-                      "what": f"The CURRENT C-suite, EVPs, SVPs and VPs at {t['company_name']} who own budget, "
-                              f"strategy or KPIs for {scope}, plus the BU head.",
-                      "searches": [f'{name}{bu_q} leadership team', f'site:linkedin.com/in {name}{bu_q} {dept} "Vice President" OR SVP OR Chief',
-                                   f'{name}{bu_q} {dept} appoints OR names "Vice President" OR "Chief"']})
+        # One pass per level so no level crowds out another: CXO → VP → Director.
+        chans.append({"key": "people", "label": "Leadership — CXO", "people": True,
+                      "what": f"The CURRENT C-suite at {t['company_name']} (CEO, President, CFO, COO, CSO/Chief Strategy, "
+                              "CMO, CRO/Chief Sales or Revenue, CDO/CIO/CTO, Chief Growth and other Chief officers)"
+                              + (f", and the CEO / President / GM / head of the {bu} business unit" if bu else "")
+                              + f". Prioritise those whose remit covers {dept}.",
+                      "searches": [f'{name} executive leadership team', f'{name}{bu_q} CEO OR President OR "General Manager"',
+                                   f'{name} "Chief Marketing Officer" OR "Chief Strategy Officer" OR "Chief Revenue Officer" OR "Chief Financial Officer"']})
+        chans.append({"key": "people_vp", "label": "Leadership — SVP & VP", "people": True,
+                      "what": f"The CURRENT EVPs, SVPs and VPs at {t['company_name']} who own budget, strategy or KPIs for {scope}.",
+                      "searches": [f'site:linkedin.com/in {name}{bu_q} {dept} "Vice President" OR SVP OR EVP',
+                                   f'{name}{bu_q} {dept} appoints OR names "Vice President"']})
         chans.append({"key": "people_dir", "label": "Leadership — Heads & Directors", "people": True,
                       "what": f"The CURRENT Heads of, Senior Directors and Directors at {t['company_name']} who run teams, "
                               f"programmes or budgets in {scope} (the people who evaluate and champion purchases).",
@@ -543,11 +551,16 @@ def _schema(t: dict) -> dict:
     if company:
         props["buying_center"] = {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["person_id", "buying_role", "seniority", "trigger_numbers", "rationale", "outreach_angle"],
+            "required": ["person_id", "buying_role", "seniority", "trigger_links", "rationale", "outreach_angle"],
             "properties": {"person_id": {"type": "string"},
                            "buying_role": {"type": "string", "enum": BUYING_ROLES},
                            "seniority": {"type": "string", "enum": SENIORITY},
-                           "trigger_numbers": {"type": "array", "items": {"type": "integer"}},
+                           "trigger_links": {"type": "array", "items": {
+                               "type": "object", "additionalProperties": False,
+                               "required": ["trigger_number", "involvement", "impact"],
+                               "properties": {"trigger_number": {"type": "integer"},
+                                              "involvement": {"type": "string", "enum": INVOLVEMENT},
+                                              "impact": {"type": "string", "enum": IMPACT}}}},
                            "rationale": {"type": "string"},
                            "outreach_angle": {"type": "string"}}}}
         req.append("buying_center")
@@ -597,13 +610,17 @@ category: Executive Activity | Hiring Surge | Tech Stack Shift | Strategic/Finan
 executives: return an empty list (the buying center below replaces it). Leave the trigger-level outreach_angle
 as an empty string.
 buying_center: map the account's buying center for {tech}{' in the ' + t['target_business_unit'] + ' business unit' if t['target_business_unit'] else ''}:
-up to {MAX_BUYING_CENTER} people chosen ONLY from the given people (person ids P1..), from C-suite down to
-Director level, who would sponsor, decide, evaluate or champion a purchase of {tech}. Include Heads and
-Directors, not only the C-suite. Never invent a person; skip anyone not relevant to {t['focus_department']}.
+up to {MAX_BUYING_CENTER} people chosen ONLY from the given people (person ids P1..), covering the COMPLETE chain
+from CXO through SVP/VP to Head/Director. Go trigger by trigger: for each trigger, include everyone at every
+level whose involvement or impact is real — the CXO who sponsors or approves it (company-wide triggers such as
+M&A, earnings priorities and strategy programmes almost always reach the CEO/CFO/CSO/CMO/CRO), the VP who owns
+it, and the Heads/Directors who execute it. Do not stop at one level; do not add people with no real link.
+Never invent a person; skip anyone not relevant to {t['focus_department']} or the triggers.
   buying_role: Economic Buyer (owns budget) | Decision Maker | Champion | Influencer | Evaluator.
-  seniority: C-Suite | SVP/VP | Head/Director, from their title.
-  trigger_numbers: the 1-based positions in YOUR triggers array that this person owns or is affected by
-  (at least one; best fit first).
+  seniority: C-Suite | SVP/VP | Head/Director, from their title (a BU CEO/President counts as C-Suite).
+  trigger_links: one entry per trigger this person is tied to (at least one, strongest first), with the
+  1-based trigger_number in YOUR triggers array, involvement (Owns | Sponsors/Approves | Executes |
+  Influenced) and impact on them (High | Medium | Low).
   rationale: 1 sentence on why they sit in the buying center for those triggers.
   outreach_angle: 1 sentence positioning {tech} for this person, tied to their first trigger.
 strategic_narrative: the account's main technical and business priorities right now."""
@@ -712,21 +729,27 @@ def assemble(t: dict, signals: list[dict], people: list[dict], ranked: dict, usa
             p = by_person.get(m.get("person_id"))
             if not p or p["id"] in seen:
                 continue  # unknown id = invented person
-            items = [by_num[n] for n in dict.fromkeys(m.get("trigger_numbers") or []) if n in by_num and by_num[n] in out]
+            links, items = {}, []
+            for lk in m.get("trigger_links") or []:
+                x = by_num.get(lk.get("trigger_number"))
+                if x is not None and x in out and x["rank"] not in links:
+                    links[x["rank"]] = {"involvement": lk["involvement"], "impact": lk["impact"]}
+                    items.append(x)
             if not items:
                 continue  # every executive shown is tied to a verified trigger
             seen.add(p["id"])
             buying_center.append({"executive_name": p["name"], "designation": p["title"], "linkedin_url": p["linkedin_url"],
                                   "buying_role": m["buying_role"], "seniority": m["seniority"],
-                                  "trigger_ranks": [x["rank"] for x in items], "rationale": m["rationale"],
-                                  "outreach_angle": m["outreach_angle"]})
+                                  "trigger_ranks": [x["rank"] for x in items], "trigger_links": links,
+                                  "rationale": m["rationale"], "outreach_angle": m["outreach_angle"]})
             for x in items:
                 x["recommended_executives"].append({"executive_name": p["name"], "designation": p["title"],
                                                     "linkedin_url": p["linkedin_url"], "ownership_rationale": m["rationale"],
                                                     "outreach_angle": m["outreach_angle"]})
             if len(buying_center) >= MAX_BUYING_CENTER:
                 break
-        buying_center.sort(key=lambda b: (SENIORITY.index(b["seniority"]), BUYING_ROLES.index(b["buying_role"])))
+        top_impact = lambda b: min(IMPACT.index(v["impact"]) for v in b["trigger_links"].values())
+        buying_center.sort(key=lambda b: (SENIORITY.index(b["seniority"]), top_impact(b), BUYING_ROLES.index(b["buying_role"])))
 
     score = ranked.get("overall_intent_score", "Low") if out else "Low"
     narrative = ranked.get("strategic_narrative", "") if out else \
