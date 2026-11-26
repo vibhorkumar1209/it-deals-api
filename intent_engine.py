@@ -621,7 +621,7 @@ Never invent a person; skip anyone not relevant to {t['focus_department']} or th
   trigger_links: one entry per trigger this person is tied to (at least one, strongest first), with the
   1-based trigger_number in YOUR triggers array, involvement (Owns | Sponsors/Approves | Executes |
   Influenced) and impact on them (High | Medium | Low).
-  rationale: 1 sentence on why they sit in the buying center for those triggers.
+  rationale: 1 short sentence (max 25 words) on why they sit in the buying center for those triggers.
   outreach_angle: 1 sentence positioning {tech} for this person, tied to their first trigger.
 strategic_narrative: the account's main technical and business priorities right now."""
     return common + f"""
@@ -655,11 +655,13 @@ def rank(t: dict, signals: list[dict], people: list[dict], usage: list[dict], ru
         "people": [{k: p[k] for k in ("id", "name", "title", "evidence")} for p in people],
     }, indent=1)
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], timeout=300.0)
-    resp = client.messages.create(
-        model=CLAUDE_MODEL, max_tokens=16000, system=_system(t),
+    # A full CXO→Director map is long: stream so a large output cap is allowed.
+    with client.messages.stream(
+        model=CLAUDE_MODEL, max_tokens=32000, system=_system(t),
         messages=[{"role": "user", "content": user}],
         output_config={"format": {"type": "json_schema", "schema": _schema(t)}},
-    )
+    ) as stream:
+        resp = stream.get_final_message()
     log_claude_usage(MODULE, f"engine|{t['company_name'][:20]}", resp, run_id=run_id)
     if resp.stop_reason == "refusal":
         raise RuntimeError("The ranking model declined this target")
@@ -916,19 +918,29 @@ yourself, open with a fresh angle. subject: only for email 1 (max 7 words, no cl
                                    "properties": {"lead_id": {"type": "string"}, "emails": {"type": "array", "items": {
                                        "type": "object", "additionalProperties": False, "required": ["subject", "body"],
                                        "properties": {"subject": {"type": "string"}, "body": {"type": "string"}}}}}}}}}
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], timeout=240.0)
+
+    def write(batch: list[dict]) -> dict:
+        # 5 executives per call keeps each answer well under the output cap; batches run in parallel.
+        try:
+            resp = client.messages.create(
+                model=CLAUDE_MODEL, max_tokens=16000, system=system,
+                messages=[{"role": "user", "content": json.dumps([{k: v for k, v in p.items() if k != "_slots"} for p in batch], indent=1)}],
+                output_config={"format": {"type": "json_schema", "schema": schema}})
+            log_claude_usage(MODULE, f"engine|emails|{t['company_name'][:20]}", resp, run_id=run_id)
+            if resp.stop_reason == "end_turn":
+                payload = json.loads(next(b.text for b in resp.content if b.type == "text"))
+                return {x["lead_id"]: x["emails"] for x in payload.get("leads", [])}
+            logger.warning(f"Intent Engine emails stopped early ({resp.stop_reason}) for {t['company_name']}")
+        except Exception as e:
+            logger.warning(f"Intent Engine email writing failed for {t['company_name']}: {e!r}")
+        return {}
+
     written = {}
-    try:
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], timeout=180.0)
-        resp = client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=16000, system=system,
-            messages=[{"role": "user", "content": json.dumps([{k: v for k, v in p.items() if k != "_slots"} for p in plans], indent=1)}],
-            output_config={"format": {"type": "json_schema", "schema": schema}})
-        log_claude_usage(MODULE, f"engine|emails|{t['company_name'][:20]}", resp, run_id=run_id)
-        if resp.stop_reason == "end_turn":
-            payload = json.loads(next(b.text for b in resp.content if b.type == "text"))
-            written = {x["lead_id"]: x["emails"] for x in payload.get("leads", [])}
-    except Exception as e:
-        logger.warning(f"Intent Engine email writing failed for {t['company_name']}: {e!r}")
+    batches = [plans[i:i + 5] for i in range(0, len(plans), 5)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for part in pool.map(write, batches):
+            written.update(part)
 
     for p, lead in zip(plans, leads):
         slots = p["_slots"]
