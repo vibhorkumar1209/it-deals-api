@@ -55,6 +55,9 @@ MODES = ("COMPANY_BASED", "EXEC_BASED")
 DEFAULT_INTENTS = ["Leadership Change", "Tech Stack Adoption", "Hiring Surge", "Cloud Migration",
                    "M&A", "Budget Expansion"]
 CUSTOM_INTENT = "Custom Intent"
+BUYING_ROLES = ["Economic Buyer", "Decision Maker", "Champion", "Influencer", "Evaluator"]
+SENIORITY = ["C-Suite", "SVP/VP", "Head/Director"]
+MAX_BUYING_CENTER = 15
 COMPANY_CATEGORIES = ["Executive Activity", "Hiring Surge", "Tech Stack Shift", "Strategic/Financial",
                       "Product Launch"]
 EXEC_TIERS = ["Tier 1: Direct Exec Activity", "Tier 2: Dept & Tech Shift", "Tier 3: Macro Trigger"]
@@ -117,6 +120,8 @@ def normalize_target(raw: dict) -> dict:
         "company_domain": norm_domain(raw.get("company_domain", "")),
         "company_linkedin_url": str(raw.get("company_linkedin_url", "")).strip(),
         "focus_department": ", ".join(_as_list(raw.get("focus_department"))),
+        # Optional: the target account's own business unit / department to concentrate on.
+        "target_business_unit": str(raw.get("target_business_unit", "")).strip(),
         "focus_technologies": _as_list(raw.get("focus_technologies")),
         "predefined_intents": _as_list(raw.get("predefined_intents")) or list(DEFAULT_INTENTS),
         "custom_intent_notes": str(raw.get("custom_intent_notes", "")).strip(),
@@ -168,7 +173,7 @@ def _now() -> str:
 
 
 def _cache_key(t: dict) -> str:
-    return hashlib.sha256(json.dumps({"v": 4, **t}, sort_keys=True).encode()).hexdigest()[:24]
+    return hashlib.sha256(json.dumps({"v": 5, **t}, sort_keys=True).encode()).hexdigest()[:24]
 
 
 # ── Gemini research ──────────────────────────────────────────────────────────
@@ -268,11 +273,21 @@ def _channels(t: dict) -> list[dict]:
                       f'{name} acquisition OR funding OR "cost reduction" OR "budget" 2026']},
     ]
     if t["intent_mode"] == "COMPANY_BASED":
-        chans.append({"key": "people", "label": "Leadership", "people": True,
-                      "what": f"The CURRENT executives at {t['company_name']} who own budget, architecture or KPIs "
-                              f"in {dept} (C-level, VP, Head of, Director) plus the relevant executive team.",
-                      "searches": [f'site:linkedin.com/in {name} {dept}',
-                                   f'{name} leadership team', f'{name} "Head of" OR "VP" OR "Director" {dept}']})
+        bu = t["target_business_unit"]
+        scope = f"{dept}" + (f" in the {bu} business unit" if bu else "")
+        bu_q = f' "{bu}"' if bu else ""
+        # Two passes so Directors aren't crowded out by the C-suite.
+        chans.append({"key": "people", "label": "Leadership — C-suite & VP", "people": True,
+                      "what": f"The CURRENT C-suite, EVPs, SVPs and VPs at {t['company_name']} who own budget, "
+                              f"strategy or KPIs for {scope}, plus the BU head.",
+                      "searches": [f'{name}{bu_q} leadership team', f'site:linkedin.com/in {name}{bu_q} {dept} "Vice President" OR SVP OR Chief',
+                                   f'{name}{bu_q} {dept} appoints OR names "Vice President" OR "Chief"']})
+        chans.append({"key": "people_dir", "label": "Leadership — Heads & Directors", "people": True,
+                      "what": f"The CURRENT Heads of, Senior Directors and Directors at {t['company_name']} who run teams, "
+                              f"programmes or budgets in {scope} (the people who evaluate and champion purchases).",
+                      "searches": [f'site:linkedin.com/in {name}{bu_q} "Head of" {dept}',
+                                   f'site:linkedin.com/in {name}{bu_q} Director {dept}',
+                                   f'{name}{bu_q} "Senior Director" OR "Director of" {dept}']})
     if t["focus_technologies"]:
         techs = " OR ".join(f'"{x}"' for x in t["focus_technologies"])
         chans.append({"key": "usage", "label": "Technology usage check", "usage": True,
@@ -322,8 +337,8 @@ def _gemini_prompt(t: dict, ch: dict, paraphrase: bool) -> str:
   "evidence": "{ev} showing they hold this role now",
   "source_url": "page URL"
 }}]}}'''
-        rules = ("Up to 12 people. Only people who hold the role NOW (not former). Never guess a LinkedIn URL; "
-                 "leave it empty unless the URL itself appeared in your search results.")
+        rules = ("Up to 15 people. Only people who hold the role NOW (not former) at this company. Never guess a "
+                 "LinkedIn URL; leave it empty unless the URL itself appeared in your search results.")
     else:
         shape = f'''{{"signals": [{{
   "title": "short label",
@@ -343,6 +358,7 @@ an out-of-scope subsidiary, or a different person who shares the executive's nam
 
 CHANNEL — {ch['label']}: {ch['what']}
 Focus department(s): {t['focus_department']}
+Target business unit / department: {t['target_business_unit'] or '-'}{' (prefer items about this unit; company-wide items still count when they affect it)' if t['target_business_unit'] else ''}
 Intent triggers of interest: {ch['intents']}
 Custom intent criteria: {t['custom_intent_notes'] or '-'}
 
@@ -520,11 +536,22 @@ def _schema(t: dict) -> dict:
             "outreach_angle": {"type": "string"},
         },
     }
-    return {"type": "object", "additionalProperties": False,
-            "required": ["overall_intent_score", "strategic_narrative", "triggers"],
-            "properties": {"overall_intent_score": {"type": "string", "enum": ["High", "Medium", "Low"]},
-                           "strategic_narrative": {"type": "string"},
-                           "triggers": {"type": "array", "items": trigger}}}
+    props = {"overall_intent_score": {"type": "string", "enum": ["High", "Medium", "Low"]},
+             "strategic_narrative": {"type": "string"},
+             "triggers": {"type": "array", "items": trigger}}
+    req = ["overall_intent_score", "strategic_narrative", "triggers"]
+    if company:
+        props["buying_center"] = {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["person_id", "buying_role", "seniority", "trigger_numbers", "rationale", "outreach_angle"],
+            "properties": {"person_id": {"type": "string"},
+                           "buying_role": {"type": "string", "enum": BUYING_ROLES},
+                           "seniority": {"type": "string", "enum": SENIORITY},
+                           "trigger_numbers": {"type": "array", "items": {"type": "integer"}},
+                           "rationale": {"type": "string"},
+                           "outreach_angle": {"type": "string"}}}}
+        req.append("buying_center")
+    return {"type": "object", "additionalProperties": False, "required": req, "properties": props}
 
 
 def _offer(t: dict) -> str:
@@ -567,10 +594,18 @@ strategic_narrative: exactly 2 sentences."""
 
 GATE 3 — COMPANY_BASED: rank by urgency, budget impact and fit with {tech} and the custom criteria.
 category: Executive Activity | Hiring Surge | Tech Stack Shift | Strategic/Financial | Product Launch.
-executives: 1–3 per trigger, chosen ONLY from the given people (person ids P1..) who own budget,
-architecture or KPIs for that trigger. If no listed person fits, return an empty list — never invent one.
-ownership_rationale: 1 sentence on why that person owns it. outreach_angle per executive: 1 sentence
-positioning {tech}, tied to the trigger. Leave the trigger-level outreach_angle as an empty string.
+executives: return an empty list (the buying center below replaces it). Leave the trigger-level outreach_angle
+as an empty string.
+buying_center: map the account's buying center for {tech}{' in the ' + t['target_business_unit'] + ' business unit' if t['target_business_unit'] else ''}:
+up to {MAX_BUYING_CENTER} people chosen ONLY from the given people (person ids P1..), from C-suite down to
+Director level, who would sponsor, decide, evaluate or champion a purchase of {tech}. Include Heads and
+Directors, not only the C-suite. Never invent a person; skip anyone not relevant to {t['focus_department']}.
+  buying_role: Economic Buyer (owns budget) | Decision Maker | Champion | Influencer | Evaluator.
+  seniority: C-Suite | SVP/VP | Head/Director, from their title.
+  trigger_numbers: the 1-based positions in YOUR triggers array that this person owns or is affected by
+  (at least one; best fit first).
+  rationale: 1 sentence on why they sit in the buying center for those triggers.
+  outreach_angle: 1 sentence positioning {tech} for this person, tied to their first trigger.
 strategic_narrative: the account's main technical and business priorities right now."""
     return common + f"""
 
@@ -591,7 +626,7 @@ def rank(t: dict, signals: list[dict], people: list[dict], usage: list[dict], ru
 
     user = json.dumps({
         "today": date.today().isoformat(),
-        "inputs": {k: t[k] for k in ("intent_mode", "company_name", "company_domain", "focus_department",
+        "inputs": {k: t[k] for k in ("intent_mode", "company_name", "company_domain", "focus_department", "target_business_unit",
                                      "focus_technologies", "predefined_intents", "custom_intent_notes",
                                      "executive_name", "executive_designation", "seller_company",
                                      "seller_offerings")},
@@ -604,7 +639,7 @@ def rank(t: dict, signals: list[dict], people: list[dict], usage: list[dict], ru
     }, indent=1)
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], timeout=300.0)
     resp = client.messages.create(
-        model=CLAUDE_MODEL, max_tokens=12000, system=_system(t),
+        model=CLAUDE_MODEL, max_tokens=16000, system=_system(t),
         messages=[{"role": "user", "content": user}],
         output_config={"format": {"type": "json_schema", "schema": _schema(t)}},
     )
@@ -631,8 +666,8 @@ def assemble(t: dict, signals: list[dict], people: list[dict], ranked: dict, usa
     by_person = {p["id"]: p for p in people}
     last = t["executive_name"].split()[-1].lower() if t["executive_name"] else ""
 
-    out = []
-    for tr in ranked.get("triggers", []):
+    out, by_num = [], {}
+    for num, tr in enumerate(ranked.get("triggers", []), 1):
         cited = [by_sig[i] for i in dict.fromkeys(tr.get("signal_ids", [])) if i in by_sig]
         if not cited:
             continue  # no verified source behind it
@@ -652,16 +687,9 @@ def assemble(t: dict, signals: list[dict], people: list[dict], ranked: dict, usa
         }
         if any(s.get("user_provided") for s in cited):
             item["from_social_activity"] = True
+        by_num[num] = item
         if company:
-            execs, seen = [], set()
-            for e in tr.get("executives", []):
-                p = by_person.get(e.get("person_id"))
-                if not p or p["id"] in seen:
-                    continue  # unknown id = invented person
-                seen.add(p["id"])
-                execs.append({"executive_name": p["name"], "designation": p["title"], "linkedin_url": p["linkedin_url"],
-                              "ownership_rationale": e["ownership_rationale"], "outreach_angle": e["outreach_angle"]})
-            item["recommended_executives"] = execs[:3]
+            item["recommended_executives"] = []  # filled from the buying center below
         else:
             # Tier 1 needs a cited source that actually names the executive.
             if tr["category"] == EXEC_TIERS[0] and not any(
@@ -677,14 +705,39 @@ def assemble(t: dict, signals: list[dict], people: list[dict], ranked: dict, usa
     for i, x in enumerate(out, 1):
         x["rank"] = i
 
+    buying_center = []
+    if company:
+        seen = set()
+        for m in ranked.get("buying_center", []) or []:
+            p = by_person.get(m.get("person_id"))
+            if not p or p["id"] in seen:
+                continue  # unknown id = invented person
+            items = [by_num[n] for n in dict.fromkeys(m.get("trigger_numbers") or []) if n in by_num and by_num[n] in out]
+            if not items:
+                continue  # every executive shown is tied to a verified trigger
+            seen.add(p["id"])
+            buying_center.append({"executive_name": p["name"], "designation": p["title"], "linkedin_url": p["linkedin_url"],
+                                  "buying_role": m["buying_role"], "seniority": m["seniority"],
+                                  "trigger_ranks": [x["rank"] for x in items], "rationale": m["rationale"],
+                                  "outreach_angle": m["outreach_angle"]})
+            for x in items:
+                x["recommended_executives"].append({"executive_name": p["name"], "designation": p["title"],
+                                                    "linkedin_url": p["linkedin_url"], "ownership_rationale": m["rationale"],
+                                                    "outreach_angle": m["outreach_angle"]})
+            if len(buying_center) >= MAX_BUYING_CENTER:
+                break
+        buying_center.sort(key=lambda b: (SENIORITY.index(b["seniority"]), BUYING_ROLES.index(b["buying_role"])))
+
     score = ranked.get("overall_intent_score", "Low") if out else "Low"
     narrative = ranked.get("strategic_narrative", "") if out else \
         "No verified, recent signals matched the focus department, technologies or intent criteria."
     if company:
         result = {"intent_mode": "COMPANY_BASED",
                   "account_summary": {"company_name": t["company_name"], "company_domain": t["company_domain"],
-                                      "focus_department": t["focus_department"], "overall_intent_score": score,
+                                      "focus_department": t["focus_department"],
+                                      "target_business_unit": t["target_business_unit"], "overall_intent_score": score,
                                       "strategic_narrative": narrative},
+                  "buying_center": buying_center,
                   "top_5_triggers": out}
         summary = result["account_summary"]
     else:
@@ -733,17 +786,15 @@ def campaign_leads(t: dict, result: dict) -> list[dict]:
     the engine never guesses addresses; the campaign app fills or matches it."""
     if result["intent_mode"] == "COMPANY_BASED":
         score = result["account_summary"]["overall_intent_score"]
-        leads, seen = [], set()
-        for item in result["top_5_triggers"]:
-            for e in item["recommended_executives"]:
-                if e["executive_name"].lower() in seen:
-                    continue
-                seen.add(e["executive_name"].lower())
-                first, last = _split_name(e["executive_name"])
-                leads.append({"email": "", "first_name": first, "last_name": last, "company": t["company_name"],
-                              "title": e["designation"],
-                              "linkedin_url": "" if e["linkedin_url"] == "N/A" else e["linkedin_url"],
-                              "data": _lead_data(item, score, e["outreach_angle"])})
+        by_rank = {x["rank"]: x for x in result["top_5_triggers"]}
+        leads = []
+        for b in result.get("buying_center", []):
+            first, last = _split_name(b["executive_name"])
+            data = _lead_data(by_rank[b["trigger_ranks"][0]], score, b["outreach_angle"])
+            data.update({"buying_role": b["buying_role"], "seniority": b["seniority"]})
+            leads.append({"email": "", "first_name": first, "last_name": last, "company": t["company_name"],
+                          "title": b["designation"], "linkedin_url": "" if b["linkedin_url"] == "N/A" else b["linkedin_url"],
+                          "data": data})
         return leads
     items = result["top_5_mapped_signals"]
     if not items:

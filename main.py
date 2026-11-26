@@ -1214,6 +1214,7 @@ class IntentEngineTarget(BaseModel):
     focus_technologies: str | list[str] = Field(default_factory=list)
     predefined_intents: str | list[str] = Field(default_factory=list)
     custom_intent_notes: str = Field(default="")
+    target_business_unit: str = Field(default="")
     executive_name: str = Field(default="")
     executive_designation: str = Field(default="")
     executive_linkedin_url: str = Field(default="")
